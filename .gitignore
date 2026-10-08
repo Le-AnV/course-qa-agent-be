@@ -1,0 +1,23 @@
+# Claude Code — personal config, one skills set per machine
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Env — NEVER commit
+.env
+.env.*
+!.env.example
+
+# Editor / OS / local tool state
+.vscode/
+.idea/
+.impeccable
+.DS_Store
+Thumbs.db
