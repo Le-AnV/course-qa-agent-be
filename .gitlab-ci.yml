@@ -1,0 +1,44 @@
+# CI for course-qa-agent-be (AI-124).
+# Runs on the project self-hosted runner. No CD, no image push, no secrets.
+# The test suite is DB-free (FastAPI TestClient only), so no services needed.
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+stages:
+  - lint
+  - test
+
+lint:
+  stage: lint
+  image: python:3.12-slim
+  tags:
+    - course-qa-be
+  cache:
+    key:
+      files:
+        - uv.lock
+    paths:
+      - .venv/
+  before_script:
+    - uv sync --frozen
+  script:
+    - uv run ruff check .
+
+test:
+  stage: test
+  image: python:3.12-slim
+  tags:
+    - course-qa-be
+  cache:
+    key:
+      files:
+        - uv.lock
+    paths:
+      - .venv/
+  before_script:
+    - uv sync --frozen
+  script:
+    - uv run pytest -q
