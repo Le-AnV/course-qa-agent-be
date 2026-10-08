@@ -28,7 +28,9 @@ Split from the `course-qa-agent` monorepo (project skeleton AI-112).
 ├── tests/               # pytest suite (test_health.py)
 ├── pyproject.toml       # deps + ruff + pytest config
 ├── uv.lock              # locked dependencies — commit on every dep change
-└── docker-compose.yml   # Postgres + Qdrant + backend (added in docker commit)
+├── Dockerfile           # multi-stage: uv builder -> python:3.12-slim runtime
+├── .dockerignore
+└── docker-compose.yml   # Postgres + Qdrant + backend
 ```
 
 ## Local run
@@ -44,6 +46,33 @@ Health check:
 curl http://localhost:8000/health
 # {"status":"ok","service":"course-qa-agent-backend"}
 ```
+
+## Docker (whole stack)
+
+One command — no manual uvicorn:
+
+```bash
+docker compose up -d --build
+```
+
+| Service | Host port | Container port | Notes |
+|---|---|---|---|
+| backend (uvicorn) | 8000 | 8000 | `GET /health`, container `course-qa-backend` |
+| PostgreSQL 16 | 5432 | 5432 | user `qa` / password `qa` / db `course_qa`, container `course-qa-postgres` |
+| Qdrant REST | 6333 | 6333 | `GET /healthz` -> 200, container `course-qa-qdrant` |
+| Qdrant gRPC | 6334 | 6334 | — |
+
+**Port rule — local first, Docker second:** both modes use the **same** ports,
+so run **either** local processes **or** containers, never both at once.
+
+| Mode | Command | Backend port |
+|---|---|---|
+| Local (develop) | `uv run uvicorn app.main:app --reload --port 8000` | 8000 |
+| Docker (whole stack) | `docker compose up -d --build` | 8000 |
+
+Volumes keep the monorepo names (`course-qa-agent_postgres_data`,
+`course-qa-agent_qdrant_storage`) so existing data is preserved.
+Stop with `docker compose down` (add `-v` only to wipe data).
 
 ## Tests
 

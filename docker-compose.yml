@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: course-qa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: qa
+      POSTGRES_PASSWORD: qa
+      POSTGRES_DB: course_qa
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qa -d course_qa"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: course-qa-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+  backend:
+    build: .
+    container_name: course-qa-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_ENV: local
+      DATABASE_URL: postgresql+psycopg://qa:qa@postgres:5432/course_qa
+      QDRANT_URL: http://qdrant:6333
+      CORS_ORIGINS: '["http://localhost:3000"]'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+# Volume names pinned to the monorepo ones so existing data is kept
+# (course-qa-agent_postgres_data / course-qa-agent_qdrant_storage).
+volumes:
+  postgres_data:
+    name: course-qa-agent_postgres_data
+  qdrant_storage:
+    name: course-qa-agent_qdrant_storage

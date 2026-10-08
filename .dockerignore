@@ -1,0 +1,26 @@
+# VCS / local tooling
+.git
+.claude
+.vscode
+.idea
+.impeccable
+
+# Python caches and virtualenvs
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+*.egg-info
+
+# Env — never bake secrets into the image
+.env
+.env.*
+!.env.example
+
+# Not needed in the build context
+tests
+docs
+README.md
+docker-compose.yml
