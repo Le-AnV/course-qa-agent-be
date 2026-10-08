@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings
+from app.config.config import settings
 
 app = FastAPI(title="Course QA Agent API", version="0.1.0")
 
