@@ -27,8 +27,11 @@
 ## 2. Pipeline layout
 
 Runner: project self-hosted runner #757 (`course-qa-BE`, shell executor,
-Windows) — no tags pinned initially, so the job is picked up untagged. (If jobs
-stay pending, pin `tags` to match the runner afterwards, same as FE AI-123.)
+Windows) — jobs pin `tags: [course-qa-be]` because the runner has
+`run_untagged: false` (found during implementation, same lesson as FE AI-123).
+`uv` must be on the machine PATH so the `LocalSystem` service account can call
+it. `image: python:3.12-slim` is declared for documentation but ignored by the
+shell executor (jobs use the machine's Python 3.12).
 
 | Stage | Job | Image | Command | Gate |
 |---|---|---|---|---|
@@ -78,7 +81,9 @@ Logs of the green pipeline are the acceptance evidence for AI-124.
 
 ## 6. Open items
 
-1. Pin runner `tags` if jobs stay pending on the self-hosted runner.
+1. ~~Pin runner `tags` if jobs stay pending on the self-hosted runner.~~ Done
+   during implementation: `tags: [course-qa-be]` pinned (runner #757 has
+   `run_untagged: false`).
 2. Add a `docker build` check if a Docker-capable runner becomes available.
 3. When DB-backed tests arrive: add postgres/qdrant services to the `test` job
    (or point tests at docker compose) — current suite needs neither.
