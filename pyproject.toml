@@ -1,0 +1,26 @@
+[project]
+name = "course-qa-agent-backend"
+version = "0.1.0"
+description = "Course QA Agent backend — FastAPI modular monolith (AI-112 skeleton)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.142.2",
+  "uvicorn[standard]>=0.34",
+  "pydantic-settings>=2.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "httpx>=0.28",
+  "ruff>=0.8",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
