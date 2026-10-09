@@ -7,13 +7,17 @@ generate semantic descriptions, and seamlessly integrate them back into Markdown
 import base64
 import re
 from io import BytesIO
-from typing import Dict
+from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from PIL import Image
 
-from app.generation.prompt_manager import PromptManager
+try:
+    from app.generation.prompt_manager import PromptManager
+except ImportError:  # pragma: no cover
+    PromptManager = Any  # type: ignore[assignment, misc]
+
 
 def encode_image(img: Image.Image) -> str:
     """Encode a PIL Image object to a base64 string.
@@ -68,7 +72,7 @@ def generate_image_description(
     return str(response.content).strip()
 
 
-def enrich_markdown_with_vlm(markdown: str, image_descriptions: Dict[str, str]) -> str:
+def enrich_markdown_with_vlm(markdown: str, image_descriptions: dict[str, str]) -> str:
     """Inject VLM-generated descriptions underneath corresponding image tags in Markdown.
 
     This function searches for Markdown image syntax `![alt](image_name)` and appends
