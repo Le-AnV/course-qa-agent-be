@@ -1,0 +1,116 @@
+"""Central settings — thresholds and connection strings live here, never hardcoded."""
+
+from functools import lru_cache
+from pathlib import Path
+from typing import ClassVar
+
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Centralized configuration management for the Course QA application.
+
+    Uses pydantic-settings to validate environment variables, parse default values,
+    and provide typed application configuration across all modules.
+
+    Attributes:
+        app_env: Environment mode ('local', 'development', 'production').
+        cors_origins: List of allowed CORS origins.
+        database_url: PostgreSQL connection string.
+        qdrant_url: Base URL of the Qdrant vector database server.
+        qdrant_api_key: Optional API key for authenticating with Qdrant.
+        collection_name: Name of the Qdrant collection storing document embeddings.
+        vector_size: Dimension size of vector embeddings (constant).
+        retrieval_threshold: Similarity score threshold for RAG retrieval.
+        content_gap_similarity_threshold: Threshold for clustering content gap queries.
+        content_gap_search_count: Minimum searches needed to flag a content gap.
+        content_gap_student_percentage: Percentage of students querying before gap is flagged.
+        content_gap_window_days: Time window in days for content gap analysis.
+        embedding_model: Model identifier for dense embeddings.
+        embedding_device: Hardware accelerator device for embeddings ('cpu', 'cuda', or None for auto).
+        llm_model: Model identifier for Google Gemini generative AI.
+        llm_temperature: Temperature setting for LLM responses.
+        vlm_model: Model identifier for Vision Language Model.
+        vlm_temperature: Temperature setting for VLM responses.
+        google_api_key: API key for Google Gemini model access.
+        tavily_api_key: API key for Tavily search provider.
+        chunk_size: Maximum character count per document chunk.
+        chunk_overlap: Overlap character count between consecutive chunks.
+        separators: List of string separators used for recursive character splitting.
+        headers_to_split_on: List of tuples specifying markdown headers to split on.
+        retriever_top_k: Default number of relevant chunks retrieved per query.
+        prompt_file: File path pointing to prompt.yaml.
+        log_level: Logging verbosity level (DEBUG, INFO, WARNING, ERROR).
+    """
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    app_env: str = "local"
+    cors_origins: list[str] = ["http://localhost:3000"]
+    database_url: str = "postgresql+psycopg://qa:qa@localhost:5432/course_qa"
+
+    # Vector store configuration
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: str | None = Field(default=None, validation_alias="QDRANT_API_KEY")
+    collection_name: str = Field(default="assistant-documents-agent", validation_alias="COLLECTION_NAME")
+    vector_size: ClassVar[int] = 1536
+    retrieval_threshold: ClassVar[float] = 0.8
+    content_gap_similarity_threshold: ClassVar[float] = 0.85
+    content_gap_search_count: ClassVar[int] = 3
+    content_gap_student_percentage: ClassVar[float] = 0.10
+    content_gap_window_days: ClassVar[int] = 30
+
+    # Model configuration
+    embedding_model: str = Field(default="gemini-embedding-2", validation_alias="EMBEDDING_MODEL")
+    embedding_device: str | None = Field(default=None, validation_alias="EMBEDDING_DEVICE")
+
+    llm_model: str = Field(default="models/gemini-3.8-flash", validation_alias="LLM_MODEL")
+    llm_temperature: float = Field(default=1.0, validation_alias="LLM_TEMPERATURE")
+
+    vlm_model: str = Field(default="models/gemini-2.5-flash", validation_alias="VLM_MODEL")
+    vlm_temperature: float = Field(default=1.0, validation_alias="VLM_TEMPERATURE")
+
+    google_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    )
+    tavily_api_key: str | None = Field(default=None, validation_alias="TAVILY_API_KEY")
+
+    # Chunking and retrieval configuration
+    chunk_size: int = Field(default=800, validation_alias="CHUNK_SIZE")
+    chunk_overlap: int = Field(default=120, validation_alias="CHUNK_OVERLAP")
+    separators: list[str] = Field(
+        default=["\n\n", "\n", ". ", "? ", "! "],
+        validation_alias="SEPARATORS",
+    )
+    headers_to_split_on: list[tuple[str, str]] = Field(
+        default=[
+            ("#", "Header 1"),
+            ("##", "Header 2"),
+            ("###", "Header 3"),
+            ("####", "Header 4"),
+        ],
+        validation_alias="HEADERS_TO_SPLIT_ON",
+    )
+    retriever_top_k: int = Field(default=3, validation_alias="RETRIEVER_TOP_K")
+
+    # Prompt configuration
+    prompt_file: Path = Field(
+        default=Path(__file__).resolve().parent / "prompt.yaml",
+        validation_alias="PROMPT_FILE",
+    )
+    log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Retrieve and cache the singleton Settings instance.
+
+    Returns:
+        Settings: Validated runtime configuration settings.
+    """
+    return Settings()
+
+
+settings = get_settings()
