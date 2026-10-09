@@ -1,11 +1,34 @@
 """Course QA Agent backend — FastAPI modular monolith entrypoint."""
 
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import settings
+from app.core.database import create_all_tables, init_engine
+from app.routers.admin.router import router as admin_router
+from app.routers.auth.router import router as auth_router
 
-app = FastAPI(title="Course QA Agent API", version="0.1.0")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # DB tables for E1/AI-31; Postgres/Qdrant checks stay in later epics.
+    try:
+        init_engine(settings.database_url)
+        create_all_tables()
+    except (OSError, SQLAlchemyError) as exc:
+        # Never crash boot when the DB is unreachable (e.g. /health in CI).
+        logger.warning("Database unavailable at startup; skipping table creation: %s", exc)
+    yield
+
+
+app = FastAPI(title="Course QA Agent API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,13 +38,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Per-Epic routers land here as sprints progress, e.g.:
-# from app.routers import auth, documents, chat, tickets, admin
-# app.include_router(auth.router)
-# app.include_router(documents.router)
-# app.include_router(chat.router)
-# app.include_router(tickets.router)
-# app.include_router(admin.router)
+app.include_router(auth_router)
+app.include_router(admin_router)
 
 
 @app.get("/health")

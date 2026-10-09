@@ -92,6 +92,16 @@ Each developer uses their own `GEMINI_API_KEY` (free-tier rate limits).
 | `QDRANT_URL` | `http://localhost:6333` |
 | `APP_ENV` | `local` |
 | `CORS_ORIGINS` | `["http://localhost:3000"]` |
+| `JWT_SECRET` | `dev-only-secret-change-me` (change in prod) |
+| `JWT_EXPIRE_MINUTES` | `720` |
+| `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD` | first admin on fresh DB |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_SENDER` | Gmail sender config (AI-105, AC-08) |
+| `SMTP_APP_PASSWORD` | Gmail **app** password — never a personal password |
+| `SMTP_RATE_PER_MINUTE` | `20` (queue rate limit, AC-09) |
+| `EMAIL_DRY_RUN` | `true` (no real SMTP until configured) |
+
+Admin onboarding flow (AI-31): login → courses → classes → accounts/import.
+API design: [`docs/api-design-admin.md`](docs/api-design-admin.md).
 
 ## Docs
 
