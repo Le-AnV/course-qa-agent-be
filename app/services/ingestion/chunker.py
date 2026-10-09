@@ -1,19 +1,17 @@
 """Document splitter and chunker module."""
-from typing import List, Optional, Tuple
+import re
 
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
 from app.config.config import get_settings
 
 
-import re
-
 def markdown_chunker(
     markdown: str,
-    metadata: Optional[dict] = None,
-    headers_to_split_on: Optional[List[Tuple[str, str]]] = None
-) -> List[Document]: 
+    metadata: dict | None = None,
+    headers_to_split_on: list[tuple[str, str]] | None = None
+) -> list[Document]: 
     """Split markdown text into chunks based on headers and add page numbers.
     
     Args:
@@ -65,12 +63,12 @@ def markdown_chunker(
 
 
 def recursive_chunker(
-    documents: List[Document],
-    chunk_size: Optional[int] = None,
-    chunk_overlap: Optional[int] = None,
-    separators: Optional[List[str]] = None,
-    metadata: Optional[dict] = None
-) -> List[Document]:
+    documents: list[Document],
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
+    separators: list[str] | None = None,
+    metadata: dict | None = None
+) -> list[Document]:
     """Split documents into smaller chunks using recursive character splitting.
     
     Args:

@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     content_gap_window_days: ClassVar[int] = 30
 
     # Model configuration
-    embedding_model: str = Field(default="models/gemini-embedding-2", validation_alias="EMBEDDING_MODEL")
+    embedding_model: str = Field(default="gemini-embedding-2", validation_alias="EMBEDDING_MODEL")
     embedding_device: str | None = Field(default=None, validation_alias="EMBEDDING_DEVICE")
 
     llm_model: str = Field(default="models/gemini-3.8-flash", validation_alias="LLM_MODEL")
@@ -111,3 +111,6 @@ def get_settings() -> Settings:
         Settings: Validated runtime configuration settings.
     """
     return Settings()
+
+
+settings = get_settings()

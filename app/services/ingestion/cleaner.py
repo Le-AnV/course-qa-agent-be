@@ -3,10 +3,9 @@
 import os
 import re
 import unicodedata
-from typing import Dict, List, Optional, Tuple
 
 
-def protect_special_blocks(text: str) -> Tuple[str, Dict[str, str]]:
+def protect_special_blocks(text: str) -> tuple[str, dict[str, str]]:
     """Extract and protect code blocks, math blocks, and markdown tables.
 
     This prevents text-based regular expressions from accidentally altering
@@ -41,7 +40,7 @@ def protect_special_blocks(text: str) -> Tuple[str, Dict[str, str]]:
     return text, placeholders
 
 
-def restore_special_blocks(text: str, placeholders: Dict[str, str]) -> str:
+def restore_special_blocks(text: str, placeholders: dict[str, str]) -> str:
     """Restore protected blocks into their original placeholders.
 
     Args:
@@ -56,7 +55,7 @@ def restore_special_blocks(text: str, placeholders: Dict[str, str]) -> str:
     return text
 
 
-def clean_page_artifacts(text: str, custom_watermarks: Optional[List[str]] = None) -> str:
+def clean_page_artifacts(text: str, custom_watermarks: list[str] | None = None) -> str:
     """Remove page numbers, page break tags, and watermarks.
 
     Args:
@@ -200,7 +199,7 @@ def clean_latex_math(text: str) -> str:
     return text
 
 
-def clean_image_tags(text: str, base_image_dir: Optional[str] = None) -> str:
+def clean_image_tags(text: str, base_image_dir: str | None = None) -> str:
     """Remove orphaned image tags and their captions.
 
     Args:
@@ -233,7 +232,7 @@ def clean_image_tags(text: str, base_image_dir: Optional[str] = None) -> str:
     return text
 
 
-def clean_marker_markdown(markdown_text: str, watermarks: Optional[List[str]] = None) -> str:
+def clean_marker_markdown(markdown_text: str, watermarks: list[str] | None = None) -> str:
     """Execute the full text cleaning pipeline on parsed markdown.
 
     Args:
