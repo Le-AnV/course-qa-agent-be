@@ -3,7 +3,7 @@ name = "course-qa-agent-backend"
 version = "0.1.0"
 description = "Course QA Agent backend — FastAPI modular monolith (AI-112 skeleton)"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi==0.142.2",
   "uvicorn[standard]>=0.34",
