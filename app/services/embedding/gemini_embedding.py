@@ -32,6 +32,7 @@ class GeminiEmbedding(Embeddings):
         self._embeddings = GoogleGenerativeAIEmbeddings(
             model=model,
             google_api_key=api_key, # type: ignore
+            output_dimensionality=settings.vector_size,
         )
 
     @retry(
