@@ -18,8 +18,9 @@ app.add_middleware(
 )
 
 # Per-Epic routers land here as sprints progress, e.g.:
-# from app.routers import auth, documents, chat, tickets, admin
-# app.include_router(auth.router)
+from app.routers.auth.router import router as auth_router
+app.include_router(auth_router)
+# from app.routers import documents, chat, tickets, admin
 # app.include_router(documents.router)
 # app.include_router(chat.router)
 # app.include_router(tickets.router)
