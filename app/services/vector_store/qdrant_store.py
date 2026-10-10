@@ -112,3 +112,14 @@ class QdrantStore:
         """
         k = k or settings.retriever_top_k
         return self.vector_store.similarity_search(query, k=k)
+
+    def as_retriever(self, **kwargs):
+        """Get the underlying Qdrant vector store as a LangChain retriever.
+        
+        Args:
+            **kwargs: Additional arguments to pass to the retriever (e.g., search_kwargs).
+            
+        Returns:
+            VectorStoreRetriever: The LangChain retriever instance.
+        """
+        return self.vector_store.as_retriever(**kwargs)
