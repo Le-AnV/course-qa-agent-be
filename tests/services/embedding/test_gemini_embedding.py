@@ -1,11 +1,11 @@
 """Tests for Gemini embedding wrapper."""
 
-import pytest
 from unittest.mock import patch
+
+import pytest
 
 from app.config.config import settings
 from app.services.embedding.gemini_embedding import GeminiEmbedding
-
 
 # ---------------------------------------------------------
 # REAL API INTEGRATION TESTS

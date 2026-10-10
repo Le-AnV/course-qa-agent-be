@@ -1,7 +1,8 @@
 """Tests for Qdrant store wrapper."""
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 from langchain_core.documents import Document
 
 from app.services.vector_store.qdrant_store import QdrantStore
@@ -16,7 +17,7 @@ def test_qdrant_store_initialization(mock_qdrant_client, mock_qdrant_vector_stor
 
     mock_embeddings = MagicMock()
     
-    store = QdrantStore(
+    QdrantStore(
         embeddings=mock_embeddings,
         url="http://test:6333",
         collection_name="test_col",
