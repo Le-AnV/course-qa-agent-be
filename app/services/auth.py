@@ -1,5 +1,6 @@
+from datetime import UTC, datetime, timedelta
+
 import jwt
-from datetime import datetime, timedelta
 from fastapi import HTTPException, status
 
 SECRET_KEY = "tam-thoi-dung-khoa-nay-cho-dev"
@@ -24,7 +25,7 @@ def verify_credentials(identifier: str, password: str) -> dict:
 
 def create_access_token(data: dict) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now(UTC) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)

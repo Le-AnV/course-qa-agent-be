@@ -1,6 +1,7 @@
 from fastapi import APIRouter
+
 from app.schemas.auth import LoginRequest, LoginResponse
-from app.services.auth import verify_credentials, create_access_token
+from app.services.auth import create_access_token, verify_credentials
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
