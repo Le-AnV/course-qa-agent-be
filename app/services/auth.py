@@ -10,18 +10,22 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 MOCK_USERS = {
     "student@academic.edu.vn": {"password": "Student@123", "role": "student"},
     "admin@academic.edu.vn": {"password": "Admin@123", "role": "admin"},
-    "teacher": {"password": "Admin@123", "role": "trainer"}
+    "teacher@academic.edu.vn": {"password": "Teacher@123", "role": "trainer"}
 }
 
 def verify_credentials(identifier: str, password: str) -> dict:
-    user = MOCK_USERS.get(identifier)
+    normalized = identifier.strip().lower()
+    if not normalized.endswith("@academic.edu.vn"):
+        normalized += "@academic.edu.vn"
+        
+    user = MOCK_USERS.get(normalized)
     
     if not user or user["password"] != password:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password."
         )
-    return {"identifier": identifier, "role": user["role"]}
+    return {"identifier": normalized, "role": user["role"]}
 
 def create_access_token(data: dict) -> str:
     to_encode = data.copy()

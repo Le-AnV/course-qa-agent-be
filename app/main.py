@@ -21,6 +21,7 @@ app.add_middleware(
 from app.routers.auth.router import router as auth_router
 
 app.include_router(auth_router)
+
 # from app.routers import documents, chat, tickets, admin
 # app.include_router(documents.router)
 # app.include_router(chat.router)
