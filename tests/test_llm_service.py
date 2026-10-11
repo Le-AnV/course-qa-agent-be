@@ -1,0 +1,109 @@
+"""Tests for Gemini API-key and model availability checks."""
+
+import pytest
+from google.genai import errors
+
+from app.config import Settings
+from app.services.llm_service import (
+    LlmConfigurationError,
+    LlmConnectionError,
+    check_llm_connection,
+)
+
+
+class FakeModel:
+    """Represent the model name returned by the Gemini SDK."""
+
+    def __init__(self, name):
+        """Create a minimal SDK model record for connection-check tests."""
+        self.name = name
+
+
+class FakeGeminiClient:
+    """Expose a minimal context-managed Gemini client for unit tests."""
+
+    def __init__(self, model_names):
+        """Create a fake Gemini client exposing the requested model names."""
+        self.models = self
+        self.model_names = model_names
+        self.closed = False
+
+    def __enter__(self):
+        """Return this fake client when the service opens its context manager."""
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        """Record that the fake client was closed after the check."""
+        self.closed = True
+        return False
+
+    def list(self):
+        """Return fake SDK model records for the configured model names."""
+        return [FakeModel(name) for name in self.model_names]
+
+
+def test_llm_connection_lists_models_without_generating_content(monkeypatch):
+    """Verify the configured model is accessible without a generation call."""
+    clients = []
+
+    def create_client(*, api_key):
+        """Return a fake client after checking the SDK receives the key value."""
+        assert api_key == "gemini-secret"
+        client = FakeGeminiClient(["models/gemini-3.8-flash"])
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("app.services.llm_service.genai.Client", create_client)
+    config = Settings(_env_file=None, google_api_key="gemini-secret")
+
+    result = check_llm_connection(config)
+
+    assert result.success is True
+    assert result.message == "Gemini connection successful"
+    assert clients[0].closed is True
+
+
+def test_llm_connection_rejects_missing_api_key():
+    """Reject a Gemini connection check when no member key is configured."""
+    config = Settings(_env_file=None)
+
+    with pytest.raises(LlmConfigurationError):
+        check_llm_connection(config)
+
+
+def test_llm_connection_rejects_unavailable_configured_model(monkeypatch):
+    """Reject a key that cannot access the model fixed in application config."""
+    monkeypatch.setattr(
+        "app.services.llm_service.genai.Client",
+        lambda **kwargs: FakeGeminiClient(["models/another-model"]),
+    )
+    config = Settings(_env_file=None, google_api_key="gemini-secret")
+
+    with pytest.raises(LlmConnectionError) as error:
+        check_llm_connection(config)
+
+    assert str(error.value) == "Configured Gemini model is not available"
+    assert "gemini-secret" not in str(error.value)
+
+
+def test_llm_connection_hides_provider_error_details(monkeypatch):
+    """Hide provider error details that could contain credentials from clients."""
+    class FailingGeminiClient(FakeGeminiClient):
+        def list(self):
+            """Simulate a provider error that includes sensitive key text."""
+            raise errors.ClientError(
+                401,
+                {"message": "invalid API key: gemini-secret"},
+            )
+
+    monkeypatch.setattr(
+        "app.services.llm_service.genai.Client",
+        lambda **kwargs: FailingGeminiClient([]),
+    )
+    config = Settings(_env_file=None, google_api_key="gemini-secret")
+
+    with pytest.raises(LlmConnectionError) as error:
+        check_llm_connection(config)
+
+    assert str(error.value) == "Gemini connection failed"
+    assert "gemini-secret" not in str(error.value)

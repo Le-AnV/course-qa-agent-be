@@ -92,6 +92,29 @@ Each developer uses their own `GEMINI_API_KEY` (free-tier rate limits).
 | `QDRANT_URL` | `http://localhost:6333` |
 | `APP_ENV` | `local` |
 | `CORS_ORIGINS` | `["http://localhost:3000"]` |
+| `GEMINI_API_KEY` | unset; each developer supplies their own key (`GOOGLE_API_KEY` is also accepted) |
+| `SMTP_SENDER_EMAIL` | unset; shared group sender address |
+| `SMTP_APP_PASSWORD` | unset; shared Gmail App Password, never a personal Gmail password |
+
+AI-105 uses the fixed Gemini model `models/gemini-3.8-flash` and Gmail SMTP over
+STARTTLS on port `587`. Changing environment credentials requires restarting the
+local backend; Docker reads `.env` when the container is created, so rebuild/recreate
+the backend after changing its environment. Model or SMTP transport defaults are
+code-fixed and require a code change plus a Docker rebuild.
+
+Admin endpoints require an `Authorization: Bearer <token>` for an Admin role:
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/admin/settings` | Read model/sender details and whether secrets are configured; secret values are never returned. |
+| `POST` | `/api/admin/llm/test-connection` | Check the configured Gemini key and fixed model. |
+| `POST` | `/api/admin/email/test` | Send a test email to the authenticated Admin's email address. |
+
+Open `http://localhost:8000/docs` to inspect and try the API contracts. The agreed
+email rate is **20 per minute** and is exposed in settings; enforcement belongs to
+the AI-31 bulk-import queue, which is on a separate, not-yet-integrated branch. By
+team decision, these endpoints report/test configuration only: API keys and SMTP
+credentials are changed in `.env`, not sent to or updated through the API.
 
 ## Docs
 
