@@ -25,7 +25,7 @@ Split from the `course-qa-agent` monorepo (project skeleton AI-112).
 │   ├── routers/         # one package per Epic: auth, documents, chat, ...
 │   ├── schemas/         # pydantic request/response models
 │   └── services/        # business logic
-├── tests/               # pytest suite (test_health.py)
+├── tests/               # pytest suite organized by feature area
 ├── pyproject.toml       # deps + ruff + pytest config
 ├── uv.lock              # locked dependencies — commit on every dep change
 ├── Dockerfile           # multi-stage: uv builder -> python:3.12-slim runtime
@@ -77,7 +77,7 @@ Stop with `docker compose down` (add `-v` only to wipe data).
 ## Tests
 
 ```bash
-uv run pytest -q      # unit tests (pythonpath configured in pyproject)
+uv run pytest -q      # unit tests (discovered recursively; pythonpath configured in pyproject)
 uv run ruff check .   # lint
 ```
 
