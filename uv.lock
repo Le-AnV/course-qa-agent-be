@@ -260,7 +260,7 @@ requires-dist = [
     { name = "pyjwt", specifier = ">=2.15.1" },
     { name = "pypdfium2", specifier = ">=5.0" },
     { name = "python-docx", specifier = ">=1.0" },
-    { name = "python-multipart", specifier = ">=0.0.18" },
+    { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "qdrant-client", specifier = ">=1.19.1" },
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },

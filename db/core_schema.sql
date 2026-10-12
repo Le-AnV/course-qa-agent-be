@@ -134,6 +134,7 @@ CREATE TABLE document_chunk (
 CREATE TABLE chat_session (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+    class_id UUID NOT NULL REFERENCES class(id) ON DELETE RESTRICT,
     title VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -144,6 +145,7 @@ CREATE TABLE chat_message (
     session_id UUID NOT NULL REFERENCES chat_session(id) ON DELETE CASCADE,
     role VARCHAR(20) NOT NULL,
     content TEXT NOT NULL,
+    used_web_search BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT ck_chat_message_role CHECK (
         role IN ('USER', 'ASSISTANT', 'SYSTEM')
@@ -204,6 +206,7 @@ CREATE INDEX idx_document_uploaded_by ON document(uploaded_by);
 CREATE INDEX idx_document_chunk_document_id ON document_chunk(document_id);
 CREATE INDEX idx_document_chunk_class_id ON document_chunk(class_id);
 CREATE INDEX idx_chat_session_user_id ON chat_session(user_id);
+CREATE INDEX idx_chat_session_class_id ON chat_session(class_id);
 CREATE INDEX idx_chat_message_session_id ON chat_message(session_id);
 CREATE INDEX idx_citation_message_id ON citation(message_id);
 CREATE INDEX idx_citation_document_chunk_id ON citation(document_chunk_id);
