@@ -1,4 +1,4 @@
-"""Tests for Epic E2: upload documents (AI-35).
+"""Tests for Epic E2: upload / list / tag documents (AI-35/37/41).
 
 Auth (AI-25/27): endpoints require `Authorization: Bearer <JWT>`.
 Tokens are minted with app.services.auth.create_access_token so tests track
@@ -57,6 +57,16 @@ def test_accepted_types_requires_auth():
     assert client.get("/api/documents/accepted-types", headers=STUDENT).status_code == 403
 
 
+def test_classes_mine_only_returns_assigned():
+    _setup()
+    assert {c["id"] for c in client.get("/api/documents/classes/mine",
+                                       headers=TRAINER).json()} == {"class-a", "class-b"}
+    # Admin shares the trainer class scope under the provisional in-memory map.
+    assert {c["id"] for c in client.get("/api/documents/classes/mine",
+                                       headers=ADMIN).json()} == {"class-a", "class-b"}
+    assert client.get("/api/documents/classes/mine", headers=STUDENT).status_code == 403
+
+
 def test_upload_pdf_is_pending_approval():
     _setup()
     files = [("files", ("syllabus.pdf", b"%PDF-1.4 content", "application/pdf"))]
@@ -113,6 +123,18 @@ def test_renamed_txt_to_docx_is_rejected():
     assert "not a real .docx" in response.json()["uploaded"][0]["error"]
 
 
+def test_upload_to_unassigned_class_is_rejected():
+    _setup()
+    # Service-level scope check still enforced (TA stub keeps single-class scope).
+    error = document_service.validate_upload("a.pdf", b"%PDF-1.4 a", "class-b", "ta-1")
+    assert isinstance(error, str) and "not assigned" in error
+    # API-level: trainer owns both classes so this succeeds; student is blocked by RBAC.
+    files = [("files", ("a.pdf", b"%PDF-1.4 a", "application/pdf"))]
+    forbidden = client.post("/api/documents/", files=files,
+                            data={"class_id": "class-a"}, headers=STUDENT)
+    assert forbidden.status_code == 403
+
+
 def test_oversize_upload_is_rejected():
     _setup()
     old = document_service.MAX_FILE_SIZE_BYTES
@@ -123,16 +145,6 @@ def test_oversize_upload_is_rejected():
     finally:
         document_service.MAX_FILE_SIZE_BYTES = old
     assert isinstance(error, str) and "100MB" in error
-
-
-def test_classes_mine_only_returns_assigned():
-    _setup()
-    assert {c["id"] for c in client.get("/api/documents/classes/mine",
-                                       headers=TRAINER).json()} == {"class-a", "class-b"}
-    # Admin shares the trainer class scope under the provisional in-memory map.
-    assert {c["id"] for c in client.get("/api/documents/classes/mine",
-                                       headers=ADMIN).json()} == {"class-a", "class-b"}
-    assert client.get("/api/documents/classes/mine", headers=STUDENT).status_code == 403
 
 
 def test_list_search_filter_pagination_and_scope():
@@ -166,3 +178,34 @@ def test_list_search_filter_pagination_and_scope():
             "class_id", "created_at"} <= set(row)
 
     assert client.get("/api/documents/", headers=STUDENT).status_code == 403
+
+
+def test_approve_trainer_only():
+    _setup()
+    record = document_service.create_document("s.pdf", b"%PDF-s", "class-a", TRAINER_ID)
+    forbidden = client.post(f"/api/documents/{record.id}/approve", headers=STUDENT)
+    assert forbidden.status_code == 403
+    response = client.post(f"/api/documents/{record.id}/approve", headers=TRAINER)
+    assert response.status_code == 200
+    assert response.json()["status"] == "processing"
+
+
+def test_approve_other_class_is_forbidden():
+    _setup()
+    record = document_service.create_document("s.pdf", b"%PDF-s", "class-a", TRAINER_ID)
+    other_trainer_id = "other-teacher@academic.edu.vn"
+    document_service.CLASS_ASSIGNMENTS[other_trainer_id] = ["class-b"]
+    other = _auth_headers(other_trainer_id, "trainer")
+    try:
+        response = client.post(f"/api/documents/{record.id}/approve", headers=other)
+    finally:
+        del document_service.CLASS_ASSIGNMENTS[other_trainer_id]
+    assert response.status_code == 403
+
+
+def test_qdrant_payload_scopes_by_class():
+    _setup()
+    record = document_service.create_document("s.pdf", b"%PDF-s", "class-a", TRAINER_ID)
+    payload = document_service.build_qdrant_payload(record)
+    assert payload["class_id"] == "class-a"
+    assert payload["document_id"] == record.id

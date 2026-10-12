@@ -1,4 +1,10 @@
-"""Documents router: upload / list, scoped by class (AI-35/37)."""
+"""Documents router: upload / list / approve, scoped by class (AI-35/37/41).
+
+Auth (AI-25/27): all endpoints require a Bearer JWT. Trainer routes accept
+role `trainer` or `admin` via `require_trainer`; approve additionally allows
+admin (superset of trainer). Identity comes from `user["identifier"]`
+(JWT `sub`, e.g. teacher@academic.edu.vn), NOT the legacy X-User-Id headers.
+"""
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
@@ -26,9 +32,7 @@ def _record_to_read(record: document_service.DocumentRecord) -> DocumentRead:
         size_bytes=record.size_bytes,
         uploader_id=record.uploader_id,
         class_id=record.class_id,
-        class_name=document_service.CLASSES.get(record.class_id, {}).get(
-            "name", record.class_id
-        ),
+        class_name=document_service.class_name(record.class_id),
         status=record.status,
         created_at=record.created_at,
     )
@@ -113,3 +117,27 @@ def get_documents(
         page=page,
         page_size=page_size,
     )
+
+
+@router.post("/{document_id}/approve", response_model=DocumentRead)
+def approve_document(
+    document_id: str,
+    user: dict = Depends(require_trainer),  # noqa: B008
+) -> DocumentRead:
+    """Approve pending -> processing.
+
+    AI-41 originally said trainer-only (TA gets 403). Under AI-27 RBAC,
+    `require_trainer` admits `admin` too (superset); students still get 403
+    from the dependency before reaching here.
+    """
+    user_id = user["identifier"]
+    record = document_service.get_document(document_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    if record.class_id not in document_service.my_class_ids(user_id):
+        raise HTTPException(status_code=403, detail="Class is not assigned to you.")
+    try:
+        record = document_service.approve_document(document_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _record_to_read(record)
