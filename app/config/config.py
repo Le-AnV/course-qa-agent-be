@@ -34,8 +34,13 @@ class Settings(BaseSettings):
         vlm_model: Model identifier for Vision Language Model.
         vlm_temperature: Temperature setting for VLM responses.
         google_api_key: Secret API key for Google Gemini model access.
+        jwt_secret: HS256 signing key for DB-backed login tokens (dev default, override in prod).
+        jwt_algorithm: JWT algorithm for login tokens.
+        jwt_expire_minutes: Login token lifetime in minutes.
+        bootstrap_admin_email/password: First admin seeded on a fresh DB.
         smtp_sender_email: Optional shared sender email address.
         smtp_app_password: Optional Gmail App Password for SMTP authentication.
+        email_dry_run: Record AI-31 outbox mail without real SMTP.
         tavily_api_key: API key for Tavily search provider.
         chunk_size: Maximum character count per document chunk.
         chunk_overlap: Overlap character count between consecutive chunks.
@@ -79,13 +84,45 @@ class Settings(BaseSettings):
     )
     tavily_api_key: str | None = Field(default=None, validation_alias="TAVILY_API_KEY")
 
+    # DB-backed auth (E1 / AI-25, AI-27, AI-31). Dev defaults only — override in prod.
+    jwt_secret: str = Field(
+        default="dev-only-secret-change-me-use-env-in-prod",
+        validation_alias="JWT_SECRET",
+    )
+    jwt_algorithm: str = Field(default="HS256", validation_alias="JWT_ALGORITHM")
+    jwt_expire_minutes: int = Field(default=60 * 12, validation_alias="JWT_EXPIRE_MINUTES")
+    # Bootstrap admin so a fresh DB is usable before any admin exists.
+    bootstrap_admin_email: str = Field(
+        default="admin@example.com", validation_alias="BOOTSTRAP_ADMIN_EMAIL"
+    )
+    bootstrap_admin_password: str = Field(
+        default="Admin123!", validation_alias="BOOTSTRAP_ADMIN_PASSWORD"
+    )
+
     # Shared outbound email configuration for Admin test messages and mail services.
     smtp_host: ClassVar[str] = "smtp.gmail.com"
     smtp_port: ClassVar[int] = 587
     smtp_security: ClassVar[str] = "STARTTLS"
-    smtp_sender_email: EmailStr | None = None
+    smtp_sender_email: EmailStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SMTP_SENDER_EMAIL", "SMTP_SENDER"),
+    )
     smtp_app_password: SecretStr | None = None
     email_rate_limit_per_minute: ClassVar[int] = 20
+    # AI-31 outbox: True records mail without real SMTP (local dev / tests).
+    email_dry_run: bool = Field(default=True, validation_alias="EMAIL_DRY_RUN")
+
+    @property
+    def smtp_sender(self) -> str:
+        """AI-31 compat: plain sender string (canonical source: smtp_sender_email)."""
+
+        return str(self.smtp_sender_email or "")
+
+    @property
+    def smtp_rate_per_minute(self) -> int:
+        """AI-31 compat: alias of the code-fixed email_rate_limit_per_minute."""
+
+        return self.email_rate_limit_per_minute
 
     # Chunking and retrieval configuration
     chunk_size: int = Field(default=800, validation_alias="CHUNK_SIZE")
