@@ -1,4 +1,4 @@
-"""Tests for Epic E2: upload documents (AI-35).
+"""Tests for Epic E2: upload / list documents (AI-35/37).
 
 Auth (AI-25/27): endpoints require `Authorization: Bearer <JWT>`.
 Tokens are minted with app.services.auth.create_access_token so tests track
@@ -123,3 +123,46 @@ def test_oversize_upload_is_rejected():
     finally:
         document_service.MAX_FILE_SIZE_BYTES = old
     assert isinstance(error, str) and "100MB" in error
+
+
+def test_classes_mine_only_returns_assigned():
+    _setup()
+    assert {c["id"] for c in client.get("/api/documents/classes/mine",
+                                       headers=TRAINER).json()} == {"class-a", "class-b"}
+    # Admin shares the trainer class scope under the provisional in-memory map.
+    assert {c["id"] for c in client.get("/api/documents/classes/mine",
+                                       headers=ADMIN).json()} == {"class-a", "class-b"}
+    assert client.get("/api/documents/classes/mine", headers=STUDENT).status_code == 403
+
+
+def test_list_search_filter_pagination_and_scope():
+    _setup()
+    document_service.create_document("algebra.pdf", b"%PDF-a", "class-a", TRAINER_ID)
+    document_service.create_document("algebra-notes.txt", b"notes", "class-a", TRAINER_ID)
+    document_service.create_document("physics.pdf", b"%PDF-p", "class-b", TRAINER_ID)
+
+    # Service-level scope: single-class user only sees class-a (List AC-05).
+    _, total = document_service.list_documents(user_id="ta-1")
+    assert total == 2
+
+    search = client.get("/api/documents/", params={"search": "algebra"},
+                        headers=TRAINER).json()
+    assert search["total"] == 2
+
+    filtered = client.get("/api/documents/",
+                          params={"file_type": ".pdf", "status": "pending"},
+                          headers=TRAINER).json()
+    assert filtered["total"] == 2
+    assert all(i["status"] == "pending" for i in filtered["items"])
+
+    page1 = client.get("/api/documents/", params={"page": 1, "page_size": 2},
+                       headers=TRAINER).json()
+    page2 = client.get("/api/documents/", params={"page": 2, "page_size": 2},
+                       headers=TRAINER).json()
+    assert page1["total"] == 3 and len(page1["items"]) == 2 and len(page2["items"]) == 1
+
+    row = page1["items"][0]
+    assert {"file_name", "file_type", "size_bytes", "uploader_id",
+            "class_id", "created_at"} <= set(row)
+
+    assert client.get("/api/documents/", headers=STUDENT).status_code == 403

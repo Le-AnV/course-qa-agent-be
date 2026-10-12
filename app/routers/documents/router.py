@@ -1,16 +1,18 @@
-"""Documents router: upload materials, scoped by class (AI-35)."""
+"""Documents router: upload / list, scoped by class (AI-35/37)."""
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from app.dependencies.auth import require_trainer
 from app.schemas.documents import (
     AcceptedTypeRead,
+    ClassMineRead,
+    DocumentListResponse,
     DocumentRead,
     DocumentUploadResponse,
     DocumentUploadResult,
 )
 from app.services import document_service
-from app.services.document_service import ACCEPTED_EXTENSIONS
+from app.services.document_service import ACCEPTED_EXTENSIONS, VALID_STATUSES
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -52,6 +54,14 @@ def accepted_types(
     ]
 
 
+@router.get("/classes/mine", response_model=list[ClassMineRead])
+def classes_mine(
+    user: dict = Depends(require_trainer),  # noqa: B008
+) -> list[ClassMineRead]:
+    """Classes assigned to the caller (Upload AC-05 / List AC-05)."""
+    return [ClassMineRead(**c) for c in document_service.my_classes(user["identifier"])]
+
+
 @router.post("/", response_model=DocumentUploadResponse, status_code=201)
 async def upload_documents(
     files: list[UploadFile] = File(...),  # noqa: B008 - canonical FastAPI pattern
@@ -73,3 +83,33 @@ async def upload_documents(
             DocumentUploadResult(file_name=name, document=_record_to_read(record))
         )
     return DocumentUploadResponse(uploaded=results)
+
+
+@router.get("/", response_model=DocumentListResponse)
+def get_documents(
+    search: str = Query(default=""),
+    class_id: str | None = Query(default=None),
+    file_type: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    user: dict = Depends(require_trainer),  # noqa: B008
+) -> DocumentListResponse:
+    """Browse/search/filter/paginate the caller's own classes (List AC-01..05)."""
+    if status is not None and status not in VALID_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Unknown status '{status}'.")
+    rows, total = document_service.list_documents(
+        user_id=user["identifier"],
+        search=search,
+        class_id=class_id,
+        file_type=file_type,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+    return DocumentListResponse(
+        items=[_record_to_read(r) for r in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
