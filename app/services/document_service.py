@@ -168,6 +168,19 @@ def get_document(document_id: str) -> DocumentRecord | None:
     return _DOCUMENTS.get(document_id)
 
 
+def approve_document(document_id: str) -> DocumentRecord:
+    """Trainer approval: pending -> processing (AI-55 pipeline takes over)."""
+    record = _DOCUMENTS.get(document_id)
+    if record is None:
+        raise KeyError(document_id)
+    if record.status != STATUS_PENDING:
+        raise ValueError(
+            f"Only pending documents can be approved (is {record.status})."
+        )
+    record.status = STATUS_PROCESSING
+    return record
+
+
 def list_documents(
     user_id: str,
     search: str = "",
@@ -195,3 +208,17 @@ def list_documents(
     page_size = min(max(page_size, 1), 100)
     start = (page - 1) * page_size
     return rows[start:start + page_size], total
+
+
+def build_qdrant_payload(record: DocumentRecord) -> dict[str, str]:
+    """Native payload filter for class-scoped RAG (Tag AC-03/04)."""
+    return {
+        "document_id": record.id,
+        "class_id": record.class_id,
+        "file_name": record.file_name,
+        "file_type": record.file_type,
+    }
+
+
+def class_name(class_id: str) -> str:
+    return CLASSES.get(class_id, {}).get("name", class_id)
