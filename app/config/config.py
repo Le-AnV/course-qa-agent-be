@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import ClassVar
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, EmailStr, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,7 +33,9 @@ class Settings(BaseSettings):
         llm_temperature: Temperature setting for LLM responses.
         vlm_model: Model identifier for Vision Language Model.
         vlm_temperature: Temperature setting for VLM responses.
-        google_api_key: API key for Google Gemini model access.
+        google_api_key: Secret API key for Google Gemini model access.
+        smtp_sender_email: Optional shared sender email address.
+        smtp_app_password: Optional Gmail App Password for SMTP authentication.
         tavily_api_key: API key for Tavily search provider.
         chunk_size: Maximum character count per document chunk.
         chunk_overlap: Overlap character count between consecutive chunks.
@@ -65,17 +67,25 @@ class Settings(BaseSettings):
     embedding_model: str = Field(default="gemini-embedding-2", validation_alias="EMBEDDING_MODEL")
     embedding_device: str | None = Field(default=None, validation_alias="EMBEDDING_DEVICE")
 
-    llm_model: str = Field(default="models/gemini-3.8-flash", validation_alias="LLM_MODEL")
+    llm_model: ClassVar[str] = "models/gemini-3.8-flash"
     llm_temperature: float = Field(default=1.0, validation_alias="LLM_TEMPERATURE")
 
     vlm_model: str = Field(default="models/gemini-2.5-flash", validation_alias="VLM_MODEL")
     vlm_temperature: float = Field(default=1.0, validation_alias="VLM_TEMPERATURE")
 
-    google_api_key: str | None = Field(
+    google_api_key: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     )
     tavily_api_key: str | None = Field(default=None, validation_alias="TAVILY_API_KEY")
+
+    # Shared outbound email configuration for Admin test messages and mail services.
+    smtp_host: ClassVar[str] = "smtp.gmail.com"
+    smtp_port: ClassVar[int] = 587
+    smtp_security: ClassVar[str] = "STARTTLS"
+    smtp_sender_email: EmailStr | None = None
+    smtp_app_password: SecretStr | None = None
+    email_rate_limit_per_minute: ClassVar[int] = 20
 
     # Chunking and retrieval configuration
     chunk_size: int = Field(default=800, validation_alias="CHUNK_SIZE")
@@ -101,6 +111,20 @@ class Settings(BaseSettings):
         validation_alias="PROMPT_FILE",
     )
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
+
+    @field_validator(
+        "google_api_key",
+        "smtp_sender_email",
+        "smtp_app_password",
+        mode="before",
+    )
+    @classmethod
+    def normalize_blank_optional_values(cls, value):
+        """Treat blank optional environment variables as unconfigured values."""
+
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 @lru_cache(maxsize=1)

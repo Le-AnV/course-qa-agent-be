@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config.config import get_settings
+from app.routers.admin.router import router as admin_router
 
 settings = get_settings()
 
@@ -21,6 +22,7 @@ app.add_middleware(
 from app.routers.auth.router import router as auth_router
 
 app.include_router(auth_router)
+app.include_router(admin_router)
 
 # from app.routers import documents, chat, tickets, admin
 # app.include_router(documents.router)

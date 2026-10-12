@@ -4,6 +4,7 @@ import logging
 
 from langchain_core.embeddings import Embeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from pydantic import SecretStr
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config.config import settings
@@ -15,12 +16,12 @@ class GeminiEmbedding(Embeddings):
     """Wrapper for Google Gemini Embedding API with retry logic."""
 
     def __init__(
-        self, api_key: str | None = None, model: str | None = None
+        self, api_key: str | SecretStr | None = None, model: str | None = None
     ) -> None:
         """Initialize the Gemini embedding wrapper.
 
         Args:
-            api_key (str | None): The Google API key. Defaults to settings.google_api_key.
+            api_key (str | SecretStr | None): Google API key. Defaults to settings.google_api_key.
             model (str | None): The embedding model to use. Defaults to settings.embedding_model.
         """
         api_key = api_key or settings.google_api_key
@@ -28,6 +29,9 @@ class GeminiEmbedding(Embeddings):
 
         if not api_key:
             raise ValueError("google_api_key is required for GeminiEmbedding.")
+
+        if isinstance(api_key, SecretStr):
+            api_key = api_key.get_secret_value()
 
         self._embeddings = GoogleGenerativeAIEmbeddings(
             model=model,

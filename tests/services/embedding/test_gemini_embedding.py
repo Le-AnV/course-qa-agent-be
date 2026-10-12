@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 
 from app.config.config import settings
 from app.services.embedding.gemini_embedding import GeminiEmbedding
@@ -58,6 +59,21 @@ def test_gemini_embedding_missing_api_key(mock_settings):
     mock_settings.google_api_key = None
     with pytest.raises(ValueError, match="google_api_key is required"):
         GeminiEmbedding()
+
+
+@patch("app.services.embedding.gemini_embedding.GoogleGenerativeAIEmbeddings")
+def test_gemini_embedding_unwraps_secret_api_key(mock_google_embeddings):
+    """Pass the configured secret key to the SDK as a plain string."""
+    secret_key = SecretStr("test-gemini-key")
+
+    with patch("app.services.embedding.gemini_embedding.settings") as mock_settings:
+        mock_settings.google_api_key = secret_key
+        mock_settings.embedding_model = "gemini-embedding-2"
+        mock_settings.vector_size = 1536
+
+        GeminiEmbedding()
+
+    assert mock_google_embeddings.call_args.kwargs["google_api_key"] == "test-gemini-key"
 
 
 @patch("time.sleep", return_value=None)  # Skip sleep to speed up tests
