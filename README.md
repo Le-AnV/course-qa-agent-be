@@ -101,9 +101,6 @@ Each developer uses their own `GEMINI_API_KEY` (free-tier rate limits).
 | `SMTP_RATE_PER_MINUTE` | `20` (queue rate limit, AC-09) |
 | `EMAIL_DRY_RUN` | `true` (no real SMTP until configured) |
 
-Admin onboarding flow (AI-31): login → courses → classes → accounts/import.
-API design: [`docs/api-design-admin.md`](docs/api-design-admin.md).
-
 AI-105 uses the fixed Gemini model `models/gemini-3.8-flash` and Gmail SMTP over
 STARTTLS on port `587`. Changing environment credentials requires restarting the
 local backend; Docker reads `.env` when the container is created, so rebuild/recreate
