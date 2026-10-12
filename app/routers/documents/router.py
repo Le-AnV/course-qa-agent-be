@@ -40,7 +40,7 @@ def _record_to_read(record: document_service.DocumentRecord) -> DocumentRead:
 
 @router.get("/accepted-types", response_model=list[AcceptedTypeRead])
 def accepted_types(
-    _user: dict = Depends(require_trainer),  # noqa: B008 - FastAPI Depends pattern
+    _user: dict = Depends(require_trainer),
 ) -> list[AcceptedTypeRead]:
     """Every accepted file type for the upload screen (Upload AC-07)."""
     labels = {
@@ -60,7 +60,7 @@ def accepted_types(
 
 @router.get("/classes/mine", response_model=list[ClassMineRead])
 def classes_mine(
-    user: dict = Depends(require_trainer),  # noqa: B008
+    user: dict = Depends(require_trainer),
 ) -> list[ClassMineRead]:
     """Classes assigned to the caller (Upload AC-05 / List AC-05)."""
     return [ClassMineRead(**c) for c in document_service.my_classes(user["identifier"])]
@@ -68,9 +68,9 @@ def classes_mine(
 
 @router.post("/", response_model=DocumentUploadResponse, status_code=201)
 async def upload_documents(
-    files: list[UploadFile] = File(...),  # noqa: B008 - canonical FastAPI pattern
+    files: list[UploadFile] = File(...),
     class_id: str = Form(...),
-    user: dict = Depends(require_trainer),  # noqa: B008
+    user: dict = Depends(require_trainer),
 ) -> DocumentUploadResponse:
     """Multi-file material upload (Upload AC-04); each file validated (AC-06)."""
     user_id = user["identifier"]
@@ -97,7 +97,7 @@ def get_documents(
     status: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
-    user: dict = Depends(require_trainer),  # noqa: B008
+    user: dict = Depends(require_trainer),
 ) -> DocumentListResponse:
     """Browse/search/filter/paginate the caller's own classes (List AC-01..05)."""
     if status is not None and status not in VALID_STATUSES:
@@ -122,7 +122,7 @@ def get_documents(
 @router.post("/{document_id}/approve", response_model=DocumentRead)
 def approve_document(
     document_id: str,
-    user: dict = Depends(require_trainer),  # noqa: B008
+    user: dict = Depends(require_trainer),
 ) -> DocumentRead:
     """Approve pending -> processing.
 
