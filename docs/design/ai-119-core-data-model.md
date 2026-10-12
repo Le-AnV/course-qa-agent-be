@@ -2,7 +2,7 @@
 
 > **Canonical ERD:** This is the only ERD in the project. All user stories, migrations, backend models, and API implementations must reference this document instead of defining separate ERDs.
 >
-> **Path:** `docs/design/core-erd.md`
+> **Path:** `docs/design/ai-119-core-data-model.md`
 
 ## Conventions
 
