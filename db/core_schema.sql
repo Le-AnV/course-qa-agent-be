@@ -102,7 +102,7 @@ CREATE TABLE document (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT ck_document_file_type CHECK (
-        file_type IN ('PDF', 'DOCX', 'MD', 'TXT', 'PPT', 'PPTX')
+        file_type IN ('PDF', 'DOCX', 'MD', 'TXT', 'PPT', 'PPTX', 'XLSX', 'XLS')
     ),
     CONSTRAINT ck_document_approval_status CHECK (
         approval_status IN ('PENDING', 'APPROVED', 'REJECTED')
@@ -124,7 +124,7 @@ CREATE TABLE document_chunk (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT ck_chunk_page_number CHECK (page_number IS NULL OR page_number > 0),
     CONSTRAINT ck_chunk_source_type CHECK (
-        source_type IN ('PDF', 'DOCX', 'MD', 'TXT', 'PPT', 'PPTX')
+        source_type IN ('PDF', 'DOCX', 'MD', 'TXT', 'PPT', 'PPTX', 'XLSX', 'XLS')
     ),
     CONSTRAINT ck_chunk_embedding_status CHECK (
         embedding_status IN ('NOT_STARTED', 'PROCESSING', 'DONE', 'FAILED')
