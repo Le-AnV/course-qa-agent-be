@@ -58,7 +58,7 @@
 | `ticket.status` | `OPEN`, `IN_PROGRESS`, `RESOLVED`, `CLOSED` |
 | `chat_message.role` | `USER`, `ASSISTANT`, `SYSTEM` |
 
-Initial supported file types: `PDF`, `DOCX`, `MD`, `TXT`, `PPT`, `PPTX`.
+Initial supported file types: `PDF`, `DOCX`, `MD`, `TXT`, `PPT`, `PPTX`, `XLSX`, `XLS`.
 
 ## Constraints and indexes
 
