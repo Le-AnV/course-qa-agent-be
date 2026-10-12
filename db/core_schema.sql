@@ -1,5 +1,5 @@
 -- AI Course Syllabus & Q&A Agent
--- Canonical PostgreSQL schema based on docs/design/core-erd.puml
+-- Canonical PostgreSQL schema based on docs/design/ai-119-core-data-model.md
 -- Run against a NEW, empty database. This script is intentionally not destructive.
 -- Qdrant stores vector embeddings; PostgreSQL stores relational metadata and chunk text.
 
