@@ -15,9 +15,7 @@ logger = logging.getLogger(__name__)
 class GeminiEmbedding(Embeddings):
     """Wrapper for Google Gemini Embedding API with retry logic."""
 
-    def __init__(
-        self, api_key: str | SecretStr | None = None, model: str | None = None
-    ) -> None:
+    def __init__(self, api_key: str | SecretStr | None = None, model: str | None = None) -> None:
         """Initialize the Gemini embedding wrapper.
 
         Args:
@@ -35,7 +33,7 @@ class GeminiEmbedding(Embeddings):
 
         self._embeddings = GoogleGenerativeAIEmbeddings(
             model=model,
-            google_api_key=api_key, # type: ignore
+            google_api_key=api_key,  # type: ignore
             output_dimensionality=settings.vector_size,
         )
 
@@ -46,7 +44,7 @@ class GeminiEmbedding(Embeddings):
             "Retrying Gemini embedding API... Attempt %s. Error: %s",
             retry_state.attempt_number,
             getattr(retry_state.outcome, "exception", lambda: None)() or "unknown error",
-        )
+        ),
     )
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of documents with automatic retries on failure (AC-04).
@@ -66,7 +64,7 @@ class GeminiEmbedding(Embeddings):
             "Retrying Gemini embedding query... Attempt %s. Error: %s",
             retry_state.attempt_number,
             getattr(retry_state.outcome, "exception", lambda: None)() or "unknown error",
-        )
+        ),
     )
     def embed_query(self, text: str) -> list[float]:
         """Embed a single query string with automatic retries on failure (AC-04).

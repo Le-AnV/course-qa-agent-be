@@ -6,6 +6,7 @@ locate each section dynamically, so it works even when rows shift between
 different syllabus files.  Sheet names are matched flexibly (e.g.
 ``L2_PY_PE_Syllabus`` is found by searching for "syllabus" in the name).
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -16,6 +17,7 @@ from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 # Helpers
+
 
 def _clean(value) -> str:
     """Convert a cell value to a clean string."""
@@ -103,6 +105,7 @@ def _collect_rows_until_next_marker(ws: Worksheet, start_row: int) -> list[int]:
 
 # Section parsers
 
+
 def _parse_cover(ws: Worksheet) -> str:
     """Parse the Cover sheet."""
     # Title may span B11-B14 depending on file
@@ -137,14 +140,17 @@ def _parse_syllabus(ws: Worksheet) -> str:
         return _clean(ws[f"{col}{r}"].value) if r else ""
 
     # Section 1-5: Course Info
-    parts.extend([
-        "## Course Information", "",
-        f"- Technical Group: {_val(1)}",
-        f"- Topic Name: {_val(2)}",
-        f"- Topic Code: {_val(3)}",
-        f"- Version: {_val(4)}",
-        f"- Training Audience: {_val(5)}",
-    ])
+    parts.extend(
+        [
+            "## Course Information",
+            "",
+            f"- Technical Group: {_val(1)}",
+            f"- Topic Name: {_val(2)}",
+            f"- Topic Code: {_val(3)}",
+            f"- Version: {_val(4)}",
+            f"- Training Audience: {_val(5)}",
+        ]
+    )
 
     # Section 6: Objectives & Outcomes
     obj_row = _find_section_row(ws, 6)
@@ -185,12 +191,14 @@ def _parse_syllabus(ws: Worksheet) -> str:
             description = _clean(ws[f"E{r}"].value)
             notes = _clean(ws[f"F{r}"].value)
             if category:
-                table_data.append([
-                    category,
-                    _format_percentage(percentage),
-                    description,
-                    notes,
-                ])
+                table_data.append(
+                    [
+                        category,
+                        _format_percentage(percentage),
+                        description,
+                        notes,
+                    ]
+                )
         table = _markdown_table(["Type", "Percentage", "Description", "Notes"], table_data)
         parts.extend(["", "## Time Allocation", "", table])
 
@@ -198,9 +206,16 @@ def _parse_syllabus(ws: Worksheet) -> str:
     # Some files lack marker 10, so assessment rows sit inside the section-9
     # block.  We detect them by checking for well-known assessment keywords.
     _ASSESSMENT_KEYWORDS = {
-        "quiz", "quizzes", "assignments", "assignment",
-        "final theory test", "final practice test", "final pracice test",
-        "presentation", "pass criteria", "online video",
+        "quiz",
+        "quizzes",
+        "assignments",
+        "assignment",
+        "final theory test",
+        "final practice test",
+        "final pracice test",
+        "presentation",
+        "pass criteria",
+        "online video",
     }
 
     mat_row = _find_section_row(ws, 9)
@@ -261,9 +276,7 @@ def _parse_syllabus(ws: Worksheet) -> str:
     return "\n".join(parts)
 
 
-def _parse_assessment_section(
-    ws: Worksheet, assess_row: int, parts: list[str]
-) -> None:
+def _parse_assessment_section(ws: Worksheet, assess_row: int, parts: list[str]) -> None:
     """Parse the Assessment Scheme section and append to *parts*."""
     assess_rows = _collect_rows_until_next_marker(ws, assess_row)
     table_data = []
@@ -292,17 +305,19 @@ def _parse_schedule(ws: Worksheet) -> str:
         content = _clean(ws[f"D{row}"].value)
         if not content:
             continue
-        items.append({
-            "unit": ws[f"A{row}"].value,
-            "chapter": _clean(ws[f"B{row}"].value),
-            "session": ws[f"C{row}"].value,
-            "content": content,
-            "objectives": _clean(ws[f"E{row}"].value),
-            "delivery": _clean(ws[f"F{row}"].value),
-            "duration": ws[f"G{row}"].value,
-            "format": _clean(ws[f"H{row}"].value),
-            "notes": _clean(ws[f"I{row}"].value),
-        })
+        items.append(
+            {
+                "unit": ws[f"A{row}"].value,
+                "chapter": _clean(ws[f"B{row}"].value),
+                "session": ws[f"C{row}"].value,
+                "content": content,
+                "objectives": _clean(ws[f"E{row}"].value),
+                "delivery": _clean(ws[f"F{row}"].value),
+                "duration": ws[f"G{row}"].value,
+                "format": _clean(ws[f"H{row}"].value),
+                "notes": _clean(ws[f"I{row}"].value),
+            }
+        )
 
     if not items:
         return ""
@@ -318,8 +333,14 @@ def _parse_schedule(ws: Worksheet) -> str:
             return
         sections.append(
             _markdown_table(
-                ["Content", "Learning Objectives", "Delivery Type",
-                 "Duration", "Training Format", "Notes"],
+                [
+                    "Content",
+                    "Learning Objectives",
+                    "Delivery Type",
+                    "Duration",
+                    "Training Format",
+                    "Notes",
+                ],
                 table_rows,
             )
         )
@@ -339,14 +360,16 @@ def _parse_schedule(ws: Worksheet) -> str:
             current_session = session
             sections.extend(["", f"### Session {session}"])
 
-        table_rows.append([
-            item["content"],
-            item["objectives"],
-            item["delivery"],
-            _format_duration(item["duration"]),
-            item["format"],
-            item["notes"],
-        ])
+        table_rows.append(
+            [
+                item["content"],
+                item["objectives"],
+                item["delivery"],
+                _format_duration(item["duration"]),
+                item["format"],
+                item["notes"],
+            ]
+        )
 
     flush_table()
     return "\n".join(sections)
@@ -384,11 +407,14 @@ def _parse_change_history(ws: Worksheet) -> str:
             changes.append([date, change, action, contents, version])
 
     parts = [
-        "## Document History", "",
-        "### Authorship", "",
+        "## Document History",
+        "",
+        "### Authorship",
+        "",
         _markdown_table(["Role", "Name", "Account", "Unit"], author_rows),
         "",
-        "### Record of Changes", "",
+        "### Record of Changes",
+        "",
         _markdown_table(["Date", "Changes", "Action", "Contents", "Version"], changes),
     ]
 
@@ -396,6 +422,7 @@ def _parse_change_history(ws: Worksheet) -> str:
 
 
 # Public API
+
 
 def excel_loader(file_path: str | Path) -> dict[str, Any]:
     """Load a standardized syllabus Excel file and convert it to Markdown.

@@ -45,7 +45,10 @@ def test_document_loader_routes_xlsx_and_xls(tmp_path: Path):
     xls_path.write_text("fake xls")
 
     mock_excel = MagicMock(return_value={"markdown": "excel content", "metadata": {}, "images": {}})
-    with patch.dict("app.services.ingestion.parser.SUPPORTED_EXTENSIONS", {".xlsx": mock_excel, ".xls": mock_excel}):
+    with patch.dict(
+        "app.services.ingestion.parser.SUPPORTED_EXTENSIONS",
+        {".xlsx": mock_excel, ".xls": mock_excel},
+    ):
         res_xlsx = document_loader(xlsx_path)
         mock_excel.assert_called_with(str(xlsx_path))
         assert res_xlsx["markdown"] == "excel content"

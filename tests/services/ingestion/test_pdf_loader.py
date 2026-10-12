@@ -41,4 +41,3 @@ def test_pdf_loader_fallback_images_when_none(tmp_path: Path):
 
         mock_extract.assert_called_once_with(str(fake_pdf))
         assert "raw_0.png" in result["images"]
-

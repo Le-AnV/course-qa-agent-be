@@ -88,6 +88,7 @@ def test_llm_connection_rejects_unavailable_configured_model(monkeypatch):
 
 def test_llm_connection_hides_provider_error_details(monkeypatch):
     """Hide provider error details that could contain credentials from clients."""
+
     class FailingGeminiClient(FakeGeminiClient):
         def list(self):
             """Simulate a provider error that includes sensitive key text."""

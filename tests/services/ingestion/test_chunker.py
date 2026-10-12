@@ -32,7 +32,10 @@ This is page three content.
 
 def test_recursive_chunker():
     docs = [
-        Document(page_content="First sentence. Second sentence. Third sentence.", metadata={"page_number": 1}),
+        Document(
+            page_content="First sentence. Second sentence. Third sentence.",
+            metadata={"page_number": 1},
+        ),
     ]
 
     chunks = recursive_chunker(docs, chunk_size=30, chunk_overlap=10)
@@ -40,4 +43,3 @@ def test_recursive_chunker():
     assert len(chunks) >= 1
     # Check that metadata was preserved
     assert all(c.metadata.get("page_number") == 1 for c in chunks)
-

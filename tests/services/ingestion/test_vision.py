@@ -72,7 +72,10 @@ def test_enrich_markdown_with_vlm_matching_image():
     enriched = enrich_markdown_with_vlm(markdown, descriptions)
 
     assert "> Image: Detailed diagram of microservices." in enriched
-    assert "![Architecture Diagram](arch.png)\n\n> Image: Detailed diagram of microservices.\n" in enriched
+    assert (
+        "![Architecture Diagram](arch.png)\n\n> Image: Detailed diagram of microservices.\n"
+        in enriched
+    )
     assert "Summary text." in enriched
 
 

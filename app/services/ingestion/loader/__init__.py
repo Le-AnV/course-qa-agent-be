@@ -10,4 +10,3 @@ __all__ = [
     "extract_raw_embedded_images",
     "pdf_loader",
 ]
-

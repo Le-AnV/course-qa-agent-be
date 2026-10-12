@@ -14,23 +14,23 @@ from app.services.embedding.gemini_embedding import GeminiEmbedding
 
 # Skip these tests if GOOGLE_API_KEY is missing from .env
 requires_api_key = pytest.mark.skipif(
-    not settings.google_api_key, 
-    reason="GOOGLE_API_KEY is not set in .env"
+    not settings.google_api_key, reason="GOOGLE_API_KEY is not set in .env"
 )
+
 
 @requires_api_key
 def test_gemini_embedding_real_api_documents():
     """Test embedding multiple documents with the REAL Gemini API."""
     # Khởi tạo mặc định sẽ lấy key và model từ settings (config.py)
     embedder = GeminiEmbedding()
-    
+
     texts = ["Hello world", "This is a real test for embedding."]
     vectors = embedder.embed_documents(texts)
-    
+
     # Kiểm tra kết quả trả về có phải mảng hay không
     assert isinstance(vectors, list)
     assert len(vectors) == 2
-    
+
     # Kiểm tra chiều dài vector có khớp đúng với cấu hình không
     assert len(vectors[0]) == settings.vector_size
     assert len(vectors[1]) == settings.vector_size
@@ -40,10 +40,10 @@ def test_gemini_embedding_real_api_documents():
 def test_gemini_embedding_real_api_query():
     """Test embedding a single query with the REAL Gemini API."""
     embedder = GeminiEmbedding()
-    
+
     query = "What is the vector dimension?"
     vector = embedder.embed_query(query)
-    
+
     assert isinstance(vector, list)
     # Kiểm tra chiều dài vector
     assert len(vector) == settings.vector_size
@@ -52,6 +52,7 @@ def test_gemini_embedding_real_api_query():
 # ---------------------------------------------------------
 # MOCK TESTS FOR EDGE CASES (Missing Key, Network Retry)
 # ---------------------------------------------------------
+
 
 @patch("app.services.embedding.gemini_embedding.settings")
 def test_gemini_embedding_missing_api_key(mock_settings):
@@ -115,12 +116,13 @@ def test_embed_documents_max_retries_exceeded(mock_google_embeddings, mock_sleep
     mock_instance.embed_documents.side_effect = Exception("Persistent API Error")
 
     embedder = GeminiEmbedding(api_key="dummy_key", model="dummy_model")
-    
+
     # Should raise tenacity.RetryError eventually
     from tenacity import RetryError
+
     with pytest.raises(RetryError):
         embedder.embed_documents(["retry_text"])
-        
+
     # Should try 5 times (according to stop_after_attempt(5) in the code)
     assert mock_instance.embed_documents.call_count == 5
 
