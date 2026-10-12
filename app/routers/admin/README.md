@@ -49,7 +49,7 @@ details, API keys, or SMTP passwords.
 Automated verification:
 
 ```powershell
-uv run python -m pytest tests/test_admin_router.py tests/test_admin_schemas.py tests/test_admin_settings_service.py tests/test_config.py tests/test_email_service.py tests/test_llm_service.py -q
+uv run python -m pytest tests/admin/ tests/config/ tests/email/ tests/llm/ -q
 uv run ruff check .
 ```
 

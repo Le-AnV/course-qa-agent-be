@@ -34,7 +34,7 @@ values when implemented.
 2. Run the configuration test and lint check:
 
    ```powershell
-   uv run python -m pytest tests/test_embedding_config.py -q
+   uv run python -m pytest tests/embedding/ -q
    uv run ruff check .
    ```
 
@@ -69,7 +69,7 @@ Gemini or Qdrant and does not test a real question/retrieval flow.
 AI-107 configuration test:
 
 ```text
-uv run python -m pytest tests/test_embedding_config.py -q -> 1 passed
+uv run python -m pytest tests/embedding/ -q -> 1 passed
 ```
 
 The full local working tree previously passed 31 tests and Ruff, but it also
