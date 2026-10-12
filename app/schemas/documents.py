@@ -5,6 +5,15 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
+class ClassMineRead(BaseModel):
+    """A class assigned to the caller (source: E1 when it lands)."""
+
+    id: str
+    course_id: str
+    name: str
+    code: str
+
+
 class AcceptedTypeRead(BaseModel):
     extension: str
     mime: str
@@ -36,3 +45,10 @@ class DocumentUploadResult(BaseModel):
 
 class DocumentUploadResponse(BaseModel):
     uploaded: list[DocumentUploadResult] = Field(default_factory=list)
+
+
+class DocumentListResponse(BaseModel):
+    items: list[DocumentRead] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 20

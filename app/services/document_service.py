@@ -77,6 +77,10 @@ def my_class_ids(user_id: str) -> list[str]:
     return list(CLASS_ASSIGNMENTS.get(user_id, []))
 
 
+def my_classes(user_id: str) -> list[dict[str, str]]:
+    return [CLASSES[cid] for cid in my_class_ids(user_id) if cid in CLASSES]
+
+
 def detect_content_kind(extension: str, content: bytes) -> str | None:
     """Return an error message when bytes do not match the extension.
 
@@ -162,3 +166,32 @@ def create_document(
 
 def get_document(document_id: str) -> DocumentRecord | None:
     return _DOCUMENTS.get(document_id)
+
+
+def list_documents(
+    user_id: str,
+    search: str = "",
+    class_id: str | None = None,
+    file_type: str | None = None,
+    status: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[DocumentRecord], int]:
+    """Search/filter/paginate within the caller's own classes (List AC-02..05)."""
+    allowed = set(my_class_ids(user_id))
+    needle = search.strip().lower()
+    rows = [d for d in _DOCUMENTS.values() if d.class_id in allowed]
+    if needle:
+        rows = [d for d in rows if needle in d.file_name.lower()]
+    if class_id is not None:
+        rows = [d for d in rows if d.class_id == class_id]
+    if file_type is not None:
+        rows = [d for d in rows if d.file_type == file_type]
+    if status is not None:
+        rows = [d for d in rows if d.status == status]
+    rows.sort(key=lambda d: d.created_at, reverse=True)
+    total = len(rows)
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 100)
+    start = (page - 1) * page_size
+    return rows[start:start + page_size], total
