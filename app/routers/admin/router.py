@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import io
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.core.deps import get_db, require_admin
+from app.dependencies.auth import require_admin as require_mock_admin
 from app.models.course import ClassSection
 from app.models.email_outbox import EmailOutbox
 from app.models.import_job import ROW_FAILED, ImportBatch, ImportRow
 from app.models.user import User
 from app.schemas.admin import (
+    AdminSettingsRead,
     ClassAssign,
     ClassCreate,
     ClassRead,
+    ConnectionTestResult,
     CourseCreate,
     CourseRead,
     EmailConfigRead,
@@ -32,6 +37,17 @@ from app.schemas.admin import (
     UserRead,
 )
 from app.services import course_service, email_service, import_service, user_service
+from app.services.admin_settings_service import build_admin_settings
+from app.services.email_service import (
+    EmailConfigurationError,
+    EmailDeliveryError,
+    send_test_email,
+)
+from app.services.llm_service import (
+    LlmConfigurationError,
+    LlmConnectionError,
+    check_llm_connection,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -361,9 +377,11 @@ def retry_email(email_id: int, db: Session = Depends(get_db), _=Depends(require_
 
 
 @router.post("/email-config/test")
-def send_test_email(
+def queue_test_email(
     payload: TestEmailRequest, db: Session = Depends(get_db), _=Depends(require_admin)
 ):
+    # Renamed (was send_test_email): queues via the AI-31 outbox instead of
+    # sending STARTTLS directly, so it no longer shadows the AI-105 import.
     entry = email_service.queue_email(
         db,
         str(payload.to_email),
@@ -385,3 +403,29 @@ def list_roles(_=Depends(require_admin)):
     return {"roles": import_service.valid_role_names()}
 
 
+# --- AI-105 runtime settings + connection checks (mock-auth guard) ---
+@router.get("/settings", response_model=AdminSettingsRead)
+def read_admin_settings(user: Annotated[dict[str, str], Depends(require_mock_admin)]):
+    """Return active configuration metadata without exposing credentials."""
+
+    return build_admin_settings(settings)
+
+
+@router.post("/llm/test-connection", response_model=ConnectionTestResult)
+def test_llm_connection(user: Annotated[dict[str, str], Depends(require_mock_admin)]):
+    """Check the configured Gemini key and model, returning a safe result."""
+
+    try:
+        return check_llm_connection(settings)
+    except (LlmConfigurationError, LlmConnectionError) as error:
+        return ConnectionTestResult(success=False, message=str(error))
+
+
+@router.post("/email/test", response_model=ConnectionTestResult)
+def test_email_sender(user: Annotated[dict[str, str], Depends(require_mock_admin)]):
+    """Send a test message to the authenticated Admin's email address."""
+
+    try:
+        return send_test_email(user["identifier"], settings)
+    except (EmailConfigurationError, EmailDeliveryError) as error:
+        return ConnectionTestResult(success=False, message=str(error))

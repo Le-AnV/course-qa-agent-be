@@ -1,0 +1,48 @@
+# CI for course-qa-agent-be (AI-124).
+# Runs on the project self-hosted runner. No CD, no image push, no secrets.
+# The test suite is DB-free (FastAPI TestClient only), so no services needed.
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+stages:
+  - lint
+  - test
+
+lint:
+  stage: lint
+  image: python:3.12-slim
+  tags:
+    - course-qa-be
+  cache:
+    key:
+      files:
+        - uv.lock
+    paths:
+      - .venv/
+  before_script:
+    # Pin Python 3.12: marker-pdf pins pillow<11, which has no wheel for 3.14 (pipeline 37901).
+    # Shell executor ignores `image:`, so pin via UV_PYTHON; remove when deps support 3.14.
+    - $env:UV_PYTHON = "3.12"
+    - uv sync --frozen
+  script:
+    - uv run ruff check .
+
+test:
+  stage: test
+  image: python:3.12-slim
+  tags:
+    - course-qa-be
+  cache:
+    key:
+      files:
+        - uv.lock
+    paths:
+      - .venv/
+  before_script:
+    - $env:UV_PYTHON = "3.12"
+    - uv sync --frozen
+  script:
+    - uv run pytest -q

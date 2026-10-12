@@ -1,13 +1,22 @@
-"""Auth endpoints — login only. No self-registration (AC-03). Prefix: /api/auth."""
+"""Auth endpoints — DB login (/api/auth) + legacy mock login (/auth, FE compat)."""
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.deps import ensure_bootstrap_admin, get_current_user, get_db
-from app.schemas.auth import LoginRequest, LoginResponse, MeResponse
+from app.schemas.auth import (
+    LoginRequest,
+    LoginResponse,
+    MeResponse,
+    MockLoginRequest,
+    MockLoginResponse,
+)
 from app.services import auth_service
+from app.services.auth import create_access_token as create_mock_token
+from app.services.auth import verify_credentials
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+mock_router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -37,4 +46,20 @@ def me(current_user=Depends(get_current_user)):
         role=current_user.role,
         class_id=current_user.class_id,
         is_active=current_user.is_active,
+    )
+
+
+@mock_router.post("/login", response_model=MockLoginResponse)
+def mock_login(request: MockLoginRequest):
+    """Legacy mock login kept for the FE login modal (pre-DB contract)."""
+    # 1. Kiểm tra tài khoản giả lập
+    user_data = verify_credentials(request.identifier, request.password)
+
+    # 2. Tạo Token JWT
+    token = create_mock_token(data={"sub": user_data["identifier"], "role": user_data["role"]})
+
+    # 3. Trả về Frontend
+    return MockLoginResponse(
+        token=token,
+        role=user_data["role"],
     )

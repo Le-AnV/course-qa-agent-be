@@ -1,17 +1,19 @@
-"""Email outbox queue — rate-limited sending via Gmail app password (AC-08, AC-09)."""
+"""Email outbox queue (AC-08, AC-09) + STARTTLS direct send (AI-105)."""
 
 from __future__ import annotations
 
 import smtplib
+import ssl
 import time
 from datetime import UTC, datetime
 from email.message import EmailMessage
 
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import Settings, settings
 from app.models.email_outbox import EMAIL_FAILED, EMAIL_PENDING, EMAIL_SENT, EmailOutbox
 from app.models.system_config import SystemConfig
+from app.schemas.admin import ConnectionTestResult
 
 CONFIG_KEYS = (
     "smtp_host",
@@ -22,6 +24,19 @@ CONFIG_KEYS = (
     "email_dry_run",
 )
 MASKED = "********"
+
+SMTP_TIMEOUT_SECONDS = 10
+
+
+def _unwrap_secret(value):
+    """Return the plain string for SecretStr-or-str config values."""
+
+    if value is None:
+        return ""
+    get_secret = getattr(value, "get_secret_value", None)
+    if callable(get_secret):
+        return get_secret()
+    return value
 
 
 def _config_map(db: Session) -> dict[str, str]:
@@ -37,7 +52,7 @@ def effective_email_config(db: Session) -> dict:
     sender = stored.get("smtp_sender", "") or settings.smtp_sender
     app_pw = stored.get("smtp_app_password", "")
     if app_pw == "":
-        app_pw = settings.smtp_app_password
+        app_pw = _unwrap_secret(settings.smtp_app_password)
     rate_raw = stored.get("smtp_rate_per_minute", "") or str(settings.smtp_rate_per_minute)
     dry_raw = stored.get("email_dry_run", "")
     try:
@@ -66,7 +81,7 @@ def effective_email_config(db: Session) -> dict:
 def _smtp_credentials(db: Session) -> tuple[str, int, str, str]:
     cfg = effective_email_config(db)
     stored = _config_map(db)
-    app_pw = stored.get("smtp_app_password", "") or settings.smtp_app_password
+    app_pw = stored.get("smtp_app_password", "") or _unwrap_secret(settings.smtp_app_password)
     return cfg["smtp_host"], cfg["smtp_port"], cfg["smtp_sender"], app_pw
 
 
@@ -219,3 +234,65 @@ def retry_failed(db: Session, email_id: int) -> EmailOutbox:
     db.commit()
     db.refresh(entry)
     return entry
+
+
+class EmailConfigurationError(RuntimeError):
+    """Raised when required SMTP credentials are not configured."""
+
+
+class EmailDeliveryError(RuntimeError):
+    """Raised when the SMTP provider rejects or cannot deliver the test email."""
+
+
+def _send_message(message: EmailMessage, config: Settings, failure_message: str) -> None:
+    """Send one message via STARTTLS without returning SMTP credentials."""
+    sender = config.smtp_sender_email
+    password = config.smtp_app_password
+    if sender is None or password is None:
+        raise EmailConfigurationError("SMTP sender email and app password are required")
+
+    try:
+        with smtplib.SMTP(
+            config.smtp_host,
+            config.smtp_port,
+            timeout=SMTP_TIMEOUT_SECONDS,
+        ) as smtp_client:
+            smtp_client.ehlo()
+            smtp_client.starttls(context=ssl.create_default_context())
+            smtp_client.ehlo()
+            smtp_client.login(str(sender), password.get_secret_value())
+            smtp_client.send_message(message)
+    except (OSError, smtplib.SMTPException) as error:
+        raise EmailDeliveryError(failure_message) from error
+
+
+def send_email(
+    recipient: str,
+    subject: str,
+    body: str,
+    config: Settings,
+) -> None:
+    """Send a plain-text account or ticket email using the shared SMTP sender."""
+
+    message = EmailMessage()
+    message["From"] = str(config.smtp_sender_email or "")
+    message["To"] = recipient
+    message["Subject"] = subject
+    message.set_content(body)
+    _send_message(message, config, "Email could not be sent")
+
+
+def send_test_email(recipient: str, config: Settings) -> ConnectionTestResult:
+    """Send one test email without returning or logging SMTP credentials."""
+
+    message = EmailMessage()
+    message["From"] = str(config.smtp_sender_email or "")
+    message["To"] = recipient
+    message["Subject"] = "Course Q&A Agent test email"
+    message.set_content("Your Course Q&A Agent email configuration is working.")
+    _send_message(message, config, "Test email could not be sent")
+
+    return ConnectionTestResult(
+        success=True,
+        message="Test email sent successfully",
+    )

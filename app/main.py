@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.config import settings
 from app.core.database import create_all_tables, init_engine
 from app.routers.admin.router import router as admin_router
+from app.routers.auth.router import mock_router as mock_auth_router
 from app.routers.auth.router import router as auth_router
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Per-Epic routers land here as sprints progress. The legacy mock login
+# (/auth) stays until the FE login modal moves to the DB contract (/api/auth).
 app.include_router(auth_router)
+app.include_router(mock_auth_router)
 app.include_router(admin_router)
 
 

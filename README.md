@@ -9,8 +9,8 @@ Split from the `course-qa-agent` monorepo (project skeleton AI-112).
 ## Stack
 
 - Python 3.11+ with [uv](https://docs.astral.sh/uv/) for dependency management
-- FastAPI + pydantic-settings (all thresholds and connection strings in `app/config.py`, never hardcoded)
-- Layered modular monolith: `app/main.py`, `app/config.py`, `app/routers/`, `app/schemas/`, `app/services/` — one module per Epic E1–E8
+- FastAPI + pydantic-settings (all thresholds and connection strings in `app/config/`, never hardcoded)
+- Layered modular monolith: `app/main.py`, `app/config/`, `app/routers/`, `app/schemas/`, `app/services/` — one module per Epic E1–E8
 - Tests: pytest + httpx (FastAPI `TestClient`); lint: ruff
 
 ## Structure
@@ -19,13 +19,13 @@ Split from the `course-qa-agent` monorepo (project skeleton AI-112).
 .
 ├── app/
 │   ├── main.py          # FastAPI entrypoint — /health, router registration
-│   ├── config.py        # pydantic-settings (DATABASE_URL, QDRANT_URL, CORS)
+│   ├── config/          # pydantic-settings package (DATABASE_URL, QDRANT_URL, CORS, ...)
 │   ├── core/            # cross-cutting: security, deps (later sprints)
 │   ├── models/          # SQLAlchemy models (later sprints)
 │   ├── routers/         # one package per Epic: auth, documents, chat, ...
 │   ├── schemas/         # pydantic request/response models
 │   └── services/        # business logic
-├── tests/               # pytest suite (test_health.py)
+├── tests/               # pytest suite organized by feature area
 ├── pyproject.toml       # deps + ruff + pytest config
 ├── uv.lock              # locked dependencies — commit on every dep change
 ├── Dockerfile           # multi-stage: uv builder -> python:3.12-slim runtime
@@ -77,7 +77,7 @@ Stop with `docker compose down` (add `-v` only to wipe data).
 ## Tests
 
 ```bash
-uv run pytest -q      # unit tests (pythonpath configured in pyproject)
+uv run pytest -q      # unit tests (discovered recursively; pythonpath configured in pyproject)
 uv run ruff check .   # lint
 ```
 
@@ -92,16 +92,38 @@ Each developer uses their own `GEMINI_API_KEY` (free-tier rate limits).
 | `QDRANT_URL` | `http://localhost:6333` |
 | `APP_ENV` | `local` |
 | `CORS_ORIGINS` | `["http://localhost:3000"]` |
-| `JWT_SECRET` | `dev-only-secret-change-me` (change in prod) |
+| `GEMINI_API_KEY` | unset; each developer supplies their own key (`GOOGLE_API_KEY` is also accepted) |
+| `JWT_SECRET` | `dev-only-secret-change-me-use-env-in-prod` (change in prod) |
 | `JWT_EXPIRE_MINUTES` | `720` |
 | `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD` | first admin on fresh DB |
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_SENDER` | Gmail sender config (AI-105, AC-08) |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_SENDER_EMAIL` | Gmail sender config (AI-105, AC-08); `SMTP_SENDER` accepted as legacy alias |
 | `SMTP_APP_PASSWORD` | Gmail **app** password — never a personal password |
 | `SMTP_RATE_PER_MINUTE` | `20` (queue rate limit, AC-09) |
 | `EMAIL_DRY_RUN` | `true` (no real SMTP until configured) |
 
 Admin onboarding flow (AI-31): login → courses → classes → accounts/import.
 API design: [`docs/api-design-admin.md`](docs/api-design-admin.md).
+
+AI-105 uses the fixed Gemini model `models/gemini-3.8-flash` and Gmail SMTP over
+STARTTLS on port `587`. Changing environment credentials requires restarting the
+local backend; Docker reads `.env` when the container is created, so rebuild/recreate
+the backend after changing its environment. Model or SMTP transport defaults are
+code-fixed and require a code change plus a Docker rebuild.
+
+Admin endpoints require an `Authorization: Bearer <token>` for an Admin role:
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/admin/settings` | Read model/sender details and whether secrets are configured; secret values are never returned. |
+| `POST` | `/api/admin/llm/test-connection` | Check the configured Gemini key and fixed model. |
+| `POST` | `/api/admin/email/test` | Send a test email to the authenticated Admin's email address. |
+
+Open `http://localhost:8000/docs` to inspect and try the API contracts. The agreed
+email rate is **20 per minute** and is exposed in settings; enforcement belongs to
+the AI-31 bulk-import queue (`POST /api/admin/email-queue/process` with rate limit).
+By team decision, API keys and SMTP credentials are changed in `.env`, not sent to
+or updated through the AI-105 settings API (the AI-31 outbox config in DB is the
+only runtime-updatable email config).
 
 ## Docs
 
