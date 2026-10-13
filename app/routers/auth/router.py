@@ -6,11 +6,14 @@ from sqlalchemy.orm import Session
 from app.core.deps import ensure_bootstrap_admin, get_current_user, get_db
 from app.models.course import Class, Enrollment
 from app.schemas.auth import (
+    ChangePasswordRequest,
     LoginRequest,
     LoginResponse,
     MeResponse,
+    MessageResponse,
     MockLoginRequest,
     MockLoginResponse,
+    ProfileUpdateRequest,
 )
 from app.services import auth_service, user_service
 from app.services.auth import create_access_token as create_mock_token
@@ -76,9 +79,36 @@ def me(current_user=Depends(get_current_user), db: Session = Depends(get_db)):
     )
 
 
+@router.patch("/profile", response_model=MeResponse)
+def update_profile(
+    payload: ProfileUpdateRequest,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """AC-03: update the caller's own display name; FE re-reads /me after."""
+    try:
+        user = auth_service.update_profile(db, current_user, payload.full_name)
+    except auth_service.ProfileError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    return me(current_user=user, db=db)
+
+
+@router.post("/change-password", response_model=MessageResponse)
+def change_password(
+    payload: ChangePasswordRequest,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """AC-02: verify old password, store the new one hashed (bcrypt)."""
+    try:
+        auth_service.change_password(db, current_user, payload.old_password, payload.new_password)
+    except auth_service.ProfileError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    return MessageResponse(message="Password changed successfully.")
+
+
 @mock_router.post("/login", response_model=MockLoginResponse)
 def mock_login(request: MockLoginRequest, db: Session = Depends(get_db)):
-    """Legacy mock login kept for the FE login modal (pre-DB contract)."""
     # 1. Kiểm tra tài khoản giả lập
     user_data = verify_credentials(request.identifier, request.password, db)
 

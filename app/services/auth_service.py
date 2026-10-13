@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.core.security import LOGIN_GENERIC_ERROR, create_access_token, verify_password
+from app.core.security import (
+    LOGIN_GENERIC_ERROR,
+    create_access_token,
+    hash_password,
+    verify_password,
+)
 from app.models.course import Class, Enrollment
 from app.models.user import Account, Role, User
 
@@ -71,3 +76,45 @@ def login_error() -> str:
     # Single message for: unknown email, wrong password, inactive account,
     # or role awaiting class assignment.
     return LOGIN_GENERIC_ERROR
+
+
+class ProfileError(ValueError):
+    """Domain error for profile updates — carries the HTTP status for the router."""
+
+    def __init__(self, detail: str, status_code: int = 400):
+        super().__init__(detail)
+        self.status_code = status_code
+
+
+def update_profile(db: Session, user: User, full_name: str) -> User:
+    """AC-03: rename the caller's own display name (user.full_name).
+
+    Only the name is editable here — email/role/class are admin-managed
+    (AI-31). The FE re-reads /me afterwards so the rename applies immediately.
+    """
+    name = (full_name or "").strip()
+    if not name:
+        raise ProfileError("Display name must not be empty.", 422)
+    if len(name) > 100:
+        raise ProfileError("Display name must be at most 100 characters.", 422)
+    user.full_name = name
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def change_password(db: Session, user: User, old_password: str, new_password: str) -> None:
+    """AC-02: verify the old password, then replace the bcrypt hash.
+
+    Wrong old password returns the generic login error — never reveal whether
+    it was "close". New password rules: min 8 chars, must differ from old.
+    """
+    if new_password == old_password:
+        raise ProfileError("New password must differ from the old password.", 422)
+    account = db.query(Account).filter(Account.user_id == user.id).first()
+    if account is None or not account.is_active:
+        raise ProfileError(login_error(), 404)
+    if not verify_password(old_password, account.password_hash):
+        raise ProfileError(login_error(), 401)
+    account.password_hash = hash_password(new_password)
+    db.commit()
