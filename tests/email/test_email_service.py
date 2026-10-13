@@ -141,9 +141,7 @@ def test_send_email_delivers_account_message_through_configured_sender(monkeypat
         return client
 
     monkeypatch.setattr("app.services.email_service.smtplib.SMTP", create_client)
-    monkeypatch.setattr(
-        "app.services.email_service.ssl.create_default_context", lambda: object()
-    )
+    monkeypatch.setattr("app.services.email_service.ssl.create_default_context", lambda: object())
     config = Settings(
         _env_file=None,
         smtp_sender_email="sender@example.com",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
@@ -28,8 +29,8 @@ class EmailOutbox(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
     attempts: Mapped[int] = mapped_column(nullable=False, default=0)
     last_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    user_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("user.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

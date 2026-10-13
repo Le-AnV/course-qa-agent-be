@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import io
+import uuid
 
 from email_validator import EmailNotValidError, validate_email
 from openpyxl import Workbook, load_workbook
 from sqlalchemy.orm import Session
 
-from app.models.course import ClassSection
+from app.models.course import Class
 from app.models.import_job import (
     ROW_FAILED,
     ROW_IMPORTED,
@@ -16,7 +17,7 @@ from app.models.import_job import (
     ImportBatch,
     ImportRow,
 )
-from app.models.user import VALID_ROLES, User
+from app.models.user import User
 from app.services import email_service, user_service
 
 # AC-05/AC-06: exact expected columns — NO password column, ever.
@@ -86,19 +87,27 @@ def validate_row(row: dict) -> str | None:
 
 
 def import_rows(
-    db: Session, filename: str, rows: list[dict], created_by_id: int | None
+    db: Session, filename: str, rows: list[dict], created_by_id: uuid.UUID | str | None
 ) -> ImportBatch:
     """Create batch + per-row results. AC-07: random password per account,
     emailed to that gmail; the admin never sees generated passwords (they are
     only queued in the outbox body, never returned by any API)."""
-    batch = ImportBatch(filename=filename, created_by_id=created_by_id, total_rows=len(rows))
+    batch = ImportBatch(
+        filename=filename,
+        created_by_id=(
+            created_by_id
+            if isinstance(created_by_id, uuid.UUID) or created_by_id is None
+            else uuid.UUID(str(created_by_id))
+        ),
+        total_rows=len(rows),
+    )
     db.add(batch)
     db.commit()
     db.refresh(batch)
 
     imported = skipped = failed = 0
     # Preload valid class codes for fast validation.
-    class_codes = {c.code for c in db.query(ClassSection).all()}
+    class_codes = {c.code for c in db.query(Class).all()}
 
     for row in rows:
         error = validate_row(row)
@@ -107,7 +116,7 @@ def import_rows(
             error = f"Class '{cls}' does not exist — create it first."
         status = ROW_IMPORTED
         message = "Imported. Credentials emailed."
-        user_id: int | None = None
+        user_id: uuid.UUID | None = None
 
         if error is not None:
             status, message = ROW_FAILED, error
@@ -127,7 +136,7 @@ def import_rows(
                 )
                 user_id = user.id
                 subject, body = email_service.credential_email_body(
-                    user.username, user.email, plain, row["class"].strip()
+                    user.full_name, user.email, plain, row["class"].strip()
                 )
                 email_service.queue_email(db, user.email, subject, body, user_id=user.id)
                 imported += 1
@@ -171,7 +180,7 @@ def retry_row(db: Session, row_id: int) -> ImportRow:
     error = validate_row(
         {"username": row.username, "gmail": row.email, "type": row.role_raw, "class": row.class_raw}
     )
-    if error is None and db.query(ClassSection).filter(ClassSection.code == row.class_raw).first() is None:
+    if error is None and db.query(Class).filter(Class.code == row.class_raw).first() is None:
         error = f"Class '{row.class_raw}' does not exist — create it first."
     if error is not None:
         row.message = error
@@ -192,7 +201,7 @@ def retry_row(db: Session, row_id: int) -> ImportRow:
         user, plain = user_service.create_user(
             db, username=row.username, email=row.email, role_raw=row.role_raw, class_code=row.class_raw
         )
-        subject, body = email_service.credential_email_body(user.username, user.email, plain, row.class_raw)
+        subject, body = email_service.credential_email_body(user.full_name, user.email, plain, row.class_raw)
         email_service.queue_email(db, user.email, subject, body, user_id=user.id)
         row.status = ROW_IMPORTED
         row.message = "Imported on retry. Credentials emailed."
@@ -212,4 +221,5 @@ def retry_row(db: Session, row_id: int) -> ImportRow:
 
 def valid_role_names() -> list[str]:
     # Importable roles only — admins are never bulk-imported (AC-03).
-    return [r for r in VALID_ROLES if r != "admin"]
+    # Lowercase aliases for the FE dropdown / .xlsx `type` column.
+    return [r for r in ("student", "trainer", "teaching_assistant") if r]

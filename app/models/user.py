@@ -1,44 +1,99 @@
-"""Users — every account is created by an admin, no self-registration (AC-03)."""
+"""SQLAlchemy models for Role, Permission, User, and Account."""
 
-from __future__ import annotations
-
+import uuid
 from datetime import datetime
+from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, Uuid, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
-ROLE_ADMIN = "admin"
-ROLE_TRAINER = "trainer"
-ROLE_TA = "teaching_assistant"
-ROLE_STUDENT = "student"
-VALID_ROLES = (ROLE_ADMIN, ROLE_TRAINER, ROLE_TA, ROLE_STUDENT)
-# Aliases accepted in the .xlsx `type` column (AC-05).
-ROLE_ALIASES = {
-    "student": ROLE_STUDENT,
-    "trainer": ROLE_TRAINER,
-    "teaching assistant": ROLE_TA,
-    "teaching_assistant": ROLE_TA,
-    "ta": ROLE_TA,
-    "assistant": ROLE_TA,
-}
-# Roles that must be assigned to a class before they can log in (AC-03).
-ROLES_REQUIRING_CLASS = (ROLE_TRAINER, ROLE_TA)
+
+class Role(Base):
+    __tablename__ = "role"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    users: Mapped[list["User"]] = relationship("User", back_populates="role")
+    role_permissions: Mapped[list["RolePermission"]] = relationship(
+        "RolePermission", back_populates="role", cascade="all, delete-orphan"
+    )
+
+
+class Permission(Base):
+    __tablename__ = "permission"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    role_permissions: Mapped[list["RolePermission"]] = relationship(
+        "RolePermission", back_populates="permission", cascade="all, delete-orphan"
+    )
+
+
+class RolePermission(Base):
+    __tablename__ = "role_permission"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    role_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("role.id", ondelete="CASCADE"), nullable=False
+    )
+    permission_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("permission.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    role: Mapped["Role"] = relationship("Role", back_populates="role_permissions")
+    permission: Mapped["Permission"] = relationship("Permission", back_populates="role_permissions")
 
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = "user"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    username: Mapped[str] = mapped_column(String(100), nullable=False)
-    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    full_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    role_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("role.id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    role: Mapped["Role"] = relationship("Role", back_populates="users")
+    account: Mapped[Optional["Account"]] = relationship(
+        "Account", back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
+
+
+class Account(Base):
+    __tablename__ = "account"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("user.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    class_id: Mapped[int | None] = mapped_column(
-        ForeignKey("classes.id", ondelete="SET NULL"), nullable=True, index=True
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+
+    user: Mapped["User"] = relationship("User", back_populates="account")

@@ -56,7 +56,9 @@ def docx_loader(file_path: str) -> dict[str, Any]:
                 images[f"docx_img_{img_idx}.png"] = pil_img
                 img_idx += 1
             except Exception as e:  # noqa: BLE001
-                logger.warning("Failed to extract image %s from %s: %s", rel.target_ref, file_path, e)
+                logger.warning(
+                    "Failed to extract image %s from %s: %s", rel.target_ref, file_path, e
+                )
 
     return {
         "markdown": "\n\n".join(markdown_output),

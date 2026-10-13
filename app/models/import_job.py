@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
@@ -21,8 +22,8 @@ class ImportBatch(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
-    created_by_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("user.id", ondelete="SET NULL"), nullable=True
     )
     total_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     imported_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -47,6 +48,6 @@ class ImportRow(Base):
     class_raw: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     message: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    user_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("user.id", ondelete="SET NULL"), nullable=True
     )

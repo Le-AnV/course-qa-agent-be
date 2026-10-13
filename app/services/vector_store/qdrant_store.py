@@ -57,12 +57,14 @@ class QdrantStore:
 
     def _ensure_collection(self, vector_size: int) -> None:
         """Create the collection if it does not exist.
-        
+
         Args:
             vector_size (int): The dimension size of the vectors.
         """
         if not self.client.collection_exists(self.collection_name):
-            logger.info("Creating Qdrant collection '%s' with size %d", self.collection_name, vector_size)
+            logger.info(
+                "Creating Qdrant collection '%s' with size %d", self.collection_name, vector_size
+            )
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
@@ -75,7 +77,7 @@ class QdrantStore:
             "Retrying Qdrant add_documents... Attempt %s. Error: %s",
             retry_state.attempt_number,
             getattr(retry_state.outcome, "exception", lambda: None)() or "unknown error",
-        )
+        ),
     )
     def add_documents(self, documents: list[Document]) -> list[str]:
         """Upsert documents into Qdrant.
@@ -98,7 +100,7 @@ class QdrantStore:
             "Retrying Qdrant similarity search... Attempt %s. Error: %s",
             retry_state.attempt_number,
             getattr(retry_state.outcome, "exception", lambda: None)() or "unknown error",
-        )
+        ),
     )
     def similarity_search(self, query: str, k: int | None = None) -> list[Document]:
         """Perform semantic search on the vector store.
@@ -115,10 +117,10 @@ class QdrantStore:
 
     def as_retriever(self, **kwargs):
         """Get the underlying Qdrant vector store as a LangChain retriever.
-        
+
         Args:
             **kwargs: Additional arguments to pass to the retriever (e.g., search_kwargs).
-            
+
         Returns:
             VectorStoreRetriever: The LangChain retriever instance.
         """

@@ -30,10 +30,10 @@ def protect_special_blocks(text: str) -> tuple[str, dict[str, str]]:
 
     # Protect Fenced Code Blocks (```...```)
     text = re.sub(r"```[\s\S]*?```", replacer, text)
-    
+
     # Protect Inline Code (`...`)
     text = re.sub(r"`[^`\n]+`", replacer, text)
-    
+
     # Protect Block Math ($$...$$)
     text = re.sub(r"\$\$[\s\S]*?\$\$", replacer, text)
 
@@ -70,14 +70,14 @@ def clean_page_artifacts(text: str, custom_watermarks: list[str] | None = None) 
         r"^(?:[-_]*page\s*\d+[-_]*|[-_]+\s*\d+\s*[-_]+|\s*\d{1,4}\s*)$",
         "",
         text,
-        flags=re.IGNORECASE | re.MULTILINE
+        flags=re.IGNORECASE | re.MULTILINE,
     )
 
     if custom_watermarks:
         for wm in custom_watermarks:
             pattern = rf"^\s*{re.escape(wm)}\s*$"
             text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.MULTILINE)
-            
+
     return text
 
 
@@ -192,7 +192,7 @@ def clean_latex_math(text: str) -> str:
     pattern = r"\$\s*([^\$\n]+?)\s*\$\s*([\+\-\*\/=><])\s*\$\s*([^\$\n]+?)\s*\$"
     while re.search(pattern, text):
         text = re.sub(pattern, r"$\1 \2 \3$", text)
-    
+
     # Remove padding spaces inside inline math tags
     text = re.sub(r"\$\s+([^\$\n]+?)\s+\$", r"$\1$", text)
 
@@ -210,6 +210,7 @@ def clean_image_tags(text: str, base_image_dir: str | None = None) -> str:
     Returns:
         str: The text with invalid images removed.
     """
+
     def check_image(match: re.Match) -> str:
         img_path = match.group(2).strip()
 
@@ -227,7 +228,9 @@ def clean_image_tags(text: str, base_image_dir: str | None = None) -> str:
     text = re.sub(r"!\[(.*?)\]\((.*?)\)", check_image, text)
 
     # Remove orphaned standalone captions
-    text = re.sub(r"^\s*(?:Figure|Fig\.|Hình)\s*\d+[\s:.-]*$", "", text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(
+        r"^\s*(?:Figure|Fig\.|Hình)\s*\d+[\s:.-]*$", "", text, flags=re.IGNORECASE | re.MULTILINE
+    )
 
     return text
 

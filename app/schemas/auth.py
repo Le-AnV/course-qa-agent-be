@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -13,18 +15,21 @@ class LoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    # Lowercase role alias for FE compat (DB stores UPPERCASE).
     role: str
-    user_id: int
+    user_id: uuid.UUID
+    # Compat name — sourced from ``user.full_name`` (ERD has no username column).
     username: str
-    class_id: int | None = None
+    class_id: uuid.UUID | None = None
 
 
 class MeResponse(BaseModel):
-    id: int
+    id: uuid.UUID
+    # Compat name — sourced from ``user.full_name``.
     username: str
     email: str
     role: str
-    class_id: int | None
+    class_id: uuid.UUID | None
     is_active: bool
 
 

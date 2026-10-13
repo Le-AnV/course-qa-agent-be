@@ -102,9 +102,7 @@ def test_admin_can_send_test_email_to_their_login_address(api_client, monkeypatc
         recipients.append(recipient)
         return {"success": True, "message": "Test email sent successfully"}
 
-    monkeypatch.setattr(
-        "app.routers.admin.router.send_test_email", record_test_email
-    )
+    monkeypatch.setattr("app.routers.admin.router.send_test_email", record_test_email)
     headers = admin_headers(identifier="admin@example.com")
 
     response = api_client.post("/api/admin/email/test", headers=headers)
@@ -130,17 +128,11 @@ def test_admin_connection_endpoints_return_safe_failure_results(api_client, monk
 
         raise EmailDeliveryError("Test email could not be sent")
 
-    monkeypatch.setattr(
-        "app.routers.admin.router.check_llm_connection", fail_llm_connection
-    )
-    monkeypatch.setattr(
-        "app.routers.admin.router.send_test_email", fail_email_delivery
-    )
+    monkeypatch.setattr("app.routers.admin.router.check_llm_connection", fail_llm_connection)
+    monkeypatch.setattr("app.routers.admin.router.send_test_email", fail_email_delivery)
     headers = admin_headers()
 
-    llm_response = api_client.post(
-        "/api/admin/llm/test-connection", headers=headers
-    )
+    llm_response = api_client.post("/api/admin/llm/test-connection", headers=headers)
     email_response = api_client.post("/api/admin/email/test", headers=headers)
 
     assert llm_response.json() == {

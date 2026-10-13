@@ -54,13 +54,20 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_env: str = "local"
-    cors_origins: list[str] = ["http://localhost:3000"]
+    cors_origins: list[str] = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+    ]
     database_url: str = "postgresql+psycopg://qa:qa@localhost:5432/course_qa"
 
     # Vector store configuration
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = Field(default=None, validation_alias="QDRANT_API_KEY")
-    collection_name: str = Field(default="assistant-documents-agent", validation_alias="COLLECTION_NAME")
+    collection_name: str = Field(
+        default="assistant-documents-agent", validation_alias="COLLECTION_NAME"
+    )
     vector_size: ClassVar[int] = 1536
     retrieval_threshold: ClassVar[float] = 0.8
     content_gap_similarity_threshold: ClassVar[float] = 0.85

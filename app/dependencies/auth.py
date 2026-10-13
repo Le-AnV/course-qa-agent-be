@@ -14,26 +14,20 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         role: str = payload.get("role")
         if identifier is None or role is None:
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token payload"
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload"
             )
         return {"identifier": identifier, "role": role}
     except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has expired")
     except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
 
 def require_admin(user: dict = Depends(get_current_user)):
     if user.get("role") != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions. Admin role required."
+            detail="Not enough permissions. Admin role required.",
         )
     return user
 
@@ -42,7 +36,7 @@ def require_trainer(user: dict = Depends(get_current_user)):
     if user.get("role") not in ["admin", "trainer"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions. Trainer or Admin role required."
+            detail="Not enough permissions. Trainer or Admin role required.",
         )
     return user
 
@@ -50,6 +44,6 @@ def require_student(user: dict = Depends(get_current_user)):
     if user.get("role") != "student":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions. Student role required."
+            detail="Not enough permissions. Student role required.",
         )
     return user

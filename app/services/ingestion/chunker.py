@@ -1,4 +1,5 @@
 """Document splitter and chunker module."""
+
 import re
 
 from langchain_core.documents import Document
@@ -10,30 +11,29 @@ from app.config.config import get_settings
 def markdown_chunker(
     markdown: str,
     metadata: dict | None = None,
-    headers_to_split_on: list[tuple[str, str]] | None = None
-) -> list[Document]: 
+    headers_to_split_on: list[tuple[str, str]] | None = None,
+) -> list[Document]:
     """Split markdown text into chunks based on headers and add page numbers.
-    
+
     Args:
         markdown: The markdown text to split.
         metadata: Optional dictionary containing metadata.
         headers_to_split_on: Optional list of tuples specifying headers to split on.
-        
+
     Returns:
         List of Document chunks split by headers.
     """
     settings = get_settings()
     headers = headers_to_split_on or settings.headers_to_split_on
 
-    markdown_splitter = MarkdownHeaderTextSplitter(
-        headers_to_split_on=headers,
-        strip_headers=True
-    )
+    markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers, strip_headers=True)
 
     chunks = markdown_splitter.split_text(markdown)
-    
+
     # Calculate starting page number for each chunk
-    page_breaks = [m.start() for m in re.finditer(r"<!--\s*page\s*break\s*-->", markdown, flags=re.IGNORECASE)]
+    page_breaks = [
+        m.start() for m in re.finditer(r"<!--\s*page\s*break\s*-->", markdown, flags=re.IGNORECASE)
+    ]
     search_start = 0
 
     for chunk in chunks:
@@ -54,10 +54,12 @@ def markdown_chunker(
     if metadata:
         for chunk in chunks:
             chunk.metadata.update(metadata)
-            
+
     # Clean up page break tags inside chunk contents
     for chunk in chunks:
-        chunk.page_content = re.sub(r"<!--\s*page\s*break\s*-->\s*", "\n\n", chunk.page_content, flags=re.IGNORECASE)
+        chunk.page_content = re.sub(
+            r"<!--\s*page\s*break\s*-->\s*", "\n\n", chunk.page_content, flags=re.IGNORECASE
+        )
 
     return chunks
 
@@ -67,21 +69,21 @@ def recursive_chunker(
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
     separators: list[str] | None = None,
-    metadata: dict | None = None
+    metadata: dict | None = None,
 ) -> list[Document]:
     """Split documents into smaller chunks using recursive character splitting.
-    
+
     Args:
         documents: List of Documents to split.
-        chunk_size: Maximum character count per document chunk. 
+        chunk_size: Maximum character count per document chunk.
             Defaults to settings.chunk_size.
-        chunk_overlap: Overlap character count between consecutive chunks. 
+        chunk_overlap: Overlap character count between consecutive chunks.
             Defaults to settings.chunk_overlap.
-        separators: List of string separators used for splitting. 
+        separators: List of string separators used for splitting.
             Defaults to settings.separators.
-        metadata: Optional dictionary containing metadata (e.g., file name, class, 
+        metadata: Optional dictionary containing metadata (e.g., file name, class,
             chapter, starting page number) to add to or update in each chunk.
-            
+
     Returns:
         List of recursively chunked Documents.
     """
@@ -91,15 +93,13 @@ def recursive_chunker(
     seps = separators if separators is not None else settings.separators
 
     splitter = RecursiveCharacterTextSplitter(
-        separators=seps,
-        chunk_size=size,
-        chunk_overlap=overlap
+        separators=seps, chunk_size=size, chunk_overlap=overlap
     )
 
     chunks = splitter.split_documents(documents)
-    
+
     if metadata:
         for chunk in chunks:
             chunk.metadata.update(metadata)
-            
+
     return chunks

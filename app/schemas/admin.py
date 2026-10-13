@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Literal
 
@@ -15,7 +16,7 @@ class CourseCreate(BaseModel):
 
 
 class CourseRead(BaseModel):
-    id: int
+    id: uuid.UUID
     code: str
     title: str
     class_count: int = 0
@@ -25,24 +26,26 @@ class CourseRead(BaseModel):
 
 # --- Classes (AC-01, AC-02) ---
 class ClassCreate(BaseModel):
-    course_id: int
+    course_id: uuid.UUID
     code: str = Field(min_length=1, max_length=50)
+    # ERD: class.trainer_id NOT NULL — trainer required at creation.
+    trainer_id: uuid.UUID
+    name: str | None = Field(default=None, max_length=100)
+    semester: str = Field(default="S1", max_length=20)
+    academic_year: str = Field(default="2026", max_length=20)
 
 
 class ClassAssign(BaseModel):
-    trainer_id: int | None = None
-    ta_id: int | None = None
+    trainer_id: uuid.UUID | None = None
 
 
 class ClassRead(BaseModel):
-    id: int
-    course_id: int
+    id: uuid.UUID
+    course_id: uuid.UUID
     course_code: str = ""
     code: str
-    trainer_id: int | None = None
+    trainer_id: uuid.UUID | None = None
     trainer_name: str | None = None
-    ta_id: int | None = None
-    ta_name: str | None = None
     student_count: int = 0
     # AC-12: delete warning data.
     document_count: int = 0
@@ -60,11 +63,13 @@ class UserCreate(BaseModel):
 
 
 class UserRead(BaseModel):
-    id: int
+    id: uuid.UUID
+    # Compat name — sourced from ``user.full_name`` (ERD has no username column).
     username: str
     email: str
+    # Lowercase role alias for FE compat (DB stores UPPERCASE).
     role: str
-    class_id: int | None
+    class_id: uuid.UUID | None
     class_code: str | None = None
     is_active: bool
 

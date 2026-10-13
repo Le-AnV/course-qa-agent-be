@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
@@ -12,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.core.deps import get_db, require_admin
 from app.dependencies.auth import require_admin as require_mock_admin
-from app.models.course import ClassSection
+from app.models.course import Class, Enrollment
 from app.models.email_outbox import EmailOutbox
 from app.models.import_job import ROW_FAILED, ImportBatch, ImportRow
 from app.models.user import User
@@ -52,7 +53,7 @@ from app.services.llm_service import (
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
-def _class_to_read(db: Session, section: ClassSection) -> ClassRead:
+def _class_to_read(db: Session, section: Class) -> ClassRead:
     course = course_service.get_course(db, section.course_id)
     warnings = course_service.class_warnings(db, section.id)
     return ClassRead(
@@ -62,8 +63,6 @@ def _class_to_read(db: Session, section: ClassSection) -> ClassRead:
         code=section.code,
         trainer_id=section.trainer_id,
         trainer_name=course_service.user_display_name(db, section.trainer_id),
-        ta_id=section.ta_id,
-        ta_name=course_service.user_display_name(db, section.ta_id),
         student_count=course_service.count_students(db, section.id),
         document_count=warnings["document_count"],
         ticket_count=warnings["ticket_count"],
@@ -71,18 +70,33 @@ def _class_to_read(db: Session, section: ClassSection) -> ClassRead:
 
 
 def _user_to_read(db: Session, user: User) -> UserRead:
-    class_code = None
-    if user.class_id is not None:
-        section = course_service.get_class(db, user.class_id)
-        class_code = section.code if section else None
+    # ERD: no ``User.class_id``. Class scope = trainer slot or enrollment.
+    class_id: uuid.UUID | None = None
+    class_code: str | None = None
+    owned = db.query(Class).filter(Class.trainer_id == user.id).first()
+    if owned is not None:
+        class_id, class_code = owned.id, owned.code
+    else:
+        enrolled = (
+            db.query(Enrollment)
+            .filter(Enrollment.student_id == user.id, Enrollment.status == "ACTIVE")
+            .first()
+        )
+        if enrolled is not None:
+            section = course_service.get_class(db, enrolled.class_id)
+            if section is not None:
+                class_id, class_code = section.id, section.code
+    role_name = user_service.role_name_of(user)
+    if not role_name:
+        role_name = user_service.normalize_role(user_service.ROLE_STUDENT)
     return UserRead(
         id=user.id,
-        username=user.username,
+        username=user.full_name,
         email=user.email,
-        role=user.role,
-        class_id=user.class_id,
+        role=role_name.lower(),
+        class_id=class_id,
         class_code=class_code,
-        is_active=user.is_active,
+        is_active=user.status == "ACTIVE",
     )
 
 
@@ -106,7 +120,7 @@ def create_course(payload: CourseCreate, db: Session = Depends(get_db), _=Depend
         course = course_service.create_course(db, payload.code, payload.title)
     except course_service.DomainError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    return CourseRead(id=course.id, code=course.code, title=course.title, class_count=0)
+    return CourseRead(id=course.id, code=course.code, title=course.name, class_count=0)
 
 
 @router.get("/courses", response_model=list[CourseRead])
@@ -114,7 +128,7 @@ def list_courses(db: Session = Depends(get_db), _=Depends(require_admin)):
     out = []
     for course in course_service.list_courses(db):
         count = len(course_service.list_classes(db, course_id=course.id))
-        out.append(CourseRead(id=course.id, code=course.code, title=course.title, class_count=count))
+        out.append(CourseRead(id=course.id, code=course.code, title=course.name, class_count=count))
     return out
 
 
@@ -122,7 +136,15 @@ def list_courses(db: Session = Depends(get_db), _=Depends(require_admin)):
 @router.post("/classes", response_model=ClassRead, status_code=status.HTTP_201_CREATED)
 def create_class(payload: ClassCreate, db: Session = Depends(get_db), _=Depends(require_admin)):
     try:
-        section = course_service.create_class(db, payload.course_id, payload.code)
+        section = course_service.create_class(
+            db,
+            payload.course_id,
+            payload.code,
+            trainer_id=payload.trainer_id,
+            name=payload.name,
+            semester=payload.semester,
+            academic_year=payload.academic_year,
+        )
     except course_service.DomainError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     return _class_to_read(db, section)
@@ -130,7 +152,7 @@ def create_class(payload: ClassCreate, db: Session = Depends(get_db), _=Depends(
 
 @router.get("/classes", response_model=list[ClassRead])
 def list_classes(
-    course_id: int | None = Query(default=None),
+    course_id: uuid.UUID | None = Query(default=None),
     db: Session = Depends(get_db),
     _=Depends(require_admin),
 ):
@@ -139,17 +161,22 @@ def list_classes(
 
 @router.patch("/classes/{class_id}/assign", response_model=ClassRead)
 def assign_staff(
-    class_id: int, payload: ClassAssign, db: Session = Depends(get_db), _=Depends(require_admin)
+    class_id: uuid.UUID,
+    payload: ClassAssign,
+    db: Session = Depends(get_db),
+    _=Depends(require_admin),
 ):
     try:
-        section = course_service.assign_staff(db, class_id, payload.trainer_id, payload.ta_id)
+        section = course_service.assign_staff(db, class_id, payload.trainer_id)
     except course_service.DomainError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     return _class_to_read(db, section)
 
 
 @router.delete("/classes/{class_id}")
-def delete_class(class_id: int, db: Session = Depends(get_db), _=Depends(require_admin)):
+def delete_class(
+    class_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(require_admin)
+):
     try:
         warnings = course_service.delete_class(db, class_id)
     except course_service.DomainError as exc:
@@ -169,7 +196,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), _=Depends(re
     # AC-07 pattern for single creates too: email the password, never return
     # it. Queued for the rate-limited drain (AC-09), not sent inline.
     subject, body = email_service.credential_email_body(
-        user.username, user.email, plain, payload.class_code
+        user.full_name, user.email, plain, payload.class_code
     )
     email_service.queue_email(db, user.email, subject, body, user_id=user.id)
     return _user_to_read(db, user)
@@ -178,7 +205,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), _=Depends(re
 @router.get("/users", response_model=list[UserRead])
 def list_users(
     role: str | None = Query(default=None),
-    class_id: int | None = Query(default=None),
+    class_id: uuid.UUID | None = Query(default=None),
     db: Session = Depends(get_db),
     _=Depends(require_admin),
 ):
@@ -187,7 +214,10 @@ def list_users(
 
 @router.patch("/users/{user_id}/active", response_model=UserRead)
 def set_user_active(
-    user_id: int, payload: UserDeactivate, db: Session = Depends(get_db), _=Depends(require_admin)
+    user_id: uuid.UUID,
+    payload: UserDeactivate,
+    db: Session = Depends(get_db),
+    _=Depends(require_admin),
 ):
     try:
         user = user_service.set_active(db, user_id, payload.is_active)
@@ -197,12 +227,14 @@ def set_user_active(
 
 
 @router.post("/users/{user_id}/reset-password")
-def reset_password(user_id: int, db: Session = Depends(get_db), _=Depends(require_admin)):
+def reset_password(
+    user_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(require_admin)
+):
     try:
         user, plain = user_service.reset_password(db, user_id)
     except user_service.DomainError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    subject, body = email_service.reset_email_body(user.username, user.email, plain)
+    subject, body = email_service.reset_email_body(user.full_name, user.email, plain)
     email_service.queue_email(db, user.email, subject, body, user_id=user.id)
     # Queued for the rate-limited drain (AC-09), not sent inline.
     return {"user_id": user.id, "emailed_to": user.email}
@@ -210,7 +242,7 @@ def reset_password(user_id: int, db: Session = Depends(get_db), _=Depends(requir
 
 @router.delete("/users/{user_id}")
 def delete_user(
-    user_id: int,
+    user_id: uuid.UUID,
     confirm: bool = Query(default=False),
     db: Session = Depends(get_db),
     _=Depends(require_admin),

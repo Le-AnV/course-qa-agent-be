@@ -5,6 +5,7 @@ from __future__ import annotations
 import smtplib
 import ssl
 import time
+import uuid
 from datetime import UTC, datetime
 from email.message import EmailMessage
 
@@ -140,7 +141,16 @@ def reset_email_body(username: str, email: str, password: str) -> tuple[str, str
     return subject, body
 
 
-def queue_email(db: Session, to_email: str, subject: str, body: str, user_id: int | None = None) -> EmailOutbox:
+def queue_email(
+    db: Session,
+    to_email: str,
+    subject: str,
+    body: str,
+    user_id: uuid.UUID | str | None = None,
+) -> EmailOutbox:
+    uid = None
+    if user_id is not None:
+        uid = user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id))
     entry = EmailOutbox(
         to_email=to_email.strip().lower(),
         subject=subject,
@@ -148,7 +158,7 @@ def queue_email(db: Session, to_email: str, subject: str, body: str, user_id: in
         status=EMAIL_PENDING,
         attempts=0,
         last_error="",
-        user_id=user_id,
+        user_id=uid,
     )
     db.add(entry)
     db.commit()
