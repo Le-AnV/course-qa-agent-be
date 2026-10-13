@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -23,7 +23,7 @@ def get_qdrant_client() -> Any | None:
         from qdrant_client import QdrantClient
 
         return QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("Could not initialize QdrantClient in history service: %s", exc)
         return None
 
@@ -53,11 +53,11 @@ def sync_content_gap_query(
                 "message_id": message_id,
                 "class_id": class_id,
                 "student_id": student_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             },
         )
         client.upsert(collection_name="content_gap_queries", points=[point])
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to sync content gap query to Qdrant: %s", exc)
 
 
@@ -80,7 +80,7 @@ def delete_content_gap_queries(
             collection_name="content_gap_queries",
             points_selector=PointIdsList(points=message_ids),
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to delete points from Qdrant content_gap_queries: %s", exc)
 
 

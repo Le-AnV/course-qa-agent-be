@@ -24,7 +24,6 @@ class ChatMessageBase(BaseModel):
 class MessageCreateRequest(ChatMessageBase):
     """Request payload to append a message to an existing session."""
 
-    pass
 
 
 class ChatMessageResponse(ChatMessageBase):
