@@ -1,4 +1,4 @@
-"""Pydantic schemas for auth — DB login (E1 / AI-25, AI-27, AI-31) + mock login compat."""
+"""Pydantic schemas for auth — DB login (E1 / AI-25, AI-27, AI-31)."""
 
 from __future__ import annotations
 
@@ -31,18 +31,6 @@ class MeResponse(BaseModel):
     role: str
     class_id: uuid.UUID | None
     is_active: bool
-
-
-class MockLoginRequest(BaseModel):
-    """Compat with the pre-DB mock login used by the FE login modal (/auth/login)."""
-
-    identifier: str
-    password: str
-
-
-class MockLoginResponse(BaseModel):
-    token: str
-    role: str
 
 
 class ProfileUpdateRequest(BaseModel):
