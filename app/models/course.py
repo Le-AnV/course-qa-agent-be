@@ -2,11 +2,15 @@
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.document import Document
 
 
 class Course(Base):
@@ -47,6 +51,7 @@ class Class(Base):
 
     course: Mapped["Course"] = relationship("Course", back_populates="classes")
     enrollments: Mapped[list["Enrollment"]] = relationship("Enrollment", back_populates="clazz")
+    documents: Mapped[list["Document"]] = relationship("Document", back_populates="clazz")
 
 
 class Enrollment(Base):
