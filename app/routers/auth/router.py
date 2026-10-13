@@ -1,4 +1,4 @@
-"""Auth endpoints — DB login (/api/auth) + legacy mock login (/auth, FE compat)."""
+"""Auth endpoints — DB login (/api/auth)."""
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -11,16 +11,11 @@ from app.schemas.auth import (
     LoginResponse,
     MeResponse,
     MessageResponse,
-    MockLoginRequest,
-    MockLoginResponse,
     ProfileUpdateRequest,
 )
 from app.services import auth_service, user_service
-from app.services.auth import create_access_token as create_mock_token
-from app.services.auth import verify_credentials
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-mock_router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -105,18 +100,3 @@ def change_password(
     except auth_service.ProfileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc))
     return MessageResponse(message="Password changed successfully.")
-
-
-@mock_router.post("/login", response_model=MockLoginResponse)
-def mock_login(request: MockLoginRequest, db: Session = Depends(get_db)):
-    # 1. Kiểm tra tài khoản giả lập
-    user_data = verify_credentials(request.identifier, request.password, db)
-
-    # 2. Tạo Token JWT
-    token = create_mock_token(data={"sub": user_data["identifier"], "role": user_data["role"]})
-
-    # 3. Trả về Frontend
-    return MockLoginResponse(
-        token=token,
-        role=user_data["role"],
-    )

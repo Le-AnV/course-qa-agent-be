@@ -134,4 +134,5 @@ Validation: `new_password` min 8 chars, must differ from old.
 - Email change (admin-managed, AI-31).
 - Role / class change (RBAC, AI-27 / AI-31).
 - Avatar upload (no ERD column; future story if needed).
-- `POST /auth/login` legacy mock contract — untouched.
+- `POST /auth/login` legacy mock contract — removed in `hotfix/Bug_MockLoginFallback` (AI-25);
+  the FE login modal now uses `POST /api/auth/login` only.

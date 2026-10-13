@@ -2,9 +2,8 @@
 
 Uses in-memory SQLite (StaticPool) so CI stays DB-free. Covers:
 - seed roles/users (UUID User/Account),
-- mock/legacy verify_credentials with a DB session,
+- verify_credentials helper (DB-backed credential check),
 - POST /api/auth/login (UUID LoginResponse, generic 401),
-- POST /auth/login legacy mock (now DB-backed),
 - GET /api/auth/me with class scope.
 """
 
@@ -152,31 +151,6 @@ def test_api_login_uuid_contract(client):
     )
     assert bad.status_code == nobody.status_code == 401
     assert bad.json()["detail"] == nobody.json()["detail"]
-
-
-def test_legacy_mock_login_is_db_backed(client):
-    from app.core.database import get_session_local as _gsl
-
-    SessionLocal = _gsl(TEST_DB_URL)
-    db = SessionLocal()
-    try:
-        seed_database(db)
-    finally:
-        db.close()
-
-    res = client.post(
-        "/auth/login",
-        json={"identifier": "admin@academic.edu.vn", "password": "Admin@123"},
-    )
-    assert res.status_code == 200, res.text
-    assert res.json()["role"] == "admin"
-    assert res.json()["token"]
-
-    res = client.post(
-        "/auth/login",
-        json={"identifier": "admin@academic.edu.vn", "password": "WrongPassword"},
-    )
-    assert res.status_code == 401
 
 
 def test_me_returns_uuid_scope(client):
