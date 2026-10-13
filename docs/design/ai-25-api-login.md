@@ -14,6 +14,10 @@ The backend exposes an authentication endpoint (`POST /auth/login`) that accepts
 
 Mock data (`MOCK_USERS`) has been completely removed in favor of pure database authentication.
 
+> **Update (AI-25 hotfix — `hotfix/Bug_MockLoginFallback`):** the legacy `POST /auth/login`
+> contract has been **removed** — the FE login modal now calls `POST /api/auth/login` only.
+> Contract for the live endpoint: `docs/design/ai-29-personal-profile.md` §3.1.
+
 ---
 
 ## 2. API Contract
