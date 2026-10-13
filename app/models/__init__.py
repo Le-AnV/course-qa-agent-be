@@ -1,19 +1,7 @@
-"""SQLAlchemy models package."""
+"""SQLAlchemy models - source of truth for the ERD (AI-119 aligns here)."""
 
-from app.models.base import Base
-from app.models.config import AppConfig
-from app.models.course import Class, Course, Enrollment
-from app.models.user import Account, Permission, Role, RolePermission, User
-
-__all__ = [
-    "Account",
-    "AppConfig",
-    "Base",
-    "Class",
-    "Course",
-    "Enrollment",
-    "Permission",
-    "Role",
-    "RolePermission",
-    "User",
-]
+from app.models.course import Class, Course, Enrollment  # noqa: F401
+from app.models.email_outbox import EmailOutbox  # noqa: F401
+from app.models.import_job import ImportBatch, ImportRow  # noqa: F401
+from app.models.system_config import SystemConfig  # noqa: F401
+from app.models.user import Account, Permission, Role, RolePermission, User  # noqa: F401

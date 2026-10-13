@@ -6,8 +6,7 @@ from app.services.auth import ALGORITHM, SECRET_KEY
 
 security = HTTPBearer()
 
-
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):  # noqa: B008
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -24,7 +23,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
-def require_admin(user: dict = Depends(get_current_user)):  # noqa: B008
+def require_admin(user: dict = Depends(get_current_user)):
     if user.get("role") != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -32,8 +31,7 @@ def require_admin(user: dict = Depends(get_current_user)):  # noqa: B008
         )
     return user
 
-
-def require_trainer(user: dict = Depends(get_current_user)):  # noqa: B008
+def require_trainer(user: dict = Depends(get_current_user)):
     # Trainer OR Admin can access trainer routes
     if user.get("role") not in ["admin", "trainer"]:
         raise HTTPException(
@@ -42,8 +40,7 @@ def require_trainer(user: dict = Depends(get_current_user)):  # noqa: B008
         )
     return user
 
-
-def require_student(user: dict = Depends(get_current_user)):  # noqa: B008
+def require_student(user: dict = Depends(get_current_user)):
     if user.get("role") != "student":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

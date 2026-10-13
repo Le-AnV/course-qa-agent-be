@@ -1,10 +1,160 @@
-"""Response contracts for Admin system settings and connection checks."""
+"""Pydantic schemas for admin: courses, classes, accounts, imports, email (AI-31, AI-105)."""
 
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field
 
 
+# --- Courses (AC-01) ---
+class CourseCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=50)
+    title: str = Field(min_length=1, max_length=255)
+
+
+class CourseRead(BaseModel):
+    id: uuid.UUID
+    code: str
+    title: str
+    class_count: int = 0
+
+    model_config = {"from_attributes": True}
+
+
+# --- Classes (AC-01, AC-02) ---
+class ClassCreate(BaseModel):
+    course_id: uuid.UUID
+    code: str = Field(min_length=1, max_length=50)
+    # ERD: class.trainer_id NOT NULL — trainer required at creation.
+    trainer_id: uuid.UUID
+    name: str | None = Field(default=None, max_length=100)
+    semester: str = Field(default="S1", max_length=20)
+    academic_year: str = Field(default="2026", max_length=20)
+
+
+class ClassAssign(BaseModel):
+    trainer_id: uuid.UUID | None = None
+
+
+class ClassRead(BaseModel):
+    id: uuid.UUID
+    course_id: uuid.UUID
+    course_code: str = ""
+    code: str
+    trainer_id: uuid.UUID | None = None
+    trainer_name: str | None = None
+    student_count: int = 0
+    # AC-12: delete warning data.
+    document_count: int = 0
+    ticket_count: int = 0
+
+    model_config = {"from_attributes": True}
+
+
+# --- Accounts (AC-03, AC-11, AC-12) ---
+class UserCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    email: EmailStr
+    role: str = Field(min_length=1)
+    class_code: str | None = Field(default=None, max_length=50)
+
+
+class UserRead(BaseModel):
+    id: uuid.UUID
+    # Compat name — sourced from ``user.full_name`` (ERD has no username column).
+    username: str
+    email: str
+    # Lowercase role alias for FE compat (DB stores UPPERCASE).
+    role: str
+    class_id: uuid.UUID | None
+    class_code: str | None = None
+    is_active: bool
+
+    model_config = {"from_attributes": True}
+
+
+class UserDeactivate(BaseModel):
+    is_active: bool
+
+
+# --- Import (AC-05..AC-10) ---
+class ImportRowRead(BaseModel):
+    id: int
+    row_number: int
+    username: str
+    email: str
+    role_raw: str
+    class_raw: str
+    status: str
+    message: str
+
+    model_config = {"from_attributes": True}
+
+
+class ImportBatchRead(BaseModel):
+    id: int
+    filename: str
+    total_rows: int
+    imported_count: int
+    skipped_count: int
+    failed_count: int
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ImportBatchDetail(ImportBatchRead):
+    rows: list[ImportRowRead] = []
+
+
+# --- Email queue (AC-08, AC-09) ---
+class EmailQueueStats(BaseModel):
+    pending: int
+    sent: int
+    failed: int
+
+
+class EmailOutboxRead(BaseModel):
+    id: int
+    to_email: str
+    subject: str
+    status: str
+    attempts: int
+    last_error: str
+    created_at: datetime
+    sent_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class EmailConfigRead(BaseModel):
+    smtp_host: str
+    smtp_port: int
+    smtp_sender: str
+    # Masked — never returned or logged (AC-08, AI-105).
+    has_app_password: bool
+    smtp_rate_per_minute: int
+    email_dry_run: bool
+
+
+class EmailConfigUpdate(BaseModel):
+    smtp_host: str | None = None
+    smtp_port: int | None = None
+    smtp_sender: str | None = None
+    # App password (Gmail / Google Workspace) — write-only.
+    smtp_app_password: str | None = None
+    smtp_rate_per_minute: int | None = Field(default=None, ge=1, le=500)
+    email_dry_run: bool | None = None
+
+
+class TestEmailRequest(BaseModel):
+    to_email: EmailStr
+
+
+# --- AI-105 runtime settings + connection checks ---
 class LlmSettingsRead(BaseModel):
     """Expose the active model and whether its API key is configured."""
 
