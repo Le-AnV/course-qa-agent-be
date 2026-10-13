@@ -43,3 +43,20 @@ class MockLoginRequest(BaseModel):
 class MockLoginResponse(BaseModel):
     token: str
     role: str
+
+
+class ProfileUpdateRequest(BaseModel):
+    """AC-03: the caller edits only their own display name (user.full_name)."""
+
+    full_name: str = Field(min_length=1, max_length=100)
+
+
+class ChangePasswordRequest(BaseModel):
+    """AC-02: old password must be verified before the hash is replaced."""
+
+    old_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=8)
+
+
+class MessageResponse(BaseModel):
+    message: str
