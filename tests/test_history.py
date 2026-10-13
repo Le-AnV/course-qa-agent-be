@@ -10,6 +10,7 @@ Covers AC-01 through AC-07:
 
 import uuid
 from collections.abc import Generator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,6 +25,7 @@ from app.core.database import Base, get_session_local, reset_engine
 from app.core.deps import get_db
 from app.core.seed import seed_database
 from app.main import app
+from app.models.chat import ChatSession
 from app.models.course import Class, Course
 from app.models.user import User
 from app.services import history_service
@@ -139,6 +141,14 @@ def test_create_and_list_sessions(client: TestClient, db_session: Session) -> No
     )
     assert create_res2.status_code == 201
     s2_id = create_res2.json()["id"]
+
+    # In fast in-memory SQLite, both sessions can be created in the same second.
+    # Set an earlier updated_at on s1 to guarantee deterministic ordering:
+    s1_obj = db_session.get(ChatSession, uuid.UUID(s1_id))
+    assert s1_obj is not None
+    s1_obj.updated_at = datetime.now(UTC) - timedelta(minutes=5)
+    s1_obj.created_at = datetime.now(UTC) - timedelta(minutes=5)
+    db_session.commit()
 
     # 3. List sessions: s2 must appear before s1 (updated_at DESC)
     list_res = client.get(f"/api/history?class_id={class_id}", headers=headers)

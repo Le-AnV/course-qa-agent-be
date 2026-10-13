@@ -106,7 +106,9 @@ def get_sessions_by_class(
     # Sort newest first and paginate
     sessions = (
         db.scalars(
-            query.order_by(ChatSession.updated_at.desc()).offset(offset).limit(limit)
+            query.order_by(ChatSession.updated_at.desc(), ChatSession.created_at.desc())
+            .offset(offset)
+            .limit(limit)
         ).all()
     )
 
