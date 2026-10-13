@@ -47,6 +47,21 @@ services:
       qdrant:
         condition: service_started
 
+  pgadmin:
+    image: dpage/pgadmin4:9
+    container_name: course-qa-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@local.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
 # Volume names pinned to the monorepo ones so existing data is kept
 # (course-qa-agent_postgres_data / course-qa-agent_qdrant_storage).
 volumes:
@@ -54,3 +69,5 @@ volumes:
     name: course-qa-agent_postgres_data
   qdrant_storage:
     name: course-qa-agent_qdrant_storage
+  pgadmin_data:
+    name: course-qa-agent_pgadmin_data
