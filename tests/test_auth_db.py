@@ -133,22 +133,21 @@ def test_api_login_uuid_contract(client):
     )
     assert res.status_code == 200, res.text
 
-    # Trainer without a class is blocked by the login gate (AC-03).
+    # Trainer without a class can log in normally (class_id is None).
     res = client.post(
         "/api/auth/login",
         json={"email": "teacher@academic.edu.vn", "password": "Teacher@123"},
     )
-    assert res.status_code == 401
-    assert res.json()["detail"] == "Invalid email or password."
+    assert res.status_code == 200
+    assert res.json()["role"] == "trainer"
+    assert res.json()["class_id"] is None
 
     # Wrong password and unknown email share the same generic message.
     bad = client.post(
         "/api/auth/login",
         json={"email": "admin@academic.edu.vn", "password": "WrongPassword"},
     )
-    nobody = client.post(
-        "/api/auth/login", json={"email": "nobody@gmail.com", "password": "x"}
-    )
+    nobody = client.post("/api/auth/login", json={"email": "nobody@gmail.com", "password": "x"})
     assert bad.status_code == nobody.status_code == 401
     assert bad.json()["detail"] == nobody.json()["detail"]
 
