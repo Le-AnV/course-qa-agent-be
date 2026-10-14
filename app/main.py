@@ -9,7 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import settings
-from app.core.database import create_all_tables, init_engine
+from app.core.database import create_all_tables, get_session_local, init_engine
+from app.core.seed import seed_database
 from app.routers.admin.router import router as admin_router
 from app.routers.auth.router import router as auth_router
 from app.routers.documents import router as documents_router
@@ -23,6 +24,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
         init_engine(settings.database_url)
         create_all_tables()
+        # Seed initial roles and test users
+        SessionLocal = get_session_local(settings.database_url)
+        db = SessionLocal()
+        try:
+            seed_database(db)
+        finally:
+            db.close()
     except (OSError, SQLAlchemyError) as exc:
         # Never crash boot when the DB is unreachable (e.g. /health in CI).
         logger.warning("Database unavailable at startup; skipping table creation: %s", exc)
