@@ -197,3 +197,83 @@ def seed_database(db: Session) -> None:
     except SQLAlchemyError as e:
         db.rollback()
         logger.error(f"Failed to seed initial data: {e}")
+
+
+DEV_COURSE = {"code": "TEST101", "name": "Test Course", "description": "Dev sample course."}
+DEV_CLASS = {
+    "code": "TEST101-A",
+    "name": "Test Class A",
+    "semester": "HK1",
+    "academic_year": "2026-2027",
+}
+
+
+def seed_dev_data(db: Session) -> None:
+    """Seed a sample course/class/enrollment so every login role is testable.
+
+    Idempotent: existing rows are reused. Covers the AC-03 login gate —
+    the seed trainer owns TEST101-A and the seed student is enrolled in it.
+    """
+    try:
+        seed_database(db)
+
+        course = db.query(Course).filter(Course.code == DEV_COURSE["code"]).first()
+        if course is None:
+            course = Course(status="ACTIVE", **DEV_COURSE)
+            db.add(course)
+            db.flush()
+            logger.info(f"Created course: {course.code}")
+
+        teacher = db.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+        clazz = db.query(Class).filter(Class.code == DEV_CLASS["code"]).first()
+        if clazz is None and teacher is not None:
+            clazz = Class(
+                course_id=course.id,
+                trainer_id=teacher.id,
+                status="ACTIVE",
+                **DEV_CLASS,
+            )
+            db.add(clazz)
+            db.flush()
+            logger.info(f"Created class: {clazz.code} (trainer={teacher.email})")
+
+        student = db.query(User).filter(User.email == "student@academic.edu.vn").first()
+        if clazz is not None and student is not None:
+            enrolled = (
+                db.query(Enrollment)
+                .filter(Enrollment.class_id == clazz.id, Enrollment.student_id == student.id)
+                .first()
+            )
+            if enrolled is None:
+                db.add(Enrollment(class_id=clazz.id, student_id=student.id, status="ACTIVE"))
+                db.flush()
+                logger.info(f"Enrolled {student.email} in {clazz.code}")
+
+        db.commit()
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Failed to seed dev data: {e}")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    from app.config import settings
+    from app.core.database import get_session_local, init_engine
+
+    parser = argparse.ArgumentParser(description="Seed roles/users (+ dev sample data).")
+    parser.add_argument(
+        "--dev", action="store_true", help="also seed TEST101 course/class/enrollment"
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO)
+    init_engine(settings.database_url)
+    session = get_session_local(settings.database_url)()
+    try:
+        if args.dev:
+            seed_dev_data(session)
+        else:
+            seed_database(session)
+    finally:
+        session.close()
