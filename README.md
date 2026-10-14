@@ -37,6 +37,9 @@ Split from the `course-qa-agent` monorepo (project skeleton AI-112).
 
 ```bash
 uv sync
+docker start course-qa-postgres course-qa-qdrant  # infra only
+uv run alembic upgrade head      # schema (idempotent; existing DBs: alembic stamp head once)
+uv run python -m app.core.seed --dev  # roles + 3 accounts + TEST101 course/class/enrollment
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
@@ -46,6 +49,10 @@ Health check:
 curl http://localhost:8000/health
 # {"status":"ok","service":"course-qa-agent-backend"}
 ```
+
+Test accounts (seeded): `admin@academic.edu.vn` / `Admin@123`,
+`teacher@academic.edu.vn` / `Teacher@123` (owns TEST101-A),
+`student@academic.edu.vn` / `Student@123` (enrolled in TEST101-A).
 
 ## Docker (whole stack)
 

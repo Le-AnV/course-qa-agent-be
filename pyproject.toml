@@ -25,6 +25,7 @@ dependencies = [
   "langchain-qdrant>=1.1.0",
   "qdrant-client>=1.19.1",
   "python-multipart>=0.0.32",
+  "alembic>=1.14",
 ]
 
 [dependency-groups]
