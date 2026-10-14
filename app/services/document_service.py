@@ -1,16 +1,18 @@
 """Document service for Epic E2 (AI-35/37/41): upload validation, list, class tags.
 
-Provisional storage: in-memory dicts stand in for the future
-`courses/classes/class_assignments/documents` tables (AI-119/AI-31).
-Routers call these functions; this module never imports routers.
+DB-backed (E1 models): class assignments resolve from ``course``/``class``
+rows instead of the former static stub, and uploads persist as ``document``
+rows with pending status. File bytes are validated then discarded — blob
+storage lands with the AI-55 indexing pipeline.
 """
 
-import csv
-import io
 import uuid
-import zipfile
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+
+from sqlalchemy.orm import Session
+
+from app.models.course import Class, Course
+from app.models.document import Document
+from app.models.user import User
 
 # Upload AC-01: 7 accepted material formats (images belong to the E3 vision path).
 ACCEPTED_EXTENSIONS: dict[str, str] = {
@@ -34,51 +36,37 @@ VALID_STATUSES = frozenset(
     {STATUS_PENDING, STATUS_PROCESSING, STATUS_INDEXED, STATUS_REJECTED, STATUS_FAILED}
 )
 
-# Stub directory: replaced by E1 (AI-31 classes + AI-27 JWT) without API changes.
-# Keys are JWT `sub` identifiers (see app/services/auth.py MOCK_USERS).
-# Legacy stub ids ("trainer-1"/"ta-1") kept so service unit tests still pass.
-CLASSES: dict[str, dict[str, str]] = {
-    "class-a": {"id": "class-a", "course_id": "course-cs101",
-                "name": "CS101 - Class A", "code": "CS101-A"},
-    "class-b": {"id": "class-b", "course_id": "course-cs101",
-                "name": "CS101 - Class B", "code": "CS101-B"},
-}
-CLASS_ASSIGNMENTS: dict[str, list[str]] = {
-    "teacher@academic.edu.vn": ["class-a", "class-b"],
-    "admin@academic.edu.vn": ["class-a", "class-b"],
-    "trainer-1": ["class-a", "class-b"],
-    "ta-1": ["class-a"],
-}
-
-
-@dataclass
-class DocumentRecord:
-    id: str
-    file_name: str
-    file_type: str
-    mime_type: str
-    size_bytes: int
-    uploader_id: str
-    class_id: str
-    status: str = STATUS_PENDING
-    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-
-
-# Module-level store (tests reset via `reset_store`).
-_DOCUMENTS: dict[str, DocumentRecord] = {}
-
 
 def reset_store() -> None:
-    _DOCUMENTS.clear()
+    """Deprecated no-op: storage is the database now (kept for old callers)."""
 
 
-def my_class_ids(user_id: str) -> list[str]:
-    """Classes assigned to the caller (Upload AC-05 / List AC-05)."""
-    return list(CLASS_ASSIGNMENTS.get(user_id, []))
+def _role_name(user: User) -> str:
+    role = getattr(user, "role", None)
+    if role is not None and getattr(role, "name", None):
+        return role.name
+    return ""
 
 
-def my_classes(user_id: str) -> list[dict[str, str]]:
-    return [CLASSES[cid] for cid in my_class_ids(user_id) if cid in CLASSES]
+def my_class_ids(db: Session, user: User) -> list[uuid.UUID]:
+    """Class ids visible to the caller (Upload AC-05 / List AC-05)."""
+    role = _role_name(user).upper()
+    if role == "ADMIN":
+        return [c.id for c in db.query(Class.id).all()]
+    if role == "TRAINER":
+        return [c.id for c in db.query(Class.id).filter(Class.trainer_id == user.id).all()]
+    return []
+
+
+def my_classes(db: Session, user: User) -> list[dict]:
+    ids = set(my_class_ids(db, user))
+    if not ids:
+        return []
+    rows = db.query(Class).filter(Class.id.in_(ids)).order_by(Class.code).all()
+    return [
+        {"id": str(c.id), "course_id": str(c.course_id), "name": c.name, "code": c.code}
+        for c in rows
+    ]
 
 
 def detect_content_kind(extension: str, content: bytes) -> str | None:
@@ -86,6 +74,10 @@ def detect_content_kind(extension: str, content: bytes) -> str | None:
 
     Returns None when content is consistent (Upload AC-06, stdlib only).
     """
+    import csv
+    import io
+    import zipfile
+
     if extension == ".pdf":
         if not content.startswith(b"%PDF"):
             return "content is not a real PDF file"
@@ -121,9 +113,9 @@ def detect_content_kind(extension: str, content: bytes) -> str | None:
 
 
 def validate_upload(
-    file_name: str, content: bytes, class_id: str, user_id: str
-) -> tuple[str, str, int] | str:
-    """Validate one file. Returns (extension, mime, size) or an error message."""
+    db: Session, file_name: str, content: bytes, class_id: uuid.UUID | str, user: User
+) -> tuple[str, str, int, uuid.UUID] | str:
+    """Validate one file. Returns (extension, mime, size, class_uuid) or an error."""
     lowered = file_name.lower()
     dot = lowered.rfind(".")
     extension = lowered[dot:] if dot != -1 else ""
@@ -133,92 +125,123 @@ def validate_upload(
     size = len(content)
     if size > MAX_FILE_SIZE_BYTES:
         return f"File '{file_name}' exceeds 100MB per file."
-    if class_id not in CLASSES:
+    try:
+        class_uuid = uuid.UUID(str(class_id))
+    except (TypeError, ValueError, AttributeError):
         return f"Class '{class_id}' does not exist (admin creates classes)."
-    if class_id not in my_class_ids(user_id):
+    clazz = db.query(Class).filter(Class.id == class_uuid).first()
+    if clazz is None:
+        return f"Class '{class_id}' does not exist (admin creates classes)."
+    if class_uuid not in set(my_class_ids(db, user)):
         return "Class is not assigned to you."
     mismatch = detect_content_kind(extension, content)
     if mismatch is not None:
         return f"File '{file_name}' rejected: {mismatch}."
-    return extension, ACCEPTED_EXTENSIONS[extension], size
+    return extension, ACCEPTED_EXTENSIONS[extension], size, class_uuid
 
 
 def create_document(
-    file_name: str, content: bytes, class_id: str, user_id: str
-) -> DocumentRecord:
+    db: Session, file_name: str, content: bytes, class_id: uuid.UUID | str, user: User
+) -> Document:
     """Persist an already-validated upload with pending status (Upload AC-02)."""
-    validated = validate_upload(file_name, content, class_id, user_id)
+    validated = validate_upload(db, file_name, content, class_id, user)
     if isinstance(validated, str):
         raise ValueError(validated)  # noqa: TRY004 - validation failure, not a type error
-    extension, mime, size = validated
-    record = DocumentRecord(
-        id=str(uuid.uuid4()),
+    extension, mime, size, class_uuid = validated
+    record = Document(
+        class_id=class_uuid,
+        uploaded_by=user.id,
         file_name=file_name,
         file_type=extension,
         mime_type=mime,
         size_bytes=size,
-        uploader_id=user_id,
-        class_id=class_id,
+        status=STATUS_PENDING,
     )
-    _DOCUMENTS[record.id] = record
+    db.add(record)
+    db.commit()
+    db.refresh(record)
     return record
 
 
-def get_document(document_id: str) -> DocumentRecord | None:
-    return _DOCUMENTS.get(document_id)
+def get_document(db: Session, document_id: uuid.UUID | str) -> Document | None:
+    try:
+        doc_uuid = uuid.UUID(str(document_id))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return db.query(Document).filter(Document.id == doc_uuid).first()
 
 
-def approve_document(document_id: str) -> DocumentRecord:
+def approve_document(db: Session, document_id: uuid.UUID | str) -> Document:
     """Trainer approval: pending -> processing (AI-55 pipeline takes over)."""
-    record = _DOCUMENTS.get(document_id)
+    record = get_document(db, document_id)
     if record is None:
-        raise KeyError(document_id)
+        raise KeyError(str(document_id))
     if record.status != STATUS_PENDING:
-        raise ValueError(
-            f"Only pending documents can be approved (is {record.status})."
-        )
+        raise ValueError(f"Only pending documents can be approved (is {record.status}).")
     record.status = STATUS_PROCESSING
+    db.commit()
+    db.refresh(record)
     return record
 
 
 def list_documents(
-    user_id: str,
+    db: Session,
+    user: User,
     search: str = "",
-    class_id: str | None = None,
+    class_id: uuid.UUID | str | None = None,
     file_type: str | None = None,
     status: str | None = None,
     page: int = 1,
     page_size: int = 20,
-) -> tuple[list[DocumentRecord], int]:
+) -> tuple[list[Document], int]:
     """Search/filter/paginate within the caller's own classes (List AC-02..05)."""
-    allowed = set(my_class_ids(user_id))
+    allowed = set(my_class_ids(db, user))
+    query = (
+        db.query(Document).filter(Document.class_id.in_(allowed))
+        if allowed
+        else db.query(Document).filter(False)
+    )
     needle = search.strip().lower()
-    rows = [d for d in _DOCUMENTS.values() if d.class_id in allowed]
     if needle:
-        rows = [d for d in rows if needle in d.file_name.lower()]
+        query = query.filter(Document.file_name.ilike(f"%{needle}%"))
     if class_id is not None:
-        rows = [d for d in rows if d.class_id == class_id]
+        try:
+            query = query.filter(Document.class_id == uuid.UUID(str(class_id)))
+        except (TypeError, ValueError, AttributeError):
+            return [], 0
     if file_type is not None:
-        rows = [d for d in rows if d.file_type == file_type]
+        query = query.filter(Document.file_type == file_type)
     if status is not None:
-        rows = [d for d in rows if d.status == status]
-    rows.sort(key=lambda d: d.created_at, reverse=True)
-    total = len(rows)
+        query = query.filter(Document.status == status)
+    total = query.count()
     page = max(page, 1)
     page_size = min(max(page_size, 1), 100)
-    start = (page - 1) * page_size
-    return rows[start:start + page_size], total
+    rows = (
+        query.order_by(Document.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return rows, total
 
 
-def build_qdrant_payload(record: DocumentRecord) -> dict[str, str]:
+def build_qdrant_payload(record: Document) -> dict[str, str]:
     """Native payload filter for class-scoped RAG (Tag AC-03/04)."""
     return {
-        "document_id": record.id,
-        "class_id": record.class_id,
+        "document_id": str(record.id),
+        "class_id": str(record.class_id),
         "file_name": record.file_name,
         "file_type": record.file_type,
     }
 
 
-def class_name(class_id: str) -> str:
-    return CLASSES.get(class_id, {}).get("name", class_id)
+def class_name(db: Session, class_id: uuid.UUID | str) -> str:
+    try:
+        clazz = db.query(Class).filter(Class.id == uuid.UUID(str(class_id))).first()
+    except (TypeError, ValueError, AttributeError):
+        return str(class_id)
+    if clazz is None:
+        return str(class_id)
+    course = db.query(Course).filter(Course.id == clazz.course_id).first()
+    _ = course
+    return clazz.name

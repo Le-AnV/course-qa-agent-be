@@ -109,7 +109,9 @@ def get_current_user(
     # Role change requires re-login: token role must match the DB role
     # (compare case-insensitively: token carries lowercase alias).
     if payload.get("role", "").upper() != _role_name(db, user).upper():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Role changed, please log in again.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Role changed, please log in again."
+        )
     return user
 
 
@@ -128,6 +130,20 @@ def require_admin(current_user=Depends(get_current_user)):
             db.close()
     if role_name != "ADMIN":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin only.")
+    return current_user
+
+
+def require_trainer(current_user=Depends(get_current_user)):
+    role_name = getattr(getattr(current_user, "role", None), "name", None)
+    if role_name is None:
+        SessionLocal = get_session_local(settings.database_url)
+        db = SessionLocal()
+        try:
+            role_name = _role_name(db, current_user)
+        finally:
+            db.close()
+    if role_name not in ("ADMIN", "TRAINER"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Trainer only.")
     return current_user
 
 

@@ -15,7 +15,6 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
-from app.models.course import Class, Enrollment
 from app.models.user import Account, Role, User
 
 # Roles that must be assigned to a class before they can log in (AC-03).
@@ -44,24 +43,6 @@ def authenticate(db: Session, email: str, password: str) -> User | None:
         return None
     if not verify_password(password, account.password_hash):
         return None
-    # AC-03: trainer/TA without a class cannot log in yet.
-    rname = _role_name(db, user)
-    if rname in ROLES_REQUIRING_CLASS:
-        if rname == "TRAINER":
-            owns = db.query(Class).filter(Class.trainer_id == user.id).first()
-            if owns is None:
-                return None
-        else:
-            enrolled = (
-                db.query(Enrollment)
-                .filter(
-                    Enrollment.student_id == user.id,
-                    Enrollment.status == "ACTIVE",
-                )
-                .first()
-            )
-            if enrolled is None:
-                return None
     return user
 
 

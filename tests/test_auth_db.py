@@ -141,7 +141,8 @@ def test_api_login_uuid_contract(client):
     assert res.status_code == 200, res.text
     assert res.json()["class_id"] is not None
 
-    # A trainer without an assigned class is still blocked by the login gate (AC-03).
+    # Class-gate dropped (!45): a trainer without an assigned class logs in
+    # normally with class_id None instead of 401.
     from app.core.database import get_session_local as _gsl2
     from app.core.security import hash_password
     from app.models.user import Account, Role, User
@@ -173,17 +174,16 @@ def test_api_login_uuid_contract(client):
         "/api/auth/login",
         json={"email": "unassigned-trainer@academic.edu.vn", "password": "Unassigned@123"},
     )
-    assert res.status_code == 401
-    assert res.json()["detail"] == "Invalid email or password."
+    assert res.status_code == 200
+    assert res.json()["role"] == "trainer"
+    assert res.json()["class_id"] is None
 
     # Wrong password and unknown email share the same generic message.
     bad = client.post(
         "/api/auth/login",
         json={"email": "admin@academic.edu.vn", "password": "WrongPassword"},
     )
-    nobody = client.post(
-        "/api/auth/login", json={"email": "nobody@gmail.com", "password": "x"}
-    )
+    nobody = client.post("/api/auth/login", json={"email": "nobody@gmail.com", "password": "x"})
     assert bad.status_code == nobody.status_code == 401
     assert bad.json()["detail"] == nobody.json()["detail"]
 

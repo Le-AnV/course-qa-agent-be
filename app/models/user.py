@@ -2,12 +2,15 @@
 
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.document import Document
 
 
 class Role(Base):
@@ -80,6 +83,7 @@ class User(Base):
     account: Mapped[Optional["Account"]] = relationship(
         "Account", back_populates="user", uselist=False, cascade="all, delete-orphan"
     )
+    documents: Mapped[list["Document"]] = relationship("Document", back_populates="uploader")
 
 
 class Account(Base):

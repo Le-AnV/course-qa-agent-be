@@ -14,6 +14,7 @@ from app.core.seed import seed_database
 from app.routers.admin.router import router as admin_router
 from app.routers.auth.router import router as auth_router
 from app.routers.documents import router as documents_router
+from app.routers.history import router as history_router
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,8 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(documents_router)
+app.include_router(history_router)
+
 
 
 @app.get("/health")
