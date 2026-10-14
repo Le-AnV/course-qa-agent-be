@@ -133,10 +133,45 @@ def test_api_login_uuid_contract(client):
     )
     assert res.status_code == 200, res.text
 
-    # Trainer without a class is blocked by the login gate (AC-03).
+    # Seeded teacher owns CS101-FA26-001, so they can log in with class scope.
     res = client.post(
         "/api/auth/login",
         json={"email": "teacher@academic.edu.vn", "password": "Teacher@123"},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["class_id"] is not None
+
+    # A trainer without an assigned class is still blocked by the login gate (AC-03).
+    from app.core.database import get_session_local as _gsl2
+    from app.core.security import hash_password
+    from app.models.user import Account, Role, User
+
+    SessionLocal2 = _gsl2(TEST_DB_URL)
+    db2 = SessionLocal2()
+    try:
+        role = db2.query(Role).filter(Role.name == "TRAINER").first()
+        user = User(
+            full_name="Unassigned Trainer",
+            email="unassigned-trainer@academic.edu.vn",
+            role_id=role.id,
+            status="ACTIVE",
+        )
+        db2.add(user)
+        db2.flush()
+        db2.add(
+            Account(
+                user_id=user.id,
+                password_hash=hash_password("Unassigned@123"),
+                is_active=True,
+            )
+        )
+        db2.commit()
+    finally:
+        db2.close()
+
+    res = client.post(
+        "/api/auth/login",
+        json={"email": "unassigned-trainer@academic.edu.vn", "password": "Unassigned@123"},
     )
     assert res.status_code == 401
     assert res.json()["detail"] == "Invalid email or password."

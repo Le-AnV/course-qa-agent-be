@@ -99,11 +99,13 @@ class Settings(BaseSettings):
     jwt_algorithm: str = Field(default="HS256", validation_alias="JWT_ALGORITHM")
     jwt_expire_minutes: int = Field(default=60 * 12, validation_alias="JWT_EXPIRE_MINUTES")
     # Bootstrap admin so a fresh DB is usable before any admin exists.
+    # Canonical seed/bootstrap admin credential shared with INITIAL_USERS in
+    # app/core/seed.py so a freshly seeded DB always has a usable admin.
     bootstrap_admin_email: str = Field(
-        default="admin@example.com", validation_alias="BOOTSTRAP_ADMIN_EMAIL"
+        default="admin@academic.edu.vn", validation_alias="BOOTSTRAP_ADMIN_EMAIL"
     )
     bootstrap_admin_password: str = Field(
-        default="Admin123!", validation_alias="BOOTSTRAP_ADMIN_PASSWORD"
+        default="Admin@123", validation_alias="BOOTSTRAP_ADMIN_PASSWORD"
     )
 
     # Shared outbound email configuration for Admin test messages and mail services.
