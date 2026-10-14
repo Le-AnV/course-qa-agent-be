@@ -71,10 +71,13 @@ def _make_user(db: Session, email: str, full_name: str, password: str, role_name
 
 
 def _seed_classes(db: Session) -> None:
-    """Course CS101 with class-a + class-b owned by the seed teacher."""
-    course = Course(code="CS101", name="CS101", description="Seed course", status="ACTIVE")
-    db.add(course)
-    db.flush()
+    """Class-a + class-b owned by the seed teacher, class-c by another trainer.
+
+    Reuses the seeded CS101 course — inserting a second CS101 violates the
+    unique code constraint.
+    """
+    course = db.query(Course).filter(Course.code == "CS101").first()
+    assert course is not None
     teacher = db.query(User).filter(User.email == "teacher@academic.edu.vn").first()
     other = _make_user(db, "other-teacher@academic.edu.vn", "Other Trainer", "Other@123", "TRAINER")
     for code, name in (("CS101-A", "CS101 - Class A"), ("CS101-B", "CS101 - Class B")):
@@ -238,12 +241,15 @@ def test_classes_mine_only_returns_assigned(
     mine = {
         c["code"] for c in client.get("/api/documents/classes/mine", headers=trainer_headers).json()
     }
-    assert mine == {"CS101-A", "CS101-B"}
+    # Own classes are returned (seed may add more, e.g. CS101-FA26-001),
+    # but another trainer's class never is.
+    assert {"CS101-A", "CS101-B"} <= mine
+    assert "CS101-C" not in mine
     # Admin sees every class.
     seen = {
         c["code"] for c in client.get("/api/documents/classes/mine", headers=admin_headers).json()
     }
-    assert seen == {"CS101-A", "CS101-B", "CS101-C"}
+    assert {"CS101-A", "CS101-B", "CS101-C"} <= seen
     assert client.get("/api/documents/classes/mine", headers=student_headers).status_code == 403
 
 

@@ -54,10 +54,10 @@ def db_session(monkeypatch: pytest.MonkeyPatch) -> Generator[Session, None, None
     db: Session = SessionLocal()
     try:
         seed_database(db)
-        # Create a sample course and class for testing
-        course = Course(code="CS101", name="Intro to Computer Science")
-        db.add(course)
-        db.flush()
+        # Reuse the seeded CS101 course (seed also provisions CS101-FA26-001);
+        # inserting a second CS101 violates the unique code constraint.
+        course = db.query(Course).filter(Course.code == "CS101").first()
+        assert course is not None
 
         trainer = db.query(User).filter(User.email == "teacher@academic.edu.vn").first()
         test_class = Class(
