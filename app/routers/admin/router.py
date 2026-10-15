@@ -52,12 +52,9 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
 def _class_to_read(db: Session, section: Class) -> ClassRead:
-    course = course_service.get_course(db, section.course_id)
     warnings = course_service.class_warnings(db, section.id)
     return ClassRead(
         id=section.id,
-        course_id=section.course_id,
-        course_code=course.code if course else "",
         code=section.code,
         trainer_id=section.trainer_id,
         trainer_name=course_service.user_display_name(db, section.trainer_id),
@@ -124,20 +121,20 @@ def create_course(payload: CourseCreate, db: Session = Depends(get_db), _=Depend
 
 @router.get("/courses", response_model=list[CourseRead])
 def list_courses(db: Session = Depends(get_db), _=Depends(require_admin)):
-    out = []
-    for course in course_service.list_courses(db):
-        count = len(course_service.list_classes(db, course_id=course.id))
-        out.append(CourseRead(id=course.id, code=course.code, title=course.name, class_count=count))
-    return out
+    # Legacy catalog: courses are decoupled from classes (class IS the subject),
+    # so per-course class counts are always 0.
+    return [
+        CourseRead(id=course.id, code=course.code, title=course.name, class_count=0)
+        for course in course_service.list_courses(db)
+    ]
 
 
-# --- Classes (AC-01, AC-02, AC-12) ---
+# --- Classes (standalone: class IS the subject) ---
 @router.post("/classes", response_model=ClassRead, status_code=status.HTTP_201_CREATED)
 def create_class(payload: ClassCreate, db: Session = Depends(get_db), _=Depends(require_admin)):
     try:
         section = course_service.create_class(
             db,
-            payload.course_id,
             payload.code,
             trainer_id=payload.trainer_id,
             name=payload.name,
@@ -152,11 +149,10 @@ def create_class(payload: ClassCreate, db: Session = Depends(get_db), _=Depends(
 
 @router.get("/classes", response_model=list[ClassRead])
 def list_classes(
-    course_id: uuid.UUID | None = Query(default=None),
     db: Session = Depends(get_db),
     _=Depends(require_admin),
 ):
-    return [_class_to_read(db, s) for s in course_service.list_classes(db, course_id=course_id)]
+    return [_class_to_read(db, s) for s in course_service.list_classes(db)]
 
 
 @router.patch("/classes/{class_id}/assign", response_model=ClassRead)
@@ -189,7 +185,7 @@ def delete_class(
 def create_user(payload: UserCreate, db: Session = Depends(get_db), _=Depends(require_admin)):
     try:
         user, plain = user_service.create_user(
-            db, payload.username, str(payload.email), payload.role, payload.class_code
+            db, payload.username, str(payload.email), payload.role, payload.class_code,
         )
     except user_service.DomainError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

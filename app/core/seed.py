@@ -58,7 +58,6 @@ INITIAL_COURSES = [
 
 INITIAL_CLASSES = [
     {
-        "course_code": "CS101",
         "class_code": "CS101-FA26-001",
         "class_name": "Introduction to Computer Science - Section 1",
         "semester": "Fall",
@@ -139,21 +138,17 @@ def seed_database(db: Session) -> None:
                 logger.info(f"Created course: {course.code}")
             course_map[course.code] = course
 
-        # 4. Ensure initial classes exist
+        # 4. Ensure initial classes exist (standalone — no course binding)
         class_map: dict[str, Class] = {}
         for cl in INITIAL_CLASSES:
             clazz = db.query(Class).filter(Class.code == cl["class_code"]).first()
-            course = course_map.get(cl["course_code"])
             trainer = user_map.get(cl["trainer_email"])
-            if not course or not trainer:
-                logger.error(
-                    f"Course {cl['course_code']} or trainer {cl['trainer_email']} not found"
-                )
+            if not trainer:
+                logger.error(f"Trainer {cl['trainer_email']} not found")
                 continue
 
             if not clazz:
                 clazz = Class(
-                    course_id=course.id,
                     trainer_id=trainer.id,
                     code=cl["class_code"],
                     name=cl["class_name"],
@@ -201,7 +196,6 @@ def seed_database(db: Session) -> None:
         logger.error(f"Failed to seed initial data: {e}")
 
 
-DEV_COURSE = {"code": "TEST101", "name": "Test Course", "description": "Dev sample course."}
 DEV_CLASS = {
     "code": "TEST101-A",
     "name": "Test Class A",
@@ -212,7 +206,7 @@ DEV_CLASS = {
 
 
 def seed_dev_data(db: Session) -> None:
-    """Seed a sample course/class/enrollment so every login role is testable.
+    """Seed a sample class/enrollment so every login role is testable.
 
     Idempotent: existing rows are reused. Covers the AC-03 login gate —
     the seed trainer owns TEST101-A and the seed student is enrolled in it.
@@ -220,18 +214,10 @@ def seed_dev_data(db: Session) -> None:
     try:
         seed_database(db)
 
-        course = db.query(Course).filter(Course.code == DEV_COURSE["code"]).first()
-        if course is None:
-            course = Course(status="ACTIVE", **DEV_COURSE)
-            db.add(course)
-            db.flush()
-            logger.info(f"Created course: {course.code}")
-
         teacher = db.query(User).filter(User.email == "teacher@academic.edu.vn").first()
         clazz = db.query(Class).filter(Class.code == DEV_CLASS["code"]).first()
         if clazz is None and teacher is not None:
             clazz = Class(
-                course_id=course.id,
                 trainer_id=teacher.id,
                 status="ACTIVE",
                 **DEV_CLASS,

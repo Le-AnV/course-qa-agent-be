@@ -14,6 +14,8 @@ if TYPE_CHECKING:
 
 
 class Course(Base):
+    """Legacy catalog entry — decoupled from Class (class IS the subject now)."""
+
     __tablename__ = "course"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -26,16 +28,13 @@ class Course(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    classes: Mapped[list["Class"]] = relationship("Class", back_populates="course")
-
 
 class Class(Base):
+    """A class IS the subject (mon hoc) — standalone, no course binding."""
+
     __tablename__ = "class"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    course_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("course.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
     trainer_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("user.id", ondelete="RESTRICT"), nullable=False, index=True
     )
@@ -51,7 +50,6 @@ class Class(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    course: Mapped["Course"] = relationship("Course", back_populates="classes")
     enrollments: Mapped[list["Enrollment"]] = relationship("Enrollment", back_populates="clazz")
     documents: Mapped[list["Document"]] = relationship("Document", back_populates="clazz")
 

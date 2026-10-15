@@ -55,7 +55,6 @@ def get_course(db: Session, course_id: uuid.UUID | str) -> Course | None:
 
 def create_class(
     db: Session,
-    course_id: uuid.UUID | str,
     code: str,
     trainer_id: uuid.UUID | str | None = None,
     name: str | None = None,
@@ -63,22 +62,13 @@ def create_class(
     academic_year: str = "2026",
     credits: int = 3,
 ) -> Class:
-    """AC-01: the course must exist first — a class is always created under it.
+    """Create a standalone class (the class IS the subject — no course binding).
 
     ERD requires ``class.trainer_id`` NOT NULL, so a trainer must be supplied.
     """
-    cid = _coerce_uuid(course_id)
-    course = get_course(db, cid)
-    if course is None:
-        raise DomainError("Course does not exist — create the course first.")
     code = code.strip()
-    exists = (
-        db.query(Class)
-        .filter(Class.course_id == cid, Class.code == code)
-        .first()
-    )
-    if exists:
-        raise DomainError(f"Class '{code}' already exists in course '{course.code}'.")
+    if db.query(Class).filter(Class.code == code).first():
+        raise DomainError(f"Class '{code}' already exists.")
     if trainer_id is None:
         raise DomainError("A trainer is required — create the trainer account first.")
     try:
@@ -94,7 +84,6 @@ def create_class(
     if trainer is None:
         raise DomainError("Trainer account does not exist.")
     section = Class(
-        course_id=cid,
         trainer_id=tid,
         code=code,
         name=(name or code).strip(),
@@ -108,11 +97,8 @@ def create_class(
     return section
 
 
-def list_classes(db: Session, course_id: uuid.UUID | str | None = None) -> list[Class]:
-    q = db.query(Class)
-    if course_id is not None:
-        q = q.filter(Class.course_id == _coerce_uuid(course_id))
-    return q.order_by(Class.code).all()
+def list_classes(db: Session) -> list[Class]:
+    return db.query(Class).order_by(Class.code).all()
 
 
 def get_class(db: Session, class_id: uuid.UUID | str) -> Class | None:
@@ -196,13 +182,6 @@ def count_students(db: Session, class_id: uuid.UUID | str) -> int:
     )
 
 
-def user_display_name(db: Session, user_id: uuid.UUID | str | None) -> str | None:
-    if user_id is None:
-        return None
-    user = db.query(User).filter(User.id == _coerce_uuid(user_id)).first()
-    return user.full_name if user else None
-
-
 def semester_credit_total(
     db: Session,
     student_id: uuid.UUID | str,
@@ -238,3 +217,10 @@ def check_credit_cap(db: Session, student_id: uuid.UUID | str, section: Class) -
             f"Exceeds {MAX_SEMESTER_CREDITS} credits per semester "
             f"(currently {total}, class is {section.credits})."
         )
+
+
+def user_display_name(db: Session, user_id: uuid.UUID | str | None) -> str | None:
+    if user_id is None:
+        return None
+    user = db.query(User).filter(User.id == _coerce_uuid(user_id)).first()
+    return user.full_name if user else None

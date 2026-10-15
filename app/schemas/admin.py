@@ -24,9 +24,8 @@ class CourseRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# --- Classes (AC-01, AC-02) ---
+# --- Classes (standalone: class IS the subject) ---
 class ClassCreate(BaseModel):
-    course_id: uuid.UUID
     code: str = Field(min_length=1, max_length=50)
     # ERD: class.trainer_id NOT NULL — trainer required at creation.
     trainer_id: uuid.UUID
@@ -43,8 +42,6 @@ class ClassAssign(BaseModel):
 
 class ClassRead(BaseModel):
     id: uuid.UUID
-    course_id: uuid.UUID
-    course_code: str = ""
     code: str
     trainer_id: uuid.UUID | None = None
     trainer_name: str | None = None

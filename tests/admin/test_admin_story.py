@@ -99,51 +99,47 @@ def make_trainer(client: TestClient, h: dict, email: str = "t@gmail.com") -> str
     return res.json()["id"]
 
 
-def make_class(client: TestClient, h: dict, course_id: str, code: str, trainer_id: str) -> dict:
+def make_class(client: TestClient, h: dict, code: str, trainer_id: str) -> dict:
     res = client.post(
         "/api/admin/classes",
-        json={"course_id": course_id, "code": code, "trainer_id": trainer_id},
+        json={"code": code, "trainer_id": trainer_id},
         headers=h,
     )
     assert res.status_code == 201, res.text
     return res.json()
 
 
-def test_course_then_class_flow(client):
+def test_class_flow_standalone(client):
+    """Class IS the subject: created standalone with trainer + manual credits."""
     h = admin_headers(client)
-    course = client.post("/api/admin/courses", json={"code": "SE101", "title": "Intro"}, headers=h)
-    assert course.status_code == 201, course.text
-    course_id = course.json()["id"]
-
-    # AC-01: class under a missing course is rejected (valid UUID, no such course).
-    bad = client.post(
-        "/api/admin/classes",
-        json={"course_id": str(uuid.uuid4()), "code": "X", "trainer_id": str(uuid.uuid4())},
-        headers=h,
-    )
-    assert bad.status_code == 400
 
     # ERD: class.trainer_id is NOT NULL — class without trainer is rejected.
     no_trainer = client.post(
-        "/api/admin/classes", json={"course_id": course_id, "code": "SE101"}, headers=h
+        "/api/admin/classes", json={"code": "SE101"}, headers=h
     )
     assert no_trainer.status_code in (400, 422)
 
     trainer_id = make_trainer(client, h)
-    good = make_class(client, h, course_id, "SE101", trainer_id)
-    assert good["course_code"] == "SE101"
+    good = make_class(client, h, "SE101", trainer_id)
     assert good["trainer_id"] == trainer_id
+
+    # Duplicate class code is rejected.
+    dup = client.post(
+        "/api/admin/classes",
+        json={"code": "SE101", "trainer_id": trainer_id},
+        headers=h,
+    )
+    assert dup.status_code == 400
 
 
 def test_single_trainer_per_class_and_login_gate(client):
     h = admin_headers(client)
-    course_id = client.post("/api/admin/courses", json={"code": "C1", "title": "T"}, headers=h).json()["id"]
 
     # New order: trainer is created BEFORE the class (class.trainer_id NOT NULL).
     # Creation without a class is allowed; the login gate (auth_service) still
     # blocks trainer/TA without a class until assignment.
     trainer_id = make_trainer(client, h)
-    class_id = make_class(client, h, course_id, "K1", trainer_id)["id"]
+    class_id = make_class(client, h, "K1", trainer_id)["id"]
 
     # AC-02: assign the one trainer to the class; same trainer may serve several classes.
     assigned = client.patch(
@@ -152,7 +148,7 @@ def test_single_trainer_per_class_and_login_gate(client):
     assert assigned.status_code == 200
     assert assigned.json()["trainer_id"] == trainer_id
 
-    class2 = make_class(client, h, course_id, "K2", trainer_id)
+    class2 = make_class(client, h, "K2", trainer_id)
     again = client.patch(
         f"/api/admin/classes/{class2['id']}/assign", json={"trainer_id": trainer_id}, headers=h
     )
@@ -170,9 +166,8 @@ def test_single_trainer_per_class_and_login_gate(client):
 
 def test_import_template_report_and_queue(client):
     h = admin_headers(client)
-    course_id = client.post("/api/admin/courses", json={"code": "SE", "title": "T"}, headers=h).json()["id"]
     trainer_id = make_trainer(client, h, email="imp-t@gmail.com")
-    make_class(client, h, course_id, "G1", trainer_id)
+    make_class(client, h, "G1", trainer_id)
 
     # AC-06: template downloads with exact columns + one example row.
     tpl = client.get("/api/admin/import-template", headers=h)
@@ -230,9 +225,8 @@ def test_import_template_report_and_queue(client):
 
 def test_deactivate_reset_delete_guards(client):
     h = admin_headers(client)
-    course_id = client.post("/api/admin/courses", json={"code": "X", "title": "T"}, headers=h).json()["id"]
     trainer_id = make_trainer(client, h, email="deact-t@gmail.com")
-    make_class(client, h, course_id, "Z1", trainer_id)
+    make_class(client, h, "Z1", trainer_id)
     uid = client.post(
         "/api/admin/users",
         json={"username": "s", "email": "deact@gmail.com", "role": "student", "class_code": "Z1"},
