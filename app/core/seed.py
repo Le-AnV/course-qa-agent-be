@@ -64,6 +64,7 @@ INITIAL_CLASSES = [
         "semester": "Fall",
         "academic_year": "2026",
         "trainer_email": "teacher@academic.edu.vn",
+        "credits": 3,
     },
 ]
 
@@ -158,6 +159,7 @@ def seed_database(db: Session) -> None:
                     name=cl["class_name"],
                     semester=cl["semester"],
                     academic_year=cl["academic_year"],
+                    credits=int(cl.get("credits", 3)),
                     status="ACTIVE",
                 )
                 db.add(clazz)
@@ -205,6 +207,7 @@ DEV_CLASS = {
     "name": "Test Class A",
     "semester": "HK1",
     "academic_year": "2026-2027",
+    "credits": 3,
 }
 
 

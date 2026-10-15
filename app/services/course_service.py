@@ -23,6 +23,13 @@ class DomainError(ValueError):
     pass
 
 
+# Credit rules: each class carries manual credits (1-6); a student is hard-capped
+# at 20 credits per (semester, academic_year) across ACTIVE enrollments.
+MIN_CLASS_CREDITS = 1
+MAX_CLASS_CREDITS = 6
+MAX_SEMESTER_CREDITS = 20
+
+
 def _coerce_uuid(value: uuid.UUID | str) -> uuid.UUID:
     return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
 
@@ -54,6 +61,7 @@ def create_class(
     name: str | None = None,
     semester: str = "S1",
     academic_year: str = "2026",
+    credits: int = 3,
 ) -> Class:
     """AC-01: the course must exist first — a class is always created under it.
 
@@ -73,6 +81,14 @@ def create_class(
         raise DomainError(f"Class '{code}' already exists in course '{course.code}'.")
     if trainer_id is None:
         raise DomainError("A trainer is required — create the trainer account first.")
+    try:
+        credits = int(credits)
+    except (TypeError, ValueError):
+        raise DomainError("Credits must be an integer between 1 and 6.")
+    if not MIN_CLASS_CREDITS <= credits <= MAX_CLASS_CREDITS:
+        raise DomainError(
+            f"Credits must be between {MIN_CLASS_CREDITS} and {MAX_CLASS_CREDITS}."
+        )
     tid = _coerce_uuid(trainer_id)
     trainer = db.query(User).filter(User.id == tid).first()
     if trainer is None:
@@ -84,6 +100,7 @@ def create_class(
         name=(name or code).strip(),
         semester=semester.strip(),
         academic_year=academic_year.strip(),
+        credits=credits,
     )
     db.add(section)
     db.commit()
@@ -184,3 +201,40 @@ def user_display_name(db: Session, user_id: uuid.UUID | str | None) -> str | Non
         return None
     user = db.query(User).filter(User.id == _coerce_uuid(user_id)).first()
     return user.full_name if user else None
+
+
+def semester_credit_total(
+    db: Session,
+    student_id: uuid.UUID | str,
+    semester: str,
+    academic_year: str,
+    exclude_class_id: uuid.UUID | str | None = None,
+) -> int:
+    """Sum ACTIVE enrollment credits for one student in one term."""
+    sid = _coerce_uuid(student_id)
+    q = (
+        db.query(Class.credits)
+        .join(Enrollment, Enrollment.class_id == Class.id)
+        .filter(
+            Enrollment.student_id == sid,
+            Enrollment.status == "ACTIVE",
+            Class.semester == semester,
+            Class.academic_year == academic_year,
+        )
+    )
+    if exclude_class_id is not None:
+        q = q.filter(Class.id != _coerce_uuid(exclude_class_id))
+    return sum(r[0] or 0 for r in q.all())
+
+
+def check_credit_cap(db: Session, student_id: uuid.UUID | str, section: Class) -> None:
+    """Hard cap: activating this enrollment must not exceed 20 credits/term."""
+    total = semester_credit_total(
+        db, student_id, section.semester, section.academic_year,
+        exclude_class_id=section.id,
+    )
+    if total + (section.credits or 0) > MAX_SEMESTER_CREDITS:
+        raise DomainError(
+            f"Exceeds {MAX_SEMESTER_CREDITS} credits per semester "
+            f"(currently {total}, class is {section.credits})."
+        )

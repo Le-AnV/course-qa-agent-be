@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.security import generate_password, hash_password
 from app.models.course import Class, Enrollment
 from app.models.user import Account, Role, User
+from app.services import course_service as course_service_mod
 
 ROLE_ADMIN = "ADMIN"
 ROLE_TRAINER = "TRAINER"
@@ -119,6 +120,13 @@ def create_user(
             section.trainer_id = user.id
         else:
             # Students and TAs join through enrollment (ERD, no ta_id column).
+            # Hard cap: 20 credits per (semester, academic_year). New users start
+            # at 0 so this only bites if the flow ever enrolls existing users.
+            try:
+                course_service_mod.check_credit_cap(db, user.id, section)
+            except ValueError:
+                db.rollback()
+                raise
             existing = (
                 db.query(Enrollment)
                 .filter(

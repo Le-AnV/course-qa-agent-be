@@ -61,6 +61,7 @@ def _class_to_read(db: Session, section: Class) -> ClassRead:
         code=section.code,
         trainer_id=section.trainer_id,
         trainer_name=course_service.user_display_name(db, section.trainer_id),
+        credits=section.credits or 0,
         student_count=course_service.count_students(db, section.id),
         document_count=warnings["document_count"],
         ticket_count=warnings["ticket_count"],
@@ -142,6 +143,7 @@ def create_class(payload: ClassCreate, db: Session = Depends(get_db), _=Depends(
             name=payload.name,
             semester=payload.semester,
             academic_year=payload.academic_year,
+            credits=payload.credits,
         )
     except course_service.DomainError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

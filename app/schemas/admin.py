@@ -33,6 +33,8 @@ class ClassCreate(BaseModel):
     name: str | None = Field(default=None, max_length=100)
     semester: str = Field(default="S1", max_length=20)
     academic_year: str = Field(default="2026", max_length=20)
+    # Manual credits entered at class creation; hard-capped 20/semester at enrollment.
+    credits: int = Field(default=3, ge=1, le=6)
 
 
 class ClassAssign(BaseModel):
@@ -46,6 +48,7 @@ class ClassRead(BaseModel):
     code: str
     trainer_id: uuid.UUID | None = None
     trainer_name: str | None = None
+    credits: int = 3
     student_count: int = 0
     # AC-12: delete warning data.
     document_count: int = 0
