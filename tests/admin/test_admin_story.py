@@ -80,7 +80,7 @@ def admin_headers(client: TestClient) -> dict:
 def make_xlsx(rows: list[list[str]]) -> bytes:
     wb = Workbook()
     ws = wb.active
-    ws.append(["username", "gmail", "type", "class"])
+    ws.append(["username", "gmail", "type"])
     for r in rows:
         ws.append(r)
     buf = io.BytesIO()
@@ -180,16 +180,15 @@ def test_import_template_report_and_queue(client):
 
     ws = load_workbook(filename=io.BytesIO(tpl.content), read_only=True).active
     rows = list(ws.iter_rows(values_only=True))
-    assert [str(c) for c in rows[0]] == ["username", "gmail", "type", "class"]
+    assert [str(c) for c in rows[0]] == ["username", "gmail", "type"]
     assert len(rows) == 2  # header + one example row
-    assert len(rows[0]) == 4  # no password column (AC-05)
+    assert len(rows[0]) == 3  # no password column (AC-05), no class column
 
     payload = make_xlsx(
         [
-            ["Stu One", "stu1@gmail.com", "student", "G1"],  # imported
-            ["Stu Dup", "stu1@gmail.com", "student", "G1"],  # skipped (email exists)
-            ["Bad Guy", "bad@gmail.com", "wizard", "G1"],  # failed (role)
-            ["No Class", "noc@gmail.com", "student", "MISSING"],  # failed (class)
+            ["Stu One", "stu1@gmail.com", "student"],  # imported (class-less)
+            ["Stu Dup", "stu1@gmail.com", "student"],  # skipped (email exists)
+            ["Bad Guy", "bad@gmail.com", "wizard"],  # failed (role)
         ]
     )
     up = client.post(
@@ -197,14 +196,13 @@ def test_import_template_report_and_queue(client):
     )
     assert up.status_code == 201, up.text
     body = up.json()
-    assert (body["imported_count"], body["skipped_count"], body["failed_count"]) == (1, 1, 2)
+    assert (body["imported_count"], body["skipped_count"], body["failed_count"]) == (1, 1, 1)
 
     detail = client.get(f"/api/admin/imports/{body['id']}", headers=h).json()
     statuses = {r["email"]: r["status"] for r in detail["rows"]}
     # Duplicate gmail: first row imports, second row skips (email now exists).
     assert statuses["stu1@gmail.com"] in ("imported", "skipped")
     assert statuses["bad@gmail.com"] == "failed"
-    assert statuses["noc@gmail.com"] == "failed"
     assert any(r["status"] == "imported" for r in detail["rows"])
     assert any(r["status"] == "skipped" for r in detail["rows"])
 
