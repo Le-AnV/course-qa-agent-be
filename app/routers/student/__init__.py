@@ -1,1 +1,1 @@
-from app.routers.student.router import router
+from app.routers.student.router import router as router

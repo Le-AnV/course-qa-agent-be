@@ -132,7 +132,9 @@ def _coerce_uuid(raw: str) -> uuid.UUID:
 def _to_read(db: Session, section: Class) -> StudentClassRead:
     course = _course_of(db, section.course_id)
     members = (
-        db.query(Enrollment).filter(Enrollment.class_id == section.id, Enrollment.status == "ACTIVE").count()
+        db.query(Enrollment)
+        .filter(Enrollment.class_id == section.id, Enrollment.status == "ACTIVE")
+        .count()
     )
     docs = db.query(Document).filter(Document.class_id == section.id).count()
     return StudentClassRead(
@@ -318,9 +320,15 @@ def request_join(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found.")
     existing = _enrollment_of(db, user.id, section.id)
     if existing is not None and existing.status == "ACTIVE":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You are already a member of this class.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You are already a member of this class.",
+        )
     if existing is not None and existing.status == "PENDING":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Your request is already pending approval.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Your request is already pending approval.",
+        )
     enr = Enrollment(class_id=section.id, student_id=user.id, status="PENDING")
     db.add(enr)
     db.commit()
@@ -354,7 +362,9 @@ def cancel_request(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found.")
     enr = _enrollment_of(db, user.id, section.id)
     if enr is None or enr.status != "PENDING":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No pending request found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No pending request found."
+        )
     db.delete(enr)
     db.commit()
     return {"cancelled": str(section.id)}
@@ -371,7 +381,10 @@ def pending_requests(
     if section is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found.")
     if not _can_approve(db, user, section):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the class TA, trainer or an admin can review requests.")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the class TA, trainer or an admin can review requests.",
+        )
     rows = (
         db.query(Enrollment)
         .filter(Enrollment.class_id == section.id, Enrollment.status == "PENDING")
@@ -392,7 +405,10 @@ def approve_request(
     if section is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found.")
     if not _can_approve(db, user, section):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the class TA, trainer or an admin can approve requests.")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the class TA, trainer or an admin can approve requests.",
+        )
     try:
         sid = uuid.UUID(str(student_id))
     except (TypeError, ValueError, AttributeError):
@@ -418,7 +434,10 @@ def reject_request(
     if section is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found.")
     if not _can_approve(db, user, section):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the class TA, trainer or an admin can reject requests.")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the class TA, trainer or an admin can reject requests.",
+        )
     try:
         sid = uuid.UUID(str(student_id))
     except (TypeError, ValueError, AttributeError):

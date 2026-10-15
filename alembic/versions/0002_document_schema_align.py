@@ -21,8 +21,9 @@ Data migration preserves rows:
   mime_type <- derived from file_type
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "0002_document_schema_align"
 down_revision = "0001_initial_schema"
@@ -42,12 +43,18 @@ MIME_BY_EXT = {
 
 def upgrade() -> None:
     conn = op.get_bind()
-    cols = {r[0] for r in conn.exec_driver_sql(
-        "SELECT column_name FROM information_schema.columns WHERE table_name='document'"
-    ).fetchall()}
-    if "document" not in {r[0] for r in conn.exec_driver_sql(
-        "SELECT table_name FROM information_schema.tables WHERE table_name='document'"
-    ).fetchall()}:
+    cols = {
+        r[0]
+        for r in conn.exec_driver_sql(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='document'"
+        ).fetchall()
+    }
+    if "document" not in {
+        r[0]
+        for r in conn.exec_driver_sql(
+            "SELECT table_name FROM information_schema.tables WHERE table_name='document'"
+        ).fetchall()
+    }:
         return
 
     if "size_bytes" not in cols:
@@ -83,7 +90,9 @@ def upgrade() -> None:
         """)
         for ext, mime in MIME_BY_EXT.items():
             conn.execute(
-                sa.text("UPDATE document SET mime_type = :mime WHERE file_type = :ext AND mime_type IS NULL"),
+                sa.text(
+                    "UPDATE document SET mime_type = :mime WHERE file_type = :ext AND mime_type IS NULL"
+                ),
                 {"mime": mime, "ext": ext},
             )
         conn.exec_driver_sql(
@@ -97,27 +106,38 @@ def upgrade() -> None:
         "UPDATE document SET mime_type = 'application/octet-stream' WHERE mime_type IS NULL"
     )
     with op.batch_alter_table("document") as batch:
-        batch.alter_column("size_bytes", existing_type=sa.BigInteger(), nullable=False, server_default="0")
-        batch.alter_column("mime_type", existing_type=sa.String(255), nullable=False, server_default="application/octet-stream")
-        batch.alter_column("status", existing_type=sa.String(20), nullable=False, server_default="pending")
+        batch.alter_column(
+            "size_bytes", existing_type=sa.BigInteger(), nullable=False, server_default="0"
+        )
+        batch.alter_column(
+            "mime_type",
+            existing_type=sa.String(255),
+            nullable=False,
+            server_default="application/octet-stream",
+        )
+        batch.alter_column(
+            "status", existing_type=sa.String(20), nullable=False, server_default="pending"
+        )
 
-    # Drop legacy columns/constraints only if they exist.
+    # Drop legacy columns/constraints only if they exist (checked first
+    # so a missing object is skipped without catching broad exceptions).
+    existing_constraints = {
+        r[0]
+        for r in conn.exec_driver_sql(
+            "SELECT conname FROM pg_constraint WHERE conrelid = to_regclass('document')"
+        ).fetchall()
+    }
     for constraint in (
         "ck_document_approval_status",
         "ck_document_processing_status",
         "ck_document_file_type",
         "document_file_size_check",
     ):
-        try:
+        if constraint in existing_constraints:
             op.drop_constraint(constraint, "document", type_="check")
-        except Exception:
-            pass
     for legacy in ("file_path", "file_size", "approval_status", "processing_status"):
         if legacy in cols:
-            try:
-                op.drop_column("document", legacy)
-            except Exception:
-                pass
+            op.drop_column("document", legacy)
 
 
 def downgrade() -> None:

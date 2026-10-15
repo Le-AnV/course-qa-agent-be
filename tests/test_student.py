@@ -97,9 +97,9 @@ def classroom(api_client):
 
 
 def student_headers(api_client, email="s-ws@gmail.com", role="student"):
+    from app.core.database import get_session_local
     from app.core.security import create_access_token
     from app.models.user import User
-    from app.core.database import get_session_local
 
     db = get_session_local(settings.database_url)()
     try:
@@ -147,7 +147,12 @@ def test_non_member_is_forbidden(api_client, classroom):
     cid = classroom["class_id"]
     assert api_client.get(f"/api/student/classes/{cid}", headers=h).status_code == 403
     assert api_client.get("/api/student/classes", headers=h).json() == []
-    assert api_client.get("/api/student/classes/00000000-0000-0000-0000-000000000000", headers=h).status_code == 404
+    assert (
+        api_client.get(
+            "/api/student/classes/00000000-0000-0000-0000-000000000000", headers=h
+        ).status_code
+        == 404
+    )
 
 
 def test_join_request_and_ta_approval(api_client, classroom):
@@ -161,7 +166,7 @@ def test_join_request_and_ta_approval(api_client, classroom):
     assert out.status_code == 201
     outsider = student_headers(api_client, email="out2-ws@gmail.com")
     catalog = api_client.get("/api/student/catalog", headers=outsider).json()
-    mine = [c for c in catalog if c["id"] == cid][0]
+    mine = next(c for c in catalog if c["id"] == cid)
     assert mine["my_status"] == "none"
 
     # Request to join -> pending.
@@ -177,7 +182,12 @@ def test_join_request_and_ta_approval(api_client, classroom):
     # A TA enrolled in the class can review + approve.
     ta = api_client.post(
         "/api/admin/users",
-        json={"username": "TA", "email": "ta-ws@gmail.com", "role": "teaching_assistant", "class_code": "STU-A"},
+        json={
+            "username": "TA",
+            "email": "ta-ws@gmail.com",
+            "role": "teaching_assistant",
+            "class_code": "STU-A",
+        },
         headers=admin,
     )
     assert ta.status_code == 201, ta.text

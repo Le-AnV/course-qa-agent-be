@@ -15,9 +15,12 @@ depends_on = None
 
 def upgrade() -> None:
     conn = op.get_bind()
-    names = {r[0] for r in conn.exec_driver_sql(
-        "SELECT conname FROM pg_constraint WHERE conrelid = to_regclass('enrollment')"
-    ).fetchall()}
+    names = {
+        r[0]
+        for r in conn.exec_driver_sql(
+            "SELECT conname FROM pg_constraint WHERE conrelid = to_regclass('enrollment')"
+        ).fetchall()
+    }
     if "ck_enrollment_status" in names:
         op.drop_constraint("ck_enrollment_status", "enrollment", type_="check")
     op.create_check_constraint(
