@@ -9,7 +9,6 @@ class ClassMineRead(BaseModel):
     """A class assigned to the caller (source: E1 when it lands)."""
 
     id: str
-    course_id: str
     name: str
     code: str
 

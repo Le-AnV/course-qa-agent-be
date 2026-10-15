@@ -65,11 +65,8 @@ def login(client: TestClient, email: str, password: str) -> dict:
 
 @pytest.fixture()
 def classroom(api_client):
-    """Course + trainer-owned class + one enrolled student. Returns headers + ids."""
+    """Trainer-owned standalone class + one enrolled student. Returns headers + ids."""
     admin = login(api_client, settings.bootstrap_admin_email, settings.bootstrap_admin_password)
-    course = api_client.post(
-        "/api/admin/courses", json={"code": "STU", "title": "Student WS"}, headers=admin
-    ).json()
     trainer = api_client.post(
         "/api/admin/users",
         json={"username": "T", "email": "t-ws@gmail.com", "role": "trainer"},
@@ -79,7 +76,6 @@ def classroom(api_client):
     klass = api_client.post(
         "/api/admin/classes",
         json={
-            "course_id": course["id"],
             "code": "STU-A",
             "trainer_id": trainer.json()["id"],
             "name": "STU A",

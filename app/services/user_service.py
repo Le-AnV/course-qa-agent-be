@@ -8,6 +8,9 @@ lowercase aliases from the .xlsx ``type`` column.
 
 from __future__ import annotations
 
+import re
+import secrets
+import unicodedata
 import uuid
 
 from sqlalchemy.orm import Session
@@ -15,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.core.security import generate_password, hash_password
 from app.models.course import Class, Enrollment
 from app.models.user import Account, Role, User
+from app.services import course_service as course_service_mod
 
 ROLE_ADMIN = "ADMIN"
 ROLE_TRAINER = "TRAINER"
@@ -37,6 +41,56 @@ ROLES_REQUIRING_CLASS = (ROLE_TRAINER, ROLE_TA)
 
 class DomainError(ValueError):
     pass
+
+
+STUDENT_CODE_RE = re.compile(r"^[A-Z]+_[0-9]{4}$")
+
+
+def _initials(full_name: str) -> str:
+    """First letters of each name token, ASCII uppercased (Tran Van A -> TVA)."""
+    ascii_name = "".join(
+        c for c in unicodedata.normalize("NFD", full_name) if not unicodedata.combining(c)
+    )
+    letters = [t[0].upper() for t in ascii_name.split() if t and t[0].isalpha()]
+    return "".join(letters) or "S"
+
+
+def generate_student_code(db: Session, full_name: str) -> str:
+    """Random MSSV as INITIALS_NNNN (e.g. TVA_4821).
+
+    The 4-digit part is random, not sequential; collisions with existing
+    codes of the same prefix are retried (unguessable, no ordering leak).
+    """
+    prefix = _initials(full_name)
+    like = f"{prefix}_%"
+    existing = [r[0] for r in db.query(User.student_code).filter(User.student_code.like(like)).all()]
+    taken = set()
+    for code in existing:
+        m = re.fullmatch(rf"{re.escape(prefix)}_([0-9]{{4}})", code or "")
+        if m:
+            taken.add(m.group(1))
+    # 10_000 possible suffixes; bail out rather than loop forever.
+    if len(taken) >= 10_000:
+        raise DomainError(f"Student code space exhausted for prefix '{prefix}'.")
+    for _ in range(100):
+        suffix = f"{secrets.randbelow(10_000):04d}"
+        if suffix not in taken:
+            return f"{prefix}_{suffix}"
+    raise DomainError(f"Could not allocate a student code for prefix '{prefix}'.")
+
+
+def normalize_student_code(raw: str | None) -> str | None:
+    """Validate an admin-supplied MSSV, or None when blank (auto-generate)."""
+    if raw is None:
+        return None
+    code = raw.strip().upper()
+    if not code:
+        return None
+    if not STUDENT_CODE_RE.fullmatch(code):
+        raise DomainError(
+            f"Invalid student code '{raw}'. Expected format INITIALS_NNNN (e.g. TVA_0001)."
+        )
+    return code
 
 
 def normalize_role(raw: str) -> str:
@@ -76,6 +130,7 @@ def create_user(
     role_raw: str,
     class_code: str | None,
     password: str | None = None,
+    student_code: str | None = None,
 ) -> tuple[User, str]:
     """Create one account. Returns (user, plaintext password) — the caller
     emails the password immediately and never persists or returns it."""
@@ -87,6 +142,15 @@ def create_user(
     email_norm = email.strip().lower()
     if db.query(User).filter(User.email == email_norm).first():
         raise DomainError(f"Email '{email_norm}' already exists — skipped.")
+    # MSSV: only students carry one; blank means auto-generate INITIALS_NNNN.
+    code = normalize_student_code(student_code)
+    if role == ROLE_STUDENT and code is None:
+        code = generate_student_code(db, username)
+    if code is not None:
+        if role != ROLE_STUDENT:
+            raise DomainError("Student code is only for student accounts.")
+        if db.query(User).filter(User.student_code == code).first():
+            raise DomainError(f"Student code '{code}' already exists.")
     section = resolve_class(db, class_code)
     # AC-03: creation is allowed without a class so the first trainer can
     # exist before the first class (class.trainer_id is NOT NULL). The login
@@ -100,6 +164,7 @@ def create_user(
         email=email_norm,
         role_id=role_row.id,
         status="ACTIVE",
+        student_code=code,
     )
     db.add(user)
     db.flush()
@@ -119,6 +184,13 @@ def create_user(
             section.trainer_id = user.id
         else:
             # Students and TAs join through enrollment (ERD, no ta_id column).
+            # Hard cap: 20 credits per (semester, academic_year). New users start
+            # at 0 so this only bites if the flow ever enrolls existing users.
+            try:
+                course_service_mod.check_credit_cap(db, user.id, section)
+            except ValueError:
+                db.rollback()
+                raise
             existing = (
                 db.query(Enrollment)
                 .filter(

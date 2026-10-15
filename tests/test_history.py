@@ -26,7 +26,7 @@ from app.core.deps import get_db
 from app.core.seed import seed_database
 from app.main import app
 from app.models.chat import ChatSession
-from app.models.course import Class, Course
+from app.models.course import Class
 from app.models.user import User
 from app.services import history_service
 
@@ -54,14 +54,9 @@ def db_session(monkeypatch: pytest.MonkeyPatch) -> Generator[Session, None, None
     db: Session = SessionLocal()
     try:
         seed_database(db)
-        # Reuse the seeded CS101 course (seed also provisions CS101-FA26-001);
-        # inserting a second CS101 violates the unique code constraint.
-        course = db.query(Course).filter(Course.code == "CS101").first()
-        assert course is not None
-
+        # Standalone test class (no course binding).
         trainer = db.query(User).filter(User.email == "teacher@academic.edu.vn").first()
         test_class = Class(
-            course_id=course.id,
             trainer_id=trainer.id,
             code="CS101-A",
             name="Class A",

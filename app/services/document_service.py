@@ -10,7 +10,7 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from app.models.course import Class, Course
+from app.models.course import Class
 from app.models.document import Document
 from app.models.user import User
 
@@ -64,7 +64,7 @@ def my_classes(db: Session, user: User) -> list[dict]:
         return []
     rows = db.query(Class).filter(Class.id.in_(ids)).order_by(Class.code).all()
     return [
-        {"id": str(c.id), "course_id": str(c.course_id), "name": c.name, "code": c.code}
+        {"id": str(c.id), "name": c.name, "code": c.code}
         for c in rows
     ]
 
@@ -242,6 +242,4 @@ def class_name(db: Session, class_id: uuid.UUID | str) -> str:
         return str(class_id)
     if clazz is None:
         return str(class_id)
-    course = db.query(Course).filter(Course.id == clazz.course_id).first()
-    _ = course
     return clazz.name

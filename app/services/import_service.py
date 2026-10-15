@@ -23,17 +23,36 @@ from app.services import email_service, user_service
 # Class assignment is deliberately NOT part of the template: students
 # browse the catalog and request to join; TAs approve (enrollment flow).
 # Accounts are created class-less; import never enrolls anyone.
-TEMPLATE_COLUMNS = ["username", "gmail", "type"]
-EXAMPLE_ROW = ["Nguyen Van A", "student001@gmail.com", "student"]
+# mssv is optional: blank means the backend auto-generates INITIALS_NNNN
+# (Tran Van A -> TVA_4821), with a random 4-digit suffix.
+TEMPLATE_COLUMNS = ["fullname", "email", "type", "mssv"]
+EXAMPLE_ROW = ["Nguyen Van A", "student001@gmail.com", "student", ""]
+
+GUIDE_SHEET = "Hướng dẫn"
+GUIDE_ROWS = [
+    ["Cột", "Bắt buộc?", "Cách nhập"],
+    ["fullname", "Có", "Họ tên đầy đủ, vd: Tran Van A. Dùng để sinh MSSV khi bỏ trống cột mssv."],
+    ["email", "Có", "Gmail của tài khoản, phải duy nhất, vd: student001@gmail.com. Trùng email có sẵn thì bỏ qua (skipped)."],
+    ["type", "Có", "Một trong: student, trainer, teaching_assistant (hoặc ta). Chữ thường, không dấu."],
+    ["mssv", "Không", "Mã số sinh viên dạng CHUCUAINHOA_0001, vd: TVA_4821. Bỏ trống để hệ thống tự sinh (lấy chữ cái đầu họ tên + 4 số ngẫu nhiên). Chỉ áp dụng cho student."],
+    ["Ghi chú", "", "Không thêm cột password — mật khẩu được sinh ngẫu nhiên và gửi qua email. Sheet này chỉ để đọc, hệ thống chỉ đọc sheet accounts."],
+]
 
 
 def build_template_bytes() -> bytes:
-    """AC-06: downloadable template with exact columns + one example row."""
+    """AC-06: downloadable template with exact columns + one example row + guide sheet."""
     wb = Workbook()
     ws = wb.active
     ws.title = "accounts"
     ws.append(TEMPLATE_COLUMNS)
     ws.append(EXAMPLE_ROW)
+    for col, width in (("A", 24), ("B", 28), ("C", 20), ("D", 14)):
+        ws.column_dimensions[col].width = width
+    guide = wb.create_sheet(GUIDE_SHEET)
+    for row in GUIDE_ROWS:
+        guide.append(row)
+    for col, width in (("A", 12), ("B", 14), ("C", 90)):
+        guide.column_dimensions[col].width = width
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -45,7 +64,7 @@ def parse_workbook(data: bytes) -> tuple[list[str], list[dict]]:
         wb = load_workbook(filename=io.BytesIO(data), read_only=True, data_only=True)
     except Exception as exc:  # noqa: BLE001 — openpyxl error types vary
         raise ValueError(f"Cannot read .xlsx file: {exc}")
-    ws = wb.active
+    ws = wb["accounts"] if "accounts" in wb.sheetnames else wb.active
     rows = list(ws.iter_rows(values_only=True))
     if not rows or all(c is None or str(c).strip() == "" for c in rows[0]):
         raise ValueError("The file is empty — first row must be the header.")
@@ -57,14 +76,14 @@ def parse_workbook(data: bytes) -> tuple[list[str], list[dict]]:
         )
     parsed = []
     for i, r in enumerate(rows[1:], start=2):
-        cells = [(str(c).strip() if c is not None else "") for c in list(r)[:3]]
-        while len(cells) < 3:
+        cells = [(str(c).strip() if c is not None else "") for c in list(r)[:4]]
+        while len(cells) < 4:
             cells.append("")
         # Skip fully blank rows.
         if all(c == "" for c in cells):
             continue
         parsed.append(
-            {"row_number": i, "username": cells[0], "gmail": cells[1], "type": cells[2]}
+            {"row_number": i, "fullname": cells[0], "email": cells[1], "type": cells[2], "mssv": cells[3]}
         )
     if not parsed:
         raise ValueError("No data rows found — fill in rows under the header.")
@@ -72,12 +91,12 @@ def parse_workbook(data: bytes) -> tuple[list[str], list[dict]]:
 
 
 def _handle_existing_email(db: Session, row: dict) -> tuple[str, str, uuid.UUID | None]:
-    """Import carries no class, so a repeated gmail is always a duplicate.
+    """Import carries no class, so a repeated email is always a duplicate.
 
     Returns (status, message, user_id). Same role -> skipped; a conflicting
     role fails loudly instead of silently hiding the conflict.
     """
-    email = row["gmail"].strip().lower()
+    email = row["email"].strip().lower()
     user = db.query(User).filter(User.email == email).first()
     want_role = user_service.normalize_role(row["type"])
     got_role = user_service.role_name_of(user)
@@ -95,18 +114,25 @@ def _handle_existing_email(db: Session, row: dict) -> tuple[str, str, uuid.UUID 
     return ROW_SKIPPED, f"Email '{email}' already exists — skipped.", user.id
 
 
-def validate_row(row: dict) -> str | None:
+def validate_row(db: Session, row: dict) -> str | None:
     """Return an error message, or None if the row looks valid."""
-    if not row["username"]:
-        return "Username is empty."
+    if not row["fullname"]:
+        return "Fullname is empty."
     try:
-        validate_email(row["gmail"].strip(), check_deliverability=False)
+        validate_email(row["email"].strip(), check_deliverability=False)
     except EmailNotValidError:
-        return f"Gmail '{row['gmail']}' is not a valid email."
+        return f"Email '{row['email']}' is not a valid email."
     try:
         user_service.normalize_role(row["type"])
     except user_service.DomainError as exc:
         return str(exc)
+    if (row.get("mssv") or "").strip():
+        try:
+            code = user_service.normalize_student_code(row["mssv"])
+        except user_service.DomainError as exc:
+            return str(exc)
+        if db.query(User).filter(User.student_code == code).first():
+            return f"Student code '{code}' already exists."
     return None
 
 
@@ -132,16 +158,17 @@ def import_rows(
     imported = skipped = failed = 0
 
     for row in rows:
-        error = validate_row(row)
+        error = validate_row(db, row)
         status = ROW_IMPORTED
         message = "Imported. Credentials emailed."
         user_id: uuid.UUID | None = None
+        student_code: str | None = None
 
         if error is not None:
             status, message = ROW_FAILED, error
             failed += 1
-        elif db.query(User).filter(User.email == row["gmail"].strip().lower()).first():
-            # Import carries no class: a repeated gmail is a duplicate.
+        elif db.query(User).filter(User.email == row["email"].strip().lower()).first():
+            # Import carries no class: a repeated email is a duplicate.
             # Class membership now happens via request + TA approval.
             status, message, user_id = _handle_existing_email(db, row)
             if status == ROW_IMPORTED:
@@ -154,16 +181,20 @@ def import_rows(
             try:
                 user, plain = user_service.create_user(
                     db,
-                    username=row["username"],
-                    email=row["gmail"],
+                    username=row["fullname"],
+                    email=row["email"],
                     role_raw=row["type"],
                     class_code=None,
+                    student_code=row.get("mssv") or None,
                 )
                 user_id = user.id
+                student_code = user.student_code
                 subject, body = email_service.credential_email_body(
                     user.full_name, user.email, plain, None
                 )
                 email_service.queue_email(db, user.email, subject, body, user_id=user.id)
+                if student_code:
+                    message = f"Imported (MSSV {student_code}). Credentials emailed."
                 imported += 1
             except user_service.DomainError as exc:
                 status, message = ROW_FAILED, str(exc)
@@ -173,13 +204,14 @@ def import_rows(
             ImportRow(
                 batch_id=batch.id,
                 row_number=row["row_number"],
-                username=row["username"],
-                email=row["gmail"].strip().lower(),
+                username=row["fullname"],
+                email=row["email"].strip().lower(),
                 role_raw=row["type"],
                 class_raw="",
                 status=status,
                 message=message,
                 user_id=user_id,
+                student_code=student_code,
             )
         )
         db.commit()
@@ -203,7 +235,7 @@ def retry_row(db: Session, row_id: int) -> ImportRow:
     if row.status != ROW_FAILED:
         raise ValueError("Only failed rows can be retried.")
     error = validate_row(
-        {"username": row.username, "gmail": row.email, "type": row.role_raw}
+        db, {"fullname": row.username, "email": row.email, "type": row.role_raw, "mssv": row.student_code or ""}
     )
     if error is not None:
         row.message = error
@@ -212,7 +244,7 @@ def retry_row(db: Session, row_id: int) -> ImportRow:
         return row
     if db.query(User).filter(User.email == row.email).first():
         status, message, user_id = _handle_existing_email(
-            db, {"username": row.username, "gmail": row.email, "type": row.role_raw}
+            db, {"fullname": row.username, "email": row.email, "type": row.role_raw}
         )
         row.user_id = user_id
         batch = db.query(ImportBatch).filter(ImportBatch.id == row.batch_id).first()
@@ -235,12 +267,17 @@ def retry_row(db: Session, row_id: int) -> ImportRow:
         return row
     try:
         user, plain = user_service.create_user(
-            db, username=row.username, email=row.email, role_raw=row.role_raw, class_code=None
+            db, username=row.username, email=row.email, role_raw=row.role_raw, class_code=None,
+            student_code=row.student_code or None,
         )
         subject, body = email_service.credential_email_body(user.full_name, user.email, plain, None)
         email_service.queue_email(db, user.email, subject, body, user_id=user.id)
         row.status = ROW_IMPORTED
-        row.message = "Imported on retry. Credentials emailed."
+        row.student_code = user.student_code
+        if user.student_code:
+            row.message = f"Imported on retry (MSSV {user.student_code}). Credentials emailed."
+        else:
+            row.message = "Imported on retry. Credentials emailed."
         row.user_id = user.id
         batch = db.query(ImportBatch).filter(ImportBatch.id == row.batch_id).first()
         if batch is not None:

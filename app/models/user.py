@@ -68,6 +68,9 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     full_name: Mapped[str] = mapped_column(String(100), nullable=False)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    # Student ID (MSSV): auto-generated for students as INITIALS_NNNN
+    # (e.g. Tran Van A -> TVA_4821, random 4 digits); NULL for staff/admin.
+    student_code: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
     role_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("role.id", ondelete="RESTRICT"), nullable=False
     )

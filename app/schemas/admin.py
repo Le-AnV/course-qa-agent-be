@@ -24,15 +24,16 @@ class CourseRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# --- Classes (AC-01, AC-02) ---
+# --- Classes (standalone: class IS the subject) ---
 class ClassCreate(BaseModel):
-    course_id: uuid.UUID
     code: str = Field(min_length=1, max_length=50)
     # ERD: class.trainer_id NOT NULL — trainer required at creation.
     trainer_id: uuid.UUID
     name: str | None = Field(default=None, max_length=100)
     semester: str = Field(default="S1", max_length=20)
     academic_year: str = Field(default="2026", max_length=20)
+    # Manual credits entered at class creation; hard-capped 20/semester at enrollment.
+    credits: int = Field(default=3, ge=1, le=6)
 
 
 class ClassAssign(BaseModel):
@@ -41,11 +42,10 @@ class ClassAssign(BaseModel):
 
 class ClassRead(BaseModel):
     id: uuid.UUID
-    course_id: uuid.UUID
-    course_code: str = ""
     code: str
     trainer_id: uuid.UUID | None = None
     trainer_name: str | None = None
+    credits: int = 3
     student_count: int = 0
     # AC-12: delete warning data.
     document_count: int = 0
@@ -60,6 +60,8 @@ class UserCreate(BaseModel):
     email: EmailStr
     role: str = Field(min_length=1)
     class_code: str | None = Field(default=None, max_length=50)
+    # Optional MSSV for students; blank means auto-generate INITIALS_NNNN.
+    student_code: str | None = Field(default=None, max_length=20)
 
 
 class UserRead(BaseModel):
@@ -71,6 +73,7 @@ class UserRead(BaseModel):
     role: str
     class_id: uuid.UUID | None
     class_code: str | None = None
+    student_code: str | None = None
     is_active: bool
 
     model_config = {"from_attributes": True}
@@ -90,6 +93,7 @@ class ImportRowRead(BaseModel):
     class_raw: str
     status: str
     message: str
+    student_code: str | None = None
 
     model_config = {"from_attributes": True}
 

@@ -46,6 +46,7 @@ class ImportRow(Base):
     email: Mapped[str] = mapped_column(String(320), nullable=False, default="")
     role_raw: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     class_raw: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    student_code: Mapped[str | None] = mapped_column(String(20), nullable=True, default=None)
     status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     message: Mapped[str] = mapped_column(Text, nullable=False, default="")
     user_id: Mapped[uuid.UUID | None] = mapped_column(

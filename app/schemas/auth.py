@@ -30,6 +30,7 @@ class MeResponse(BaseModel):
     email: str
     role: str
     class_id: uuid.UUID | None
+    student_code: str | None = None
     is_active: bool
 
 

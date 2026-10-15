@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db
-from app.models.course import Class, Course, Enrollment
+from app.models.course import Class, Enrollment
 from app.models.document import Document
 from app.models.user import User
 
@@ -25,9 +25,8 @@ class StudentClassRead(BaseModel):
     id: uuid.UUID
     code: str
     name: str
-    course_code: str
-    course_title: str
     trainer_name: str | None
+    credits: int = 3
     semester: str
     academic_year: str
     member_count: int
@@ -90,10 +89,6 @@ def _trainer_name(db: Session, trainer_id: uuid.UUID) -> str | None:
     return trainer.full_name if trainer else None
 
 
-def _course_of(db: Session, course_id: uuid.UUID) -> Course | None:
-    return db.query(Course).filter(Course.id == course_id).first()
-
-
 def _member_class_ids(db: Session, user: User) -> set[uuid.UUID] | None:
     """Class ids visible to the caller, or None for admins (everything)."""
     role = _role_name(db, user).upper()
@@ -130,7 +125,6 @@ def _coerce_uuid(raw: str) -> uuid.UUID:
 
 
 def _to_read(db: Session, section: Class) -> StudentClassRead:
-    course = _course_of(db, section.course_id)
     members = (
         db.query(Enrollment)
         .filter(Enrollment.class_id == section.id, Enrollment.status == "ACTIVE")
@@ -141,9 +135,8 @@ def _to_read(db: Session, section: Class) -> StudentClassRead:
         id=section.id,
         code=section.code,
         name=section.name,
-        course_code=course.code if course else "",
-        course_title=course.name if course else "",
         trainer_name=_trainer_name(db, section.trainer_id),
+        credits=section.credits or 0,
         semester=section.semester,
         academic_year=section.academic_year,
         member_count=members + 1,  # + trainer
@@ -416,6 +409,13 @@ def approve_request(
     enr = _enrollment_of(db, sid, section.id)
     if enr is None or enr.status != "PENDING":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found.")
+    from app.services import course_service
+    from app.services.course_service import DomainError as CourseDomainError
+
+    try:
+        course_service.check_credit_cap(db, sid, section)
+    except CourseDomainError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     enr.status = "ACTIVE"
     db.commit()
     db.refresh(enr)

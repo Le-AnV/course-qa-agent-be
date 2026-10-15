@@ -70,6 +70,7 @@ def me(current_user=Depends(get_current_user), db: Session = Depends(get_db)):
         email=current_user.email,
         role=role_name.lower(),
         class_id=class_id,
+        student_code=current_user.student_code,
         is_active=current_user.status == "ACTIVE",
     )
 

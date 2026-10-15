@@ -20,7 +20,7 @@ from app.core.deps import get_db
 from app.core.security import hash_password
 from app.core.seed import seed_database
 from app.main import app
-from app.models.course import Class, Course
+from app.models.course import Class
 from app.models.user import Account, Role, User
 from app.services import document_service
 
@@ -71,38 +71,28 @@ def _make_user(db: Session, email: str, full_name: str, password: str, role_name
 
 
 def _seed_classes(db: Session) -> None:
-    """Class-a + class-b owned by the seed teacher, class-c by another trainer.
-
-    Reuses the seeded CS101 course — inserting a second CS101 violates the
-    unique code constraint.
+    """Standalone classes (no course binding): class-a + class-b owned by the
+    seed teacher, class-c by another trainer. Class codes are kept stable for
+    the document scope tests below.
     """
-    course = db.query(Course).filter(Course.code == "CS101").first()
-    assert course is not None
     teacher = db.query(User).filter(User.email == "teacher@academic.edu.vn").first()
     other = _make_user(db, "other-teacher@academic.edu.vn", "Other Trainer", "Other@123", "TRAINER")
-    for code, name in (("CS101-A", "CS101 - Class A"), ("CS101-B", "CS101 - Class B")):
+    specs = (
+        ("CS101-A", "CS101 - Class A", teacher),
+        ("CS101-B", "CS101 - Class B", teacher),
+        ("CS101-C", "CS101 - Class C", other),
+    )
+    for class_code, class_name, owner in specs:
         db.add(
             Class(
-                course_id=course.id,
-                trainer_id=teacher.id,
-                code=code,
-                name=name,
+                trainer_id=owner.id,
+                code=class_code,
+                name=class_name,
                 semester="HK1",
                 academic_year="2026-2027",
                 status="ACTIVE",
             )
         )
-    db.add(
-        Class(
-            course_id=course.id,
-            trainer_id=other.id,
-            code="CS101-C",
-            name="CS101 - Class C",
-            semester="HK1",
-            academic_year="2026-2027",
-            status="ACTIVE",
-        )
-    )
     db.commit()
 
 
