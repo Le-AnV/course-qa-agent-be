@@ -45,6 +45,7 @@ INITIAL_USERS = [
         "full_name": "Academic Student",
         "password": "Student@123",
         "role": "STUDENT",
+        "student_code": "AS_0001",
     },
 ]
 
@@ -119,6 +120,10 @@ def seed_database(db: Session) -> None:
                 db.add(account)
                 db.flush()
                 logger.info(f"Created account with hashed password for: {user.email}")
+
+            if u.get("student_code") and not user.student_code:
+                user.student_code = u["student_code"]
+                db.flush()
 
             user_map[user.email] = user
 

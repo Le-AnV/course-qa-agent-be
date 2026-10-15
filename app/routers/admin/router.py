@@ -92,6 +92,7 @@ def _user_to_read(db: Session, user: User) -> UserRead:
         role=role_name.lower(),
         class_id=class_id,
         class_code=class_code,
+        student_code=user.student_code,
         is_active=user.status == "ACTIVE",
     )
 
@@ -106,6 +107,7 @@ def _row_to_read(row: ImportRow) -> ImportRowRead:
         class_raw=row.class_raw,
         status=row.status,
         message=row.message,
+        student_code=row.student_code,
     )
 
 
@@ -186,6 +188,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), _=Depends(re
     try:
         user, plain = user_service.create_user(
             db, payload.username, str(payload.email), payload.role, payload.class_code,
+            student_code=payload.student_code,
         )
     except user_service.DomainError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

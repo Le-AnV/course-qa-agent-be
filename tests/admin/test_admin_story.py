@@ -1,7 +1,6 @@
 """AC coverage for AI-31 on the ERD UUID model: courses, classes, accounts, import, email queue."""
 
 import io
-import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -80,7 +79,7 @@ def admin_headers(client: TestClient) -> dict:
 def make_xlsx(rows: list[list[str]]) -> bytes:
     wb = Workbook()
     ws = wb.active
-    ws.append(["username", "gmail", "type"])
+    ws.append(["fullname", "email", "type", "mssv"])
     for r in rows:
         ws.append(r)
     buf = io.BytesIO()
@@ -122,6 +121,7 @@ def test_class_flow_standalone(client):
     trainer_id = make_trainer(client, h)
     good = make_class(client, h, "SE101", trainer_id)
     assert good["trainer_id"] == trainer_id
+    assert good["credits"] == 3
 
     # Duplicate class code is rejected.
     dup = client.post(
@@ -169,21 +169,23 @@ def test_import_template_report_and_queue(client):
     trainer_id = make_trainer(client, h, email="imp-t@gmail.com")
     make_class(client, h, "G1", trainer_id)
 
-    # AC-06: template downloads with exact columns + one example row.
+    # AC-06: template downloads with exact columns + one example row + guide sheet.
     tpl = client.get("/api/admin/import-template", headers=h)
     assert tpl.status_code == 200
 
-    ws = load_workbook(filename=io.BytesIO(tpl.content), read_only=True).active
+    book = load_workbook(filename=io.BytesIO(tpl.content), read_only=True)
+    assert "Hướng dẫn" in book.sheetnames
+    ws = book["accounts"]
     rows = list(ws.iter_rows(values_only=True))
-    assert [str(c) for c in rows[0]] == ["username", "gmail", "type"]
+    assert [str(c) for c in rows[0]] == ["fullname", "email", "type", "mssv"]
     assert len(rows) == 2  # header + one example row
-    assert len(rows[0]) == 3  # no password column (AC-05), no class column
+    assert len(rows[0]) == 4  # no password column (AC-05), no class column
 
     payload = make_xlsx(
         [
-            ["Stu One", "stu1@gmail.com", "student"],  # imported (class-less)
-            ["Stu Dup", "stu1@gmail.com", "student"],  # skipped (email exists)
-            ["Bad Guy", "bad@gmail.com", "wizard"],  # failed (role)
+            ["Stu One", "stu1@gmail.com", "student", ""],  # imported (class-less, MSSV auto)
+            ["Stu Dup", "stu1@gmail.com", "student", ""],  # skipped (email exists)
+            ["Bad Guy", "bad@gmail.com", "wizard", ""],  # failed (role)
         ]
     )
     up = client.post(

@@ -60,6 +60,8 @@ class UserCreate(BaseModel):
     email: EmailStr
     role: str = Field(min_length=1)
     class_code: str | None = Field(default=None, max_length=50)
+    # Optional MSSV for students; blank means auto-generate INITIALS_NNNN.
+    student_code: str | None = Field(default=None, max_length=20)
 
 
 class UserRead(BaseModel):
@@ -71,6 +73,7 @@ class UserRead(BaseModel):
     role: str
     class_id: uuid.UUID | None
     class_code: str | None = None
+    student_code: str | None = None
     is_active: bool
 
     model_config = {"from_attributes": True}
@@ -90,6 +93,7 @@ class ImportRowRead(BaseModel):
     class_raw: str
     status: str
     message: str
+    student_code: str | None = None
 
     model_config = {"from_attributes": True}
 

@@ -124,8 +124,12 @@ Missing `?confirm=true` → `400`. Last admin → `400` (AC-12).
 
 ### GET /api/admin/import-template
 
-Downloads `account-import-template.xlsx`: header exactly
-`username, gmail, type, class` + one example row. No password column (AC-05, AC-06).
+Downloads `account-import-template.xlsx`: sheet `accounts` with header exactly
+`fullname, email, type, mssv` + one example row, plus a `Hướng dẫn` guide sheet.
+No password column (AC-05, AC-06). `mssv` is optional: blank means the backend
+auto-generates `INITIALS_NNNN` (Tran Van A -> `TVA_4821`), where the 4 digits are
+random and unique within the same initials prefix; explicit codes must match
+`^[A-Z]+_[0-9]{4}$` and be unique. Students get a code; staff/admins never do.
 
 ### POST /api/admin/imports — `201 ImportBatchRead` (multipart `file: *.xlsx`)
 
@@ -145,7 +149,7 @@ Downloads `account-import-template.xlsx`: header exactly
 
 ### GET /api/admin/imports/{id} — `200 ImportBatchDetail` (batch + `rows[]`)
 
-`ImportRowRead`: `{ id, row_number, username, email, role_raw, class_raw, status, message }`
+`ImportRowRead`: `{ id, row_number, username, email, role_raw, class_raw, status, message, student_code }`
 
 ### POST /api/admin/import-rows/{rowId}/retry — `200 ImportRowRead`
 
