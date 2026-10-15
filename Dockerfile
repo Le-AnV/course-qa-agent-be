@@ -18,6 +18,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 COPY --from=builder /app/.venv /app/.venv
 COPY app ./app
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 
 EXPOSE 8000
 

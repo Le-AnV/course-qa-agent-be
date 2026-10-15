@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import smtplib
 import ssl
+import threading
 import time
 import uuid
 from datetime import UTC, datetime
@@ -191,12 +192,29 @@ def _send_one(
         smtp.send_message(msg)
 
 
+_QUEUE_LOCK = threading.Lock()
+
+
 def process_queue(db: Session, max_messages: int | None = None, sleep_between: bool = True) -> dict:
     """Send pending emails oldest-first at the configured per-minute rate (AC-09).
 
     Never sends all at once: delay = 60 / rate_per_minute between messages.
     Returns summary counts. Failures stay in the outbox as `failed` with last_error.
+
+    Concurrency-safe: a process-wide lock serializes overlapping drains, and
+    every row is re-read before sending so a double-click (or two admins)
+    can never deliver the same email twice. A contending caller gets
+    ``busy=True`` with zero counts instead of stacking another drain.
     """
+    if not _QUEUE_LOCK.acquire(blocking=False):
+        return {"processed": 0, "sent": 0, "failed": 0, "busy": True}
+    try:
+        return _drain_queue(db, max_messages=max_messages, sleep_between=sleep_between)
+    finally:
+        _QUEUE_LOCK.release()
+
+
+def _drain_queue(db: Session, max_messages: int | None = None, sleep_between: bool = True) -> dict:
     cfg = effective_email_config(db)
     host, port, sender, app_password = _smtp_credentials(db)
     rate = cfg["smtp_rate_per_minute"]
@@ -204,9 +222,13 @@ def process_queue(db: Session, max_messages: int | None = None, sleep_between: b
     q = db.query(EmailOutbox).filter(EmailOutbox.status == EMAIL_PENDING).order_by(EmailOutbox.id)
     if max_messages is not None:
         q = q.limit(max_messages)
-    pending = q.all()
+    pending_ids = [e.id for e in q.all()]
     sent = failed = 0
-    for i, entry in enumerate(pending):
+    for i, eid in enumerate(pending_ids):
+        # Re-read inside the drain: skip rows another drain already handled.
+        entry = db.query(EmailOutbox).filter(EmailOutbox.id == eid).first()
+        if entry is None or entry.status != EMAIL_PENDING:
+            continue
         entry.attempts += 1
         try:
             _send_one(host, port, sender, app_password, entry.to_email, entry.subject, entry.body, cfg["email_dry_run"])
@@ -219,9 +241,9 @@ def process_queue(db: Session, max_messages: int | None = None, sleep_between: b
             entry.last_error = str(exc)[:2000]
             failed += 1
         db.commit()
-        if sleep_between and i < len(pending) - 1 and delay > 0 and not cfg["email_dry_run"]:
+        if sleep_between and i < len(pending_ids) - 1 and delay > 0 and not cfg["email_dry_run"]:
             time.sleep(delay)
-    return {"processed": len(pending), "sent": sent, "failed": failed}
+    return {"processed": len(pending_ids), "sent": sent, "failed": failed, "busy": False}
 
 
 def queue_stats(db: Session) -> dict:

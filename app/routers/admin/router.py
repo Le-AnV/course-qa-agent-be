@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import uuid
-from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -12,7 +11,6 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.deps import get_db, require_admin
-from app.dependencies.auth import require_admin as require_mock_admin
 from app.models.course import Class, Enrollment
 from app.models.email_outbox import EmailOutbox
 from app.models.import_job import ROW_FAILED, ImportBatch, ImportRow
@@ -435,16 +433,16 @@ def list_roles(_=Depends(require_admin)):
     return {"roles": import_service.valid_role_names()}
 
 
-# --- AI-105 runtime settings + connection checks (mock-auth guard) ---
+# --- AI-105 runtime settings + connection checks (same DB-backed admin guard) ---
 @router.get("/settings", response_model=AdminSettingsRead)
-def read_admin_settings(user: Annotated[dict[str, str], Depends(require_mock_admin)]):
+def read_admin_settings(_=Depends(require_admin)):
     """Return active configuration metadata without exposing credentials."""
 
     return build_admin_settings(settings)
 
 
 @router.post("/llm/test-connection", response_model=ConnectionTestResult)
-def test_llm_connection(user: Annotated[dict[str, str], Depends(require_mock_admin)]):
+def test_llm_connection(_=Depends(require_admin)):
     """Check the configured Gemini key and model, returning a safe result."""
 
     try:
@@ -454,10 +452,10 @@ def test_llm_connection(user: Annotated[dict[str, str], Depends(require_mock_adm
 
 
 @router.post("/email/test", response_model=ConnectionTestResult)
-def test_email_sender(user: Annotated[dict[str, str], Depends(require_mock_admin)]):
+def test_email_sender(admin=Depends(require_admin)):
     """Send a test message to the authenticated Admin's email address."""
 
     try:
-        return send_test_email(user["identifier"], settings)
+        return send_test_email(admin.email, settings)
     except (EmailConfigurationError, EmailDeliveryError) as error:
         return ConnectionTestResult(success=False, message=str(error))

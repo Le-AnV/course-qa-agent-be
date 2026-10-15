@@ -9,7 +9,6 @@ from email_validator import EmailNotValidError, validate_email
 from openpyxl import Workbook, load_workbook
 from sqlalchemy.orm import Session
 
-from app.models.course import Class
 from app.models.import_job import (
     ROW_FAILED,
     ROW_IMPORTED,
@@ -21,8 +20,11 @@ from app.models.user import User
 from app.services import email_service, user_service
 
 # AC-05/AC-06: exact expected columns — NO password column, ever.
-TEMPLATE_COLUMNS = ["username", "gmail", "type", "class"]
-EXAMPLE_ROW = ["Nguyen Van A", "student001@gmail.com", "student", "SE101"]
+# Class assignment is deliberately NOT part of the template: students
+# browse the catalog and request to join; TAs approve (enrollment flow).
+# Accounts are created class-less; import never enrolls anyone.
+TEMPLATE_COLUMNS = ["username", "gmail", "type"]
+EXAMPLE_ROW = ["Nguyen Van A", "student001@gmail.com", "student"]
 
 
 def build_template_bytes() -> bytes:
@@ -51,22 +53,46 @@ def parse_workbook(data: bytes) -> tuple[list[str], list[dict]]:
     if header != TEMPLATE_COLUMNS:
         raise ValueError(
             f"Invalid template. Expected header exactly: {', '.join(TEMPLATE_COLUMNS)}. "
-            "Download the template from the dashboard."
+            "Download the latest template from the dashboard."
         )
     parsed = []
     for i, r in enumerate(rows[1:], start=2):
-        cells = [(str(c).strip() if c is not None else "") for c in list(r)[:4]]
-        while len(cells) < 4:
+        cells = [(str(c).strip() if c is not None else "") for c in list(r)[:3]]
+        while len(cells) < 3:
             cells.append("")
         # Skip fully blank rows.
         if all(c == "" for c in cells):
             continue
         parsed.append(
-            {"row_number": i, "username": cells[0], "gmail": cells[1], "type": cells[2], "class": cells[3]}
+            {"row_number": i, "username": cells[0], "gmail": cells[1], "type": cells[2]}
         )
     if not parsed:
         raise ValueError("No data rows found — fill in rows under the header.")
     return header, parsed
+
+
+def _handle_existing_email(db: Session, row: dict) -> tuple[str, str, uuid.UUID | None]:
+    """Import carries no class, so a repeated gmail is always a duplicate.
+
+    Returns (status, message, user_id). Same role -> skipped; a conflicting
+    role fails loudly instead of silently hiding the conflict.
+    """
+    email = row["gmail"].strip().lower()
+    user = db.query(User).filter(User.email == email).first()
+    want_role = user_service.normalize_role(row["type"])
+    got_role = user_service.role_name_of(user)
+    if not got_role:
+        from app.models.user import Role
+
+        role_row = db.query(Role).filter(Role.id == user.role_id).first()
+        got_role = role_row.name if role_row else ""
+    if got_role != want_role:
+        return (
+            ROW_FAILED,
+            f"Email '{email}' already exists with role '{got_role.lower()}' — row says '{row['type']}'.",
+            user.id,
+        )
+    return ROW_SKIPPED, f"Email '{email}' already exists — skipped.", user.id
 
 
 def validate_row(row: dict) -> str | None:
@@ -81,8 +107,6 @@ def validate_row(row: dict) -> str | None:
         user_service.normalize_role(row["type"])
     except user_service.DomainError as exc:
         return str(exc)
-    if not row["class"]:
-        return "Class is empty — every account must reference an existing class code."
     return None
 
 
@@ -106,14 +130,9 @@ def import_rows(
     db.refresh(batch)
 
     imported = skipped = failed = 0
-    # Preload valid class codes for fast validation.
-    class_codes = {c.code for c in db.query(Class).all()}
 
     for row in rows:
         error = validate_row(row)
-        if error is None and row["class"].strip() not in class_codes:
-            cls = row["class"].strip()
-            error = f"Class '{cls}' does not exist — create it first."
         status = ROW_IMPORTED
         message = "Imported. Credentials emailed."
         user_id: uuid.UUID | None = None
@@ -122,9 +141,15 @@ def import_rows(
             status, message = ROW_FAILED, error
             failed += 1
         elif db.query(User).filter(User.email == row["gmail"].strip().lower()).first():
-            # AC-10: skipped because the email already exists.
-            status, message = ROW_SKIPPED, f"Email '{row['gmail'].strip().lower()}' already exists — skipped."
-            skipped += 1
+            # Import carries no class: a repeated gmail is a duplicate.
+            # Class membership now happens via request + TA approval.
+            status, message, user_id = _handle_existing_email(db, row)
+            if status == ROW_IMPORTED:
+                imported += 1
+            elif status == ROW_SKIPPED:
+                skipped += 1
+            else:
+                failed += 1
         else:
             try:
                 user, plain = user_service.create_user(
@@ -132,11 +157,11 @@ def import_rows(
                     username=row["username"],
                     email=row["gmail"],
                     role_raw=row["type"],
-                    class_code=row["class"],
+                    class_code=None,
                 )
                 user_id = user.id
                 subject, body = email_service.credential_email_body(
-                    user.full_name, user.email, plain, row["class"].strip()
+                    user.full_name, user.email, plain, None
                 )
                 email_service.queue_email(db, user.email, subject, body, user_id=user.id)
                 imported += 1
@@ -151,7 +176,7 @@ def import_rows(
                 username=row["username"],
                 email=row["gmail"].strip().lower(),
                 role_raw=row["type"],
-                class_raw=row["class"],
+                class_raw="",
                 status=status,
                 message=message,
                 user_id=user_id,
@@ -178,30 +203,41 @@ def retry_row(db: Session, row_id: int) -> ImportRow:
     if row.status != ROW_FAILED:
         raise ValueError("Only failed rows can be retried.")
     error = validate_row(
-        {"username": row.username, "gmail": row.email, "type": row.role_raw, "class": row.class_raw}
+        {"username": row.username, "gmail": row.email, "type": row.role_raw}
     )
-    if error is None and db.query(Class).filter(Class.code == row.class_raw).first() is None:
-        error = f"Class '{row.class_raw}' does not exist — create it first."
     if error is not None:
         row.message = error
         db.commit()
         db.refresh(row)
         return row
     if db.query(User).filter(User.email == row.email).first():
-        row.status = ROW_SKIPPED
-        row.message = f"Email '{row.email}' already exists — skipped."
+        status, message, user_id = _handle_existing_email(
+            db, {"username": row.username, "gmail": row.email, "type": row.role_raw}
+        )
+        row.user_id = user_id
         batch = db.query(ImportBatch).filter(ImportBatch.id == row.batch_id).first()
-        if batch is not None:
-            batch.skipped_count += 1
-            batch.failed_count = max(0, batch.failed_count - 1)
+        if status == ROW_IMPORTED:
+            row.status = ROW_IMPORTED
+            row.message = "Imported on retry. " + message
+            if batch is not None:
+                batch.imported_count += 1
+                batch.failed_count = max(0, batch.failed_count - 1)
+        elif status == ROW_SKIPPED:
+            row.status = ROW_SKIPPED
+            row.message = message
+            if batch is not None:
+                batch.skipped_count += 1
+                batch.failed_count = max(0, batch.failed_count - 1)
+        else:
+            row.message = message
         db.commit()
         db.refresh(row)
         return row
     try:
         user, plain = user_service.create_user(
-            db, username=row.username, email=row.email, role_raw=row.role_raw, class_code=row.class_raw
+            db, username=row.username, email=row.email, role_raw=row.role_raw, class_code=None
         )
-        subject, body = email_service.credential_email_body(user.full_name, user.email, plain, row.class_raw)
+        subject, body = email_service.credential_email_body(user.full_name, user.email, plain, None)
         email_service.queue_email(db, user.email, subject, body, user_id=user.id)
         row.status = ROW_IMPORTED
         row.message = "Imported on retry. Credentials emailed."
