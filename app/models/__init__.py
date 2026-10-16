@@ -2,7 +2,12 @@
 
 from app.models.chat import ChatMessage, ChatSession  # noqa: F401
 from app.models.course import Class, Course, Enrollment  # noqa: F401
-from app.models.document import Document  # noqa: F401
+from app.models.document import (  # noqa: F401
+    Document,
+    DocumentClassOptout,
+    DocumentEvent,
+    DocumentVersion,
+)
 from app.models.email_outbox import EmailOutbox  # noqa: F401
 from app.models.import_job import ImportBatch, ImportRow  # noqa: F401
 from app.models.system_config import SystemConfig  # noqa: F401

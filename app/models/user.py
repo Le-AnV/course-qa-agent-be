@@ -83,7 +83,9 @@ class User(Base):
     account: Mapped[Optional["Account"]] = relationship(
         "Account", back_populates="user", uselist=False, cascade="all, delete-orphan"
     )
-    documents: Mapped[list["Document"]] = relationship("Document", back_populates="uploader")
+    documents: Mapped[list["Document"]] = relationship(
+        "Document", back_populates="uploader", foreign_keys="Document.uploaded_by"
+    )
 
 
 class Account(Base):
