@@ -65,6 +65,16 @@ INITIAL_CLASSES = [
         "academic_year": "2026",
         "trainer_email": "teacher@academic.edu.vn",
     },
+    {
+        # Same subject, different section: shows course-shared documents
+        # without re-uploading per class.
+        "course_code": "CS101",
+        "class_code": "CS101-FA26-002",
+        "class_name": "Introduction to Computer Science - Section 2",
+        "semester": "Fall",
+        "academic_year": "2026",
+        "trainer_email": "teacher@academic.edu.vn",
+    },
 ]
 
 INITIAL_ENROLLMENTS = [
@@ -200,12 +210,21 @@ def seed_database(db: Session) -> None:
 
 
 DEV_COURSE = {"code": "TEST101", "name": "Test Course", "description": "Dev sample course."}
-DEV_CLASS = {
-    "code": "TEST101-A",
-    "name": "Test Class A",
-    "semester": "HK1",
-    "academic_year": "2026-2027",
-}
+DEV_CLASSES = [
+    {
+        "code": "TEST101-A",
+        "name": "Test Class A",
+        "semester": "HK1",
+        "academic_year": "2026-2027",
+    },
+    {
+        # Second section of the same subject (course-sharing demo).
+        "code": "TEST101-B",
+        "name": "Test Class B",
+        "semester": "HK1",
+        "academic_year": "2026-2027",
+    },
+]
 
 
 def seed_dev_data(db: Session) -> None:
@@ -225,17 +244,21 @@ def seed_dev_data(db: Session) -> None:
             logger.info(f"Created course: {course.code}")
 
         teacher = db.query(User).filter(User.email == "teacher@academic.edu.vn").first()
-        clazz = db.query(Class).filter(Class.code == DEV_CLASS["code"]).first()
-        if clazz is None and teacher is not None:
-            clazz = Class(
-                course_id=course.id,
-                trainer_id=teacher.id,
-                status="ACTIVE",
-                **DEV_CLASS,
-            )
-            db.add(clazz)
-            db.flush()
-            logger.info(f"Created class: {clazz.code} (trainer={teacher.email})")
+        clazz = None
+        for dev_class in DEV_CLASSES:
+            existing = db.query(Class).filter(Class.code == dev_class["code"]).first()
+            if existing is None and teacher is not None:
+                existing = Class(
+                    course_id=course.id,
+                    trainer_id=teacher.id,
+                    status="ACTIVE",
+                    **dev_class,
+                )
+                db.add(existing)
+                db.flush()
+                logger.info(f"Created class: {existing.code} (trainer={teacher.email})")
+            if clazz is None:
+                clazz = existing
 
         student = db.query(User).filter(User.email == "student@academic.edu.vn").first()
         if clazz is not None and student is not None:
