@@ -15,8 +15,8 @@ from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db
 from app.models.course import Class, Course, Enrollment
-from app.models.document import Document
 from app.models.user import User
+from app.services import document_service
 
 router = APIRouter(prefix="/api/student", tags=["student"])
 
@@ -136,7 +136,7 @@ def _to_read(db: Session, section: Class) -> StudentClassRead:
         .filter(Enrollment.class_id == section.id, Enrollment.status == "ACTIVE")
         .count()
     )
-    docs = db.query(Document).filter(Document.class_id == section.id).count()
+    docs = len(document_service.documents_for_class(db, section.id))
     return StudentClassRead(
         id=section.id,
         code=section.code,
@@ -216,14 +216,9 @@ def class_documents(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Approved (indexed) materials of one class for its members (syllabus tab)."""
+    """Approved (indexed) materials visible to one class for its members (syllabus tab)."""
     section = _require_member(db, user, _coerce_uuid(class_id))
-    rows = (
-        db.query(Document)
-        .filter(Document.class_id == section.id, Document.status == "indexed")
-        .order_by(Document.created_at.desc())
-        .all()
-    )
+    rows = document_service.documents_for_class(db, section.id, only_indexed=True)
     return [
         ClassDocumentRead(
             id=r.id,
