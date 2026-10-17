@@ -92,6 +92,7 @@ def test_admin_settings_requires_admin_role(api_client, db_session):
         ("GET", "/api/admin/settings"),
         ("POST", "/api/admin/llm/test-connection"),
         ("POST", "/api/admin/email/test"),
+        ("GET", "/api/admin/system/health"),
     ]
     student = student_headers(api_client, db_session)
     for method, path in endpoints:
