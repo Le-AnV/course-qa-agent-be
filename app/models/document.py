@@ -28,6 +28,7 @@ class Document(Base):
     file_type: Mapped[str] = mapped_column(String(20), nullable=False)
     mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    storage_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # Lifecycle mirrors the service statuses: pending -> processing -> indexed,
     # with rejected / failed as terminal states (Upload AC-02, AI-55 pipeline).
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)

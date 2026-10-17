@@ -6,9 +6,10 @@ class scope resolves from ``course``/``class`` tables.
 """
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.core.deps import get_db, require_trainer
+from app.core.deps import get_current_user, get_db, require_trainer
 from app.models.document import Document
 from app.models.user import User
 from app.schemas.documents import (
@@ -144,3 +145,29 @@ def approve_document(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return _record_to_read(db, record)
+
+
+@router.get("/{document_id}/content")
+def read_document_content(
+    document_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """Open an original document after checking class membership."""
+    record = document_service.get_document(db, document_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    if not document_service.can_access_class(db, user, record.class_id):
+        raise HTTPException(status_code=403, detail="You do not have access to this document.")
+    try:
+        path = document_service.document_path(record)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Document file is not available.") from None
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Document file is not available.")
+    return FileResponse(
+        path,
+        media_type=record.mime_type,
+        filename=record.file_name,
+        content_disposition_type="inline",
+    )

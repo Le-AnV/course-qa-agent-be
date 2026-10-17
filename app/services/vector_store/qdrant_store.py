@@ -6,7 +6,7 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, VectorParams
+from qdrant_client.http.models import Distance, FieldCondition, Filter, MatchValue, VectorParams
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config.config import settings
@@ -102,18 +102,30 @@ class QdrantStore:
             getattr(retry_state.outcome, "exception", lambda: None)() or "unknown error",
         ),
     )
-    def similarity_search(self, query: str, k: int | None = None) -> list[Document]:
+    def similarity_search(
+        self, query: str, k: int | None = None, class_id: str | None = None
+    ) -> list[Document]:
         """Perform semantic search on the vector store.
 
         Args:
             query (str): The text query to search for.
             k (int | None): Number of documents to return. Defaults to settings.retriever_top_k.
+            class_id (str | None): Restrict results to the class payload value when provided.
 
         Returns:
             list[Document]: The top k most similar documents from the vector store.
         """
         k = k or settings.retriever_top_k
-        return self.vector_store.similarity_search(query, k=k)
+        search_kwargs = {"k": k}
+        if class_id is not None:
+            search_kwargs["filter"] = Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.class_id", match=MatchValue(value=class_id)
+                    )
+                ]
+            )
+        return self.vector_store.similarity_search(query, **search_kwargs)
 
     def as_retriever(self, **kwargs):
         """Get the underlying Qdrant vector store as a LangChain retriever.

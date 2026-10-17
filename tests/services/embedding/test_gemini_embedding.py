@@ -77,6 +77,15 @@ def test_gemini_embedding_unwraps_secret_api_key(mock_google_embeddings):
     assert mock_google_embeddings.call_args.kwargs["google_api_key"] == "test-gemini-key"
 
 
+@patch("app.services.embedding.gemini_embedding.GoogleGenerativeAIEmbeddings")
+def test_gemini_embedding_passes_request_options(mock_google_embeddings):
+    request_options = {"timeout": 10}
+
+    GeminiEmbedding(api_key="dummy_key", model="dummy_model", request_options=request_options)
+
+    assert mock_google_embeddings.call_args.kwargs["request_options"] == request_options
+
+
 @patch("time.sleep", return_value=None)  # Skip sleep to speed up tests
 @patch("app.services.embedding.gemini_embedding.GoogleGenerativeAIEmbeddings")
 def test_embed_documents_retry_success(mock_google_embeddings, mock_sleep):

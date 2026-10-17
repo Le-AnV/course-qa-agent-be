@@ -2,15 +2,17 @@
 
 DB-backed (E1 models): class assignments resolve from ``course``/``class``
 rows instead of the former static stub, and uploads persist as ``document``
-rows with pending status. File bytes are validated then discarded — blob
-storage lands with the AI-55 indexing pipeline.
+rows with pending status. Validated file bytes are stored on the configured
+persistent volume for protected citation access.
 """
 
 import uuid
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app.models.course import Class
+from app.config import settings
+from app.models.course import Class, Enrollment
 from app.models.document import Document
 from app.models.user import User
 
@@ -148,19 +150,62 @@ def create_document(
     if isinstance(validated, str):
         raise ValueError(validated)  # noqa: TRY004 - validation failure, not a type error
     extension, mime, size, class_uuid = validated
+    record_id = uuid.uuid4()
+    relative_path = Path(str(class_uuid)) / f"{record_id}{extension}"
+    stored_path = (settings.document_storage_dir / relative_path).resolve()
+    stored_path.parent.mkdir(parents=True, exist_ok=True)
+    stored_path.write_bytes(content)
+
     record = Document(
+        id=record_id,
         class_id=class_uuid,
         uploaded_by=user.id,
         file_name=file_name,
         file_type=extension,
         mime_type=mime,
         size_bytes=size,
+        storage_path=relative_path.as_posix(),
         status=STATUS_PENDING,
     )
-    db.add(record)
-    db.commit()
-    db.refresh(record)
+    try:
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+    except Exception:
+        db.rollback()
+        stored_path.unlink(missing_ok=True)
+        raise
     return record
+
+
+def document_path(record: Document) -> Path:
+    """Resolve a stored document path while keeping it inside the configured root."""
+    if not record.storage_path:
+        raise FileNotFoundError("Document file is not available.")
+    root = settings.document_storage_dir.resolve()
+    path = (root / record.storage_path).resolve()
+    if not path.is_relative_to(root):
+        raise FileNotFoundError("Document file is not available.")
+    return path
+
+
+def can_access_class(db: Session, user: User, class_id: uuid.UUID) -> bool:
+    """Return whether the active user may read materials from the class."""
+    role = _role_name(user).upper()
+    if role == "ADMIN":
+        return True
+    if role == "TRAINER":
+        return db.query(Class).filter(Class.id == class_id, Class.trainer_id == user.id).first() is not None
+    return (
+        db.query(Enrollment)
+        .filter(
+            Enrollment.class_id == class_id,
+            Enrollment.student_id == user.id,
+            Enrollment.status == "ACTIVE",
+        )
+        .first()
+        is not None
+    )
 
 
 def get_document(db: Session, document_id: uuid.UUID | str) -> Document | None:

@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.documents import Document
+from qdrant_client.http.models import FieldCondition, Filter, MatchValue
 
 from app.services.vector_store.qdrant_store import QdrantStore
 
@@ -138,3 +139,27 @@ def test_qdrant_store_as_retriever(mock_qdrant_client, mock_qdrant_vector_store)
     # Should call internal as_retriever with right arguments and return it
     mock_vector_store_instance.as_retriever.assert_called_once_with(search_kwargs={"k": 5})
     assert retriever == mock_retriever
+
+
+@patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
+@patch("app.services.vector_store.qdrant_store.QdrantClient")
+def test_qdrant_similarity_search_filters_by_class(
+    mock_qdrant_client, mock_qdrant_vector_store
+):
+    mock_qdrant_client.return_value.collection_exists.return_value = True
+    vector_store = mock_qdrant_vector_store.return_value
+    vector_store.similarity_search.return_value = [Document(page_content="course material")]
+
+    store = QdrantStore(embeddings=MagicMock(), url="dummy", collection_name="dummy")
+    results = store.similarity_search("question", k=3, class_id="class-123")
+
+    assert [document.page_content for document in results] == ["course material"]
+    vector_store.similarity_search.assert_called_once_with(
+        "question",
+        k=3,
+        filter=Filter(
+            must=[
+                FieldCondition(key="metadata.class_id", match=MatchValue(value="class-123"))
+            ]
+        ),
+    )

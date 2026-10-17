@@ -61,6 +61,9 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3001",
     ]
     database_url: str = "postgresql+psycopg://qa:qa@localhost:5432/course_qa"
+    document_storage_dir: Path = Field(
+        default=Path("data/documents"), validation_alias="DOCUMENT_STORAGE_DIR"
+    )
 
     # Vector store configuration
     qdrant_url: str = "http://localhost:6333"
@@ -150,6 +153,9 @@ class Settings(BaseSettings):
         validation_alias="HEADERS_TO_SPLIT_ON",
     )
     retriever_top_k: int = Field(default=3, validation_alias="RETRIEVER_TOP_K")
+    chat_timeout_seconds: float = Field(
+        default=60.0, gt=0, validation_alias="CHAT_TIMEOUT_SECONDS"
+    )
 
     # Prompt configuration
     prompt_file: Path = Field(

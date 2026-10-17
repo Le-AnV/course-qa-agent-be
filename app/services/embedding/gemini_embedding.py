@@ -15,12 +15,18 @@ logger = logging.getLogger(__name__)
 class GeminiEmbedding(Embeddings):
     """Wrapper for Google Gemini Embedding API with retry logic."""
 
-    def __init__(self, api_key: str | SecretStr | None = None, model: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | SecretStr | None = None,
+        model: str | None = None,
+        request_options: dict | None = None,
+    ) -> None:
         """Initialize the Gemini embedding wrapper.
 
         Args:
             api_key (str | SecretStr | None): Google API key. Defaults to settings.google_api_key.
             model (str | None): The embedding model to use. Defaults to settings.embedding_model.
+            request_options (dict | None): Optional request options passed to the Google API client.
         """
         api_key = api_key or settings.google_api_key
         model = model or settings.embedding_model
@@ -35,6 +41,7 @@ class GeminiEmbedding(Embeddings):
             model=model,
             google_api_key=api_key,  # type: ignore
             output_dimensionality=settings.vector_size,
+            request_options=request_options,
         )
 
     @retry(

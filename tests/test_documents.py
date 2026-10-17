@@ -28,7 +28,7 @@ TEST_DB_URL = "sqlite://"
 
 
 @pytest.fixture()
-def db_session(monkeypatch):
+def db_session(monkeypatch, tmp_path):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
@@ -38,6 +38,7 @@ def db_session(monkeypatch):
     reset_engine()
     monkeypatch.setattr(settings, "database_url", TEST_DB_URL)
     monkeypatch.setattr(settings, "email_dry_run", True)
+    monkeypatch.setattr(settings, "document_storage_dir", tmp_path / "documents")
 
     engine = create_engine(
         TEST_DB_URL,
@@ -161,7 +162,7 @@ def test_accepted_types_requires_auth(client, student_headers):
     assert client.get("/api/documents/accepted-types", headers=student_headers).status_code == 403
 
 
-def test_upload_pdf_is_pending_approval(client, trainer_headers):
+def test_upload_pdf_is_pending_approval(db_session, client, trainer_headers):
     class_a = _class_id(client, trainer_headers, "CS101-A")
     files = [("files", ("syllabus.pdf", b"%PDF-1.4 content", "application/pdf"))]
     response = client.post(
@@ -172,6 +173,40 @@ def test_upload_pdf_is_pending_approval(client, trainer_headers):
     assert result["error"] is None
     assert result["document"]["status"] == "pending"
     assert result["document"]["class_id"] == class_a
+
+    stored_record = document_service.get_document(db_session, result["document"]["id"])
+    stored = document_service.document_path(stored_record)
+    assert stored.read_bytes() == b"%PDF-1.4 content"
+
+
+def test_class_member_can_open_document_and_outsider_cannot(
+    db_session, client, trainer_headers, student_headers, other_trainer_headers
+):
+    teacher = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    student = db_session.query(User).filter(User.email == "student@academic.edu.vn").first()
+    class_a = db_session.query(Class).filter(Class.code == "CS101-A").first()
+    from app.models.course import Enrollment
+
+    db_session.add(Enrollment(class_id=class_a.id, student_id=student.id, status="ACTIVE"))
+    db_session.commit()
+    record = document_service.create_document(
+        db_session, "syllabus.pdf", b"%PDF-1.4 protected", class_a.id, teacher
+    )
+
+    allowed = client.get(
+        f"/api/documents/{record.id}/content?page=4",
+        headers=student_headers,
+    )
+    forbidden = client.get(
+        f"/api/documents/{record.id}/content",
+        headers=other_trainer_headers,
+    )
+
+    assert allowed.status_code == 200
+    assert allowed.content == b"%PDF-1.4 protected"
+    assert allowed.headers["content-type"] == "application/pdf"
+    assert "inline" in allowed.headers["content-disposition"]
+    assert forbidden.status_code == 403
 
 
 def test_multi_file_upload_reports_per_file_errors(client, trainer_headers):

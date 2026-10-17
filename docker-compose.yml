@@ -41,6 +41,9 @@ services:
       DATABASE_URL: postgresql+psycopg://qa:qa@postgres:5432/course_qa
       QDRANT_URL: http://qdrant:6333
       CORS_ORIGINS: '["http://localhost:3000"]'
+      DOCUMENT_STORAGE_DIR: /app/data/documents
+    volumes:
+      - document_storage:/app/data/documents
     depends_on:
       postgres:
         condition: service_healthy
@@ -71,3 +74,5 @@ volumes:
     name: course-qa-agent_qdrant_storage
   pgadmin_data:
     name: course-qa-agent_pgadmin_data
+  document_storage:
+    name: course-qa-agent_document_storage
