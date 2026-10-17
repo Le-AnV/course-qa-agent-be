@@ -35,6 +35,7 @@ from app.schemas.admin import (
     UserDeactivate,
     UserRead,
 )
+from app.schemas.system_health import SystemHealthRead
 from app.services import course_service, email_service, import_service, user_service
 from app.services.admin_settings_service import build_admin_settings
 from app.services.email_service import (
@@ -47,6 +48,7 @@ from app.services.llm_service import (
     LlmConnectionError,
     check_llm_connection,
 )
+from app.services.system_health_service import build_health
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -460,3 +462,15 @@ def test_email_sender(admin=Depends(require_admin)):
         return send_test_email(admin.email, settings)
     except (EmailConfigurationError, EmailDeliveryError) as error:
         return ConnectionTestResult(success=False, message=str(error))
+
+
+# --- AI-109 health check & system monitoring (admin dashboard) ---
+@router.get("/system/health", response_model=SystemHealthRead)
+def system_health(_=Depends(require_admin), db: Session = Depends(get_db)):
+    """Live component health (DB, Qdrant, Gemini API) for the admin dashboard.
+
+    Unlike the fast public ``/health``, this performs a live LLM probe whose
+    result is cached for a short TTL so dashboard refreshes stay cheap.
+    """
+
+    return build_health(db, settings, live_llm=True)
