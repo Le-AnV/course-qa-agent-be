@@ -4,18 +4,21 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.database import create_all_tables, get_session_local, init_engine
+from app.core.deps import get_db
 from app.core.seed import seed_database
 from app.routers.admin.router import router as admin_router
 from app.routers.auth.router import router as auth_router
 from app.routers.documents import router as documents_router
 from app.routers.history import router as history_router
 from app.routers.student.router import router as student_router
+from app.services.system_health_service import build_health
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,13 @@ app.include_router(student_router)
 
 
 @app.get("/health")
-def health_check():
-    """Health check for Docker, the frontend and uptime monitors (AI-112 AC-02)."""
-    return {"status": "ok", "service": "course-qa-agent-backend"}
+def health_check(db: Session = Depends(get_db)):
+    """Component health for Docker, the frontend and uptime monitors (AI-109).
+
+    Fast path: DB and Qdrant are probed live, the LLM is reported by
+    configuration readiness only so the 30s Docker healthcheck never calls
+    Gemini. The admin dashboard uses /api/admin/system/health for a live LLM
+    probe. Always returns HTTP 200 — the body carries the per-component status.
+    """
+
+    return build_health(db, settings, live_llm=False)
