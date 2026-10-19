@@ -4,7 +4,7 @@
 > **Epic:** E2 - Knowledge Base
 > **Status:** Implemented
 
-This document is the Design Specs and hand-over reference for removing and replacing course materials. The purpose: outdated materials must stop influencing chatbot answers — deleting a file removes its chunks/embeddings from Qdrant, and replacing a file (uploading with the same name) creates a new version that is re-indexed while the superseded one is purged.
+This document is the Design Specs and hand-over reference for removing and replacing course materials. The purpose: outdated materials must stop influencing chatbot answers — deleting a file removes its chunks/embeddings from Qdrant, and replacing a file (uploading with the same name) creates a new version that is re-indexed while the previous indexed version remains available until indexing succeeds.
 
 ## 1. Overview
 
@@ -13,7 +13,7 @@ Both operations stay inside the AI-41 class scope: a trainer only sees, deletes 
 Key points:
 
 - **Delete** is destructive and requires explicit confirmation (`?confirm=true`, the UI shows a confirm dialog first). Vector-backed files are purged from Qdrant **before** the row is deleted: when Qdrant is unreachable the API answers `503` and nothing is deleted, so the chatbot can never keep citing a file the trainer believes is gone (AC-02).
-- **Replace** is the same upload endpoint. Uploading a file name that already exists inside the class creates the next `version`; the new version skips approval and goes straight to `processing` (re-index), and the superseded version becomes `replaced` with its chunks purged.
+- **Replace** is the same upload endpoint. Uploading a file name that already exists inside the class creates the next `version` in `pending`; the trainer approves it before re-indexing. The previous version stays retrievable until the replacement indexes successfully; only then does it become `replaced` and have its chunks and stored source file purged.
 - Files that were never handed to the pipeline (`pending` / `rejected` / `failed`) have no chunks, so deleting them does not require Qdrant.
 
 ## 2. API Contract
@@ -50,8 +50,8 @@ All endpoints require `Authorization: Bearer <JWT>` with role `trainer` or `admi
 Same contract as AI-35; the per-file result now carries `version` and the replace semantics:
 
 - **New name** → `version: 1`, `status: "pending"` (trainer approval, unchanged).
-- **Existing name in the same class** (case-insensitive) → `version: prev + 1`, `status: "processing"` (re-index without a second approval); the previous row becomes `replaced` and its chunks are purged first.
-- Purge failure makes the whole replacement fail per file: `{"file_name": "...", "document": null, "error": "Cannot purge chunks of ..."}`; no v2 row is persisted and the old version keeps its status.
+- **Existing name in the same class** (case-insensitive) → `version: prev + 1`, `status: "pending"` (trainer approval required); the previous row remains in its current status and retrievable while ingestion runs.
+- After successful indexing, older versions become `replaced`, their chunks are purged, and their stored source files are removed. If ingestion fails, the prior indexed version and its vectors remain available.
 
 ```json
 {
@@ -97,7 +97,7 @@ E4 RAG applies `filter_retrievable_chunks` after the Qdrant search and before an
 |---|---|---|
 | **AC-01: delete requires confirmation and removes chunks from Qdrant (by file_id)** | Implemented | `?confirm=true` check + `delete_document` + `delete_points_by_document_id` (payload `document_id`) |
 | **AC-02: after deletion the chatbot no longer answers from that document** | Implemented | vectors purged before the row is deleted (503 otherwise) + `filter_retrievable_chunks` retrieval guard |
-| **AC-03: replacing a file (same name) creates a new version and re-indexes** | Implemented | `create_document` → `latest_version` / `version` column / `processing` handoff / old version `replaced` |
+| **AC-03: replacing a file (same name) creates a new version and re-indexes** | Implemented | `create_document` → `latest_version` / `version` column / `processing` handoff / prior version retired after successful indexing |
 | **AC-04: trainer only deletes/replaces their own classes; others are never listed or accessible** | Implemented | `my_class_ids` scope on the delete route; list/upload scope from AI-37/41 |
 
 ## 4. Implementation Plan
@@ -112,7 +112,7 @@ E4 RAG applies `filter_retrievable_chunks` after the Qdrant search and before an
   - `STATUS_REPLACED`, `VECTOR_BACKED_STATUSES = {processing, indexed}`, `VectorPurgeError`.
   - `latest_version(db, class_id, file_name)` — case-insensitive, highest version.
   - `purge_document_vectors(document_id)` — Qdrant wrapper, raises on failure.
-  - `create_document(...)` — versioning + replace semantics (purge → mark `replaced` → commit; rollback on purge failure).
+  - `create_document(...)` — versioning and processing handoff; `supersede_older_versions(...)` retires prior versions only after successful indexing.
   - `delete_document(db, record)` — purge when vector-backed, then delete the row.
   - `retrievable_document_ids(...)` / `filter_retrievable_chunks(...)` — AC-02 guard.
 

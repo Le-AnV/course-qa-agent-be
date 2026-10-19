@@ -121,9 +121,9 @@ class Settings(BaseSettings):
     # AI-31 outbox: True records mail without real SMTP (local dev / tests).
     email_dry_run: bool = Field(default=True, validation_alias="EMAIL_DRY_RUN")
 
-    #Persistent directory for uploaded source files used by the ingestion pipeline.
+    # Persistent directory for uploaded source files used by the ingestion pipeline.
     document_storage_dir: Path = Field(
-        default=Path("/app/storage/documents"),
+        default=Path(__file__).resolve().parents[2] / "storage" / "documents",
         validation_alias="DOCUMENT_STORAGE_DIR",
     )
 

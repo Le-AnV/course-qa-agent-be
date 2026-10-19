@@ -2,7 +2,6 @@
 
 import logging
 import uuid
-from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -26,7 +25,12 @@ def _failure_reason(error: Exception) -> str:
     if isinstance(error, FileNotFoundError):
         return "The stored source file could not be found. Upload the document again."
     if isinstance(error, ValueError):
-        return message[:1000]
+        if message in {
+            "No readable text found in document.",
+            "Document did not produce any searchable chunks.",
+        }:
+            return message
+        return "Document content could not be processed. Check the file and try again."
     if "QDRANT" in upper_message:
         return "The vector database is unavailable. Check Qdrant, then retry."
     return "Document processing failed. Check the backend logs, then retry."
@@ -47,7 +51,7 @@ def process_document(db: Session, document_id: uuid.UUID | str) -> None:
 
     vector_write_started = False
     try:
-        path = Path(record.storage_path)
+        path = document_service.document_path(record)
         if not path.is_file():
             raise FileNotFoundError(f"Stored document is missing: {path}")
 
@@ -76,10 +80,13 @@ def process_document(db: Session, document_id: uuid.UUID | str) -> None:
         QdrantStore(embeddings=GeminiEmbedding()).add_documents(chunks)
 
         current = document_service.get_document(db, document_id)
-        if current is not None and current.status == document_service.STATUS_PROCESSING:
-            current.status = document_service.STATUS_INDEXED
-            current.failure_reason = None
-            db.commit()
+        if current is None or current.status != document_service.STATUS_PROCESSING:
+            try:
+                document_service.purge_document_vectors(document_id)
+            except Exception:
+                logger.exception("Could not remove vectors for cancelled document %s", document_id)
+            return
+        document_service.supersede_older_versions(db, current)
     except Exception as error:
         db.rollback()
         if vector_write_started:

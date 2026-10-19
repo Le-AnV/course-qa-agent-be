@@ -8,12 +8,15 @@ token = 401). Uses in-memory SQLite (StaticPool) so CI stays DB-free.
 import io
 import uuid
 import zipfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app import models  # noqa: F401  (register tables)
+from app import models
 from app.config import settings
 from app.core.database import Base, get_session_local, reset_engine
 from app.core.deps import get_db
@@ -22,7 +25,7 @@ from app.core.seed import seed_database
 from app.main import app
 from app.models.course import Class, ClassTrainer
 from app.models.user import Account, Role, User
-from app.services import document_service
+from app.services import document_service, ingestion_service
 
 TEST_DB_URL = "sqlite://"
 
@@ -383,6 +386,141 @@ def test_retry_failed_document_schedules_ingestion(
     assert again.status_code == 400
 
 
+def test_fail_stale_processing_documents_marks_them_failed(db_session):
+    teacher = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    class_a = db_session.query(Class).filter(Class.code == "CS101-A").first()
+    record = document_service.create_document(db_session, "stale.txt", b"lesson", class_a.id, teacher)
+    record.status = "processing"
+    db_session.commit()
+
+    recovered = document_service.fail_stale_processing(db_session)
+
+    assert recovered == 1
+    assert record.status == "failed"
+    assert "server restart" in record.failure_reason.lower()
+
+
+def test_document_path_rejects_paths_outside_storage_root(monkeypatch, tmp_path):
+    storage_root = tmp_path / "documents"
+    outside_path = tmp_path / "outside.txt"
+    monkeypatch.setattr(settings, "document_storage_dir", storage_root)
+
+    with pytest.raises(FileNotFoundError):
+        document_service.document_path(SimpleNamespace(storage_path=str(outside_path)))
+
+
+def test_relative_storage_dir_round_trips(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "document_storage_dir", Path("./storage/documents"))
+
+    path = document_service.store_upload_file(uuid.uuid4(), "lesson.txt", b"x")
+
+    assert path.is_absolute()
+    assert document_service.document_path(SimpleNamespace(storage_path=str(path))).is_file()
+    legacy_relative_path = path.relative_to(tmp_path)
+    assert document_service.document_path(
+        SimpleNamespace(storage_path=str(legacy_relative_path))
+    ).is_file()
+
+
+def test_store_upload_file_removes_partial_file_on_write_error(monkeypatch, tmp_path):
+    document_id = uuid.uuid4()
+    monkeypatch.setattr(settings, "document_storage_dir", tmp_path)
+    original_write = Path.write_bytes
+
+    def partial_write_then_fail(path, content):
+        if path.name == f"{document_id}.txt":
+            original_write(path, b"partial")
+            raise OSError("disk full")
+        return original_write(path, content)
+
+    monkeypatch.setattr(Path, "write_bytes", partial_write_then_fail)
+
+    with pytest.raises(OSError, match="disk full"):
+        document_service.store_upload_file(document_id, "lesson.txt", b"lesson")
+    assert not (tmp_path / f"{document_id}.txt").exists()
+
+
+def test_replacement_keeps_indexed_version_until_new_version_finishes(
+    db_session, client, trainer_headers, monkeypatch
+):
+    class_id = _class_id(client, trainer_headers, "CS101-A")
+    teacher = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    old = document_service.create_document(
+        db_session, "syllabus.txt", b"old content", class_id, teacher
+    )
+    old.status = document_service.STATUS_INDEXED
+    db_session.commit()
+
+    replacement = document_service.create_document(
+        db_session, "syllabus.txt", b"new content", class_id, teacher
+    )
+
+    assert replacement.version == 2
+    assert replacement.status == document_service.STATUS_PENDING
+    assert old.status == document_service.STATUS_INDEXED
+    replacement.status = document_service.STATUS_PROCESSING
+    db_session.commit()
+
+    purged: list[str] = []
+    monkeypatch.setattr(
+        document_service,
+        "purge_document_vectors",
+        lambda document_id: purged.append(str(document_id)) or 2,
+    )
+    document_service.supersede_older_versions(db_session, replacement)
+
+    assert old.status == document_service.STATUS_REPLACED
+    assert replacement.status == document_service.STATUS_INDEXED
+    assert purged == [str(old.id)]
+    assert not document_service.document_path(old).exists()
+
+
+def test_failed_replacement_does_not_supersede_indexed_version(
+    db_session, client, trainer_headers, monkeypatch
+):
+    class_id = _class_id(client, trainer_headers, "CS101-A")
+    teacher = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    old = document_service.create_document(
+        db_session, "syllabus.txt", b"old content", class_id, teacher
+    )
+    old.status = document_service.STATUS_INDEXED
+    db_session.commit()
+    replacement = document_service.create_document(
+        db_session, "syllabus.txt", b"new content", class_id, teacher
+    )
+    document_service.approve_document(db_session, replacement.id)
+    qdrant = MagicMock()
+    qdrant.add_documents.side_effect = RuntimeError("Qdrant unavailable")
+    purge = MagicMock()
+
+    monkeypatch.setattr(document_service, "purge_document_vectors", purge)
+    monkeypatch.setattr(
+        ingestion_service, "_load_document", lambda _path: {"markdown": "new", "images": {}}
+    )
+    monkeypatch.setattr(ingestion_service, "QdrantStore", lambda embeddings: qdrant)
+    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda: object())
+    monkeypatch.setattr(
+        ingestion_service,
+        "markdown_chunker",
+        lambda _text, metadata: [SimpleNamespace(page_content="new", metadata={})],
+    )
+    monkeypatch.setattr(
+        ingestion_service, "recursive_chunker", lambda docs, metadata: docs
+    )
+    supersede = MagicMock()
+    monkeypatch.setattr(document_service, "supersede_older_versions", supersede)
+
+    ingestion_service.process_document(db_session, replacement.id)
+
+    assert replacement.status == "failed"
+    assert old.status == "indexed"
+    supersede.assert_not_called()
+    assert purge.call_args_list == [
+        ((replacement.id,), {}),
+        ((replacement.id,), {}),
+    ]
+
 def test_approve_other_class_is_forbidden(
     db_session, client, trainer_headers, other_trainer_headers
 ):
@@ -509,6 +647,7 @@ def test_delete_pending_document_skips_vector_purge(
     assert response.status_code == 200
     assert response.json()["purged_chunks"] == 0
     assert called == []
+    assert not Path(record.storage_path).exists()
 
 
 def test_delete_is_refused_when_qdrant_is_unreachable(
@@ -553,7 +692,7 @@ def test_delete_scope_blocks_other_trainer_and_student(
 def test_replace_same_name_creates_next_version_and_reindexes(
     db_session, client, trainer_headers, monkeypatch
 ):
-    """AI-39 AC-03: same name = new version, old chunks purged, re-indexed."""
+    """AI-39 AC-03: same name = new version; keep old version live while indexing."""
     class_a = _class_id(client, trainer_headers, "CS101-A")
     purged_ids: list[str] = []
 
@@ -562,6 +701,12 @@ def test_replace_same_name_creates_next_version_and_reindexes(
         return 4
 
     monkeypatch.setattr(document_service, "purge_document_vectors", fake_purge)
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        ingestion_service,
+        "process_document_in_background",
+        lambda document_id: scheduled.append(document_id),
+    )
 
     first = _upload(client, trainer_headers, class_a, "syllabus.pdf")
     first_doc = first.json()["uploaded"][0]["document"]
@@ -569,28 +714,34 @@ def test_replace_same_name_creates_next_version_and_reindexes(
     assert first_doc["status"] == "pending"
     approved = client.post(f"/api/documents/{first_doc['id']}/approve", headers=trainer_headers)
     assert approved.status_code == 200
+    assert scheduled == [first_doc["id"]]
+    scheduled.clear()
+    old_record = db_session.query(models.Document).filter_by(id=uuid.UUID(first_doc["id"])).one()
+    old_record.status = document_service.STATUS_INDEXED
+    db_session.commit()
 
     second = _upload(
         client, trainer_headers, class_a, "syllabus.pdf", content=b"%PDF-2.0 revision"
     )
     second_doc = second.json()["uploaded"][0]["document"]
     assert second_doc["version"] == 2
-    assert second_doc["status"] == "processing"  # re-indexed without re-approval
-    assert purged_ids == [first_doc["id"]]
+    assert second_doc["status"] == "pending"  # replacement requires approval
+    assert scheduled == []
+    assert purged_ids == []
 
     listed = client.get(
         "/api/documents/", params={"search": "syllabus"}, headers=trainer_headers
     ).json()
     assert listed["total"] == 2
     by_id = {row["id"]: row for row in listed["items"]}
-    assert by_id[first_doc["id"]]["status"] == "replaced"
+    assert by_id[first_doc["id"]]["status"] == "indexed"
     assert by_id[second_doc["id"]]["version"] == 2
+    assert by_id[second_doc["id"]]["status"] == "pending"
 
-    # The superseded version is still deletable (purge already happened, so
-    # deleting it must not touch Qdrant again).
+    # The old version remains deletable and its live vectors are purged then.
     frees = client.delete(f"/api/documents/{first_doc['id']}?confirm=true", headers=trainer_headers)
     assert frees.status_code == 200
-    assert frees.json()["purged_chunks"] == 0
+    assert frees.json()["purged_chunks"] == 4
     assert purged_ids == [first_doc["id"]]
 
 
@@ -617,12 +768,17 @@ def test_replace_versions_are_scoped_per_class(client, trainer_headers, monkeypa
     assert called == []
 
 
-def test_failed_replace_keeps_old_version(client, trainer_headers, monkeypatch):
-    """A replace aborts when the outdated chunks cannot be purged."""
+def test_replace_does_not_purge_old_version_during_upload(
+    db_session, client, trainer_headers, monkeypatch
+):
+    """The old indexed version remains live until replacement ingestion succeeds."""
     class_a = _class_id(client, trainer_headers, "CS101-A")
     first = _upload(client, trainer_headers, class_a, "keep.pdf")
     first_doc = first.json()["uploaded"][0]["document"]
     client.post(f"/api/documents/{first_doc['id']}/approve", headers=trainer_headers)
+    old_record = db_session.query(models.Document).filter_by(id=uuid.UUID(first_doc["id"])).one()
+    old_record.status = document_service.STATUS_INDEXED
+    db_session.commit()
 
     def boom(document_id):
         raise document_service.VectorPurgeError("qdrant down")
@@ -631,15 +787,17 @@ def test_failed_replace_keeps_old_version(client, trainer_headers, monkeypatch):
     response = _upload(client, trainer_headers, class_a, "keep.pdf", content=b"%PDF-2.0")
     assert response.status_code == 201
     result = response.json()["uploaded"][0]
-    assert result["document"] is None
-    assert result["error"] == "qdrant down"
+    assert result["document"]["version"] == 2
+    assert result["document"]["status"] == "pending"
 
     rows = client.get(
         "/api/documents/", params={"search": "keep.pdf"}, headers=trainer_headers
     ).json()
-    assert rows["total"] == 1  # no v2 row was persisted
-    assert rows["items"][0]["status"] == "processing"  # old version untouched
-    assert rows["items"][0]["version"] == 1
+    assert rows["total"] == 2
+    by_id = {row["id"]: row for row in rows["items"]}
+    assert by_id[first_doc["id"]]["status"] == "indexed"
+    assert by_id[first_doc["id"]]["version"] == 1
+    assert by_id[result["document"]["id"]]["status"] == "pending"
 
 
 def test_deleted_and_replaced_chunks_are_not_retrievable(

@@ -19,6 +19,7 @@ from app.routers.class_config import router as class_config_router
 from app.routers.documents import router as documents_router
 from app.routers.history import router as history_router
 from app.routers.student.router import router as student_router
+from app.services.document_service import fail_stale_processing
 from app.services.system_health_service import build_health
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         db = SessionLocal()
         try:
             seed_database(db)
+            fail_stale_processing(db)
         finally:
             db.close()
     except (OSError, SQLAlchemyError) as exc:

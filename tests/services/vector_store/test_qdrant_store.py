@@ -9,7 +9,7 @@ from app.services.vector_store.qdrant_store import QdrantStore, delete_points_by
 
 
 def _embedding_retry_error():
-    from tenacity import Retr  yError, retry, stop_after_attempt, wait_none
+    from tenacity import RetryError, retry, stop_after_attempt, wait_none
 
     @retry(stop=stop_after_attempt(1), wait=wait_none())
     def fail():
@@ -230,7 +230,7 @@ def test_delete_points_by_document_id_against_real_qdrant_semantics():
     """AI-39 (AC-01): the payload filter removes exactly one file's points.
 
     Runs against qdrant-client's in-memory server implementation, so the
-    Filter/MatchValuecod selector is exercised for real (no Docker).
+    Filter/MatchValue payload selector is exercised for real (no Docker).
     """
     from qdrant_client import QdrantClient
     from qdrant_client.http.models import Distance, PointStruct, VectorParams

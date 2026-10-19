@@ -90,7 +90,6 @@ def classes_mine(
 
 @router.post("/", response_model=DocumentUploadResponse, status_code=201)
 async def upload_documents(
-    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
     class_id: str = Form(...),
     user: User = Depends(require_trainer),
@@ -98,8 +97,8 @@ async def upload_documents(
 ) -> DocumentUploadResponse:
     """Multi-file material upload (Upload AC-04); each file validated (AC-06).
 
-    AI-39 AC-03: a file name already used inside the class becomes the next
-    version (handed straight to re-indexing) and supersedes the old one.
+    AI-39 AC-03: a repeated file name creates a pending next version; the
+    prior version stays active until the replacement is approved and indexed.
     """
     results: list[DocumentUploadResult] = []
     for upload in files:
@@ -110,14 +109,6 @@ async def upload_documents(
         except ValueError as exc:
             results.append(DocumentUploadResult(file_name=name, error=str(exc)))
             continue
-        except document_service.VectorPurgeError as exc:
-            # Replace accepted only when the outdated chunks are gone (AC-02).
-            results.append(DocumentUploadResult(file_name=name, error=str(exc)))
-            continue
-        if record.status == document_service.STATUS_PROCESSING:
-            background_tasks.add_task(
-                ingestion_service.process_document_in_background, str(record.id)
-            )
         results.append(DocumentUploadResult(file_name=name, document=_record_to_read(db, record)))
     return DocumentUploadResponse(uploaded=results)
 

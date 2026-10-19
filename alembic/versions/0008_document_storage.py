@@ -16,8 +16,14 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("document", sa.Column("storage_path", sa.String(500), nullable=True))
+    bind = op.get_bind()
+    columns = {column["name"] for column in sa.inspect(bind).get_columns("document")}
+    if "storage_path" not in columns:
+        op.add_column("document", sa.Column("storage_path", sa.String(500), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("document", "storage_path")
+    bind = op.get_bind()
+    columns = {column["name"] for column in sa.inspect(bind).get_columns("document")}
+    if "storage_path" in columns:
+        op.drop_column("document", "storage_path")

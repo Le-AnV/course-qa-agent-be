@@ -211,12 +211,19 @@ def store_upload_file(
     content: bytes,
 ) -> Path:
     """Store the original upload for processing after approval."""
-    storage_dir = settings.document_storage_dir
+    storage_dir = settings.document_storage_dir.resolve()
     storage_dir.mkdir(parents=True, exist_ok=True)
 
     extension = Path(file_name).suffix.lower()
     storage_path = storage_dir / f"{document_id}{extension}"
-    storage_path.write_bytes(content)
+    try:
+        storage_path.write_bytes(content)
+    except OSError:
+        try:
+            storage_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove incomplete upload %s", storage_path, exc_info=True)
+        raise
     return storage_path
 
 
@@ -227,7 +234,11 @@ def document_path(record: Document) -> Path:
 
     root = settings.document_storage_dir.resolve()
     stored = Path(record.storage_path)
-    path = stored.resolve() if stored.is_absolute() else (root / stored).resolve()
+    if stored.is_absolute():
+        path = stored.resolve()
+    else:
+        candidate = stored.resolve()
+        path = candidate if candidate.is_relative_to(root) else (root / stored).resolve()
     if not path.is_relative_to(root):
         raise FileNotFoundError("Document file is not available.")
     return path
@@ -238,12 +249,9 @@ def create_document(
 ) -> Document:
     """Persist an already-validated upload.
 
-    Upload AC-02: a brand-new file starts ``pending`` (trainer approval).
-    AI-39 AC-03: a file name that already exists in the class is a
-    replacement — it becomes the next version, is handed straight to the
-    re-index pipeline (``processing``, no second approval), and the
-    superseded version is marked ``replaced`` with its chunks purged so the
-    chatbot stops answering from the outdated material.
+    Upload AC-02: every upload starts ``pending`` for trainer approval.
+    AI-39 AC-03: a repeated file name creates the next version. The prior
+    version remains available until the approved replacement indexes.
     """
     validated = validate_upload(db, file_name, content, class_id, user)
     if isinstance(validated, str):
@@ -252,37 +260,91 @@ def create_document(
     name = file_name.strip() or file_name
     previous = latest_version(db, class_uuid, name)
     document_id = uuid.uuid4()
-    stored_path = store_upload_file(document_id, name, content)
-    record = Document(
-        id=document_id,
-        class_id=class_uuid,
-        uploaded_by=user.id,
-        file_name=name,
-        file_type=extension,
-        mime_type=mime,
-        size_bytes=size,
-        storage_path=str(stored_path),
-        status=STATUS_PENDING if previous is None else STATUS_PROCESSING,
-        version=1 if previous is None else previous.version + 1,
-    )
-    db.add(record)
+    stored_path: Path | None = None
     try:
-        if previous is not None:
-            # Purge before commit: a failed purge aborts the whole replacement
-            # instead of leaving the old version answering questions.
-            if previous.status in VECTOR_BACKED_STATUSES:
-                purge_document_vectors(previous.id)
-            previous.status = STATUS_REPLACED
+        stored_path = store_upload_file(document_id, name, content)
+        record = Document(
+            id=document_id,
+            class_id=class_uuid,
+            uploaded_by=user.id,
+            file_name=name,
+            file_type=extension,
+            mime_type=mime,
+            size_bytes=size,
+            storage_path=str(stored_path),
+            status=STATUS_PENDING,
+            version=1 if previous is None else previous.version + 1,
+        )
+        db.add(record)
         db.commit()
     except Exception:
         db.rollback()
-        try:
-            stored_path.unlink(missing_ok=True)
-        except OSError:
-            logger.warning("Could not remove uncommitted upload %s", stored_path, exc_info=True)
+        if stored_path is not None:
+            try:
+                stored_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "Could not remove uncommitted upload %s", stored_path, exc_info=True
+                )
         raise
     db.refresh(record)
     return record
+
+
+def supersede_older_versions(db: Session, record: Document) -> int:
+    """Activate an indexed version and retire older versions in one DB update."""
+    older = (
+        db.query(Document)
+        .filter(
+            Document.class_id == record.class_id,
+            func.lower(Document.file_name) == record.file_name.strip().lower(),
+            Document.version < record.version,
+            Document.status != STATUS_REPLACED,
+        )
+        .all()
+    )
+    newer_indexed = (
+        db.query(Document.id)
+        .filter(
+            Document.class_id == record.class_id,
+            func.lower(Document.file_name) == record.file_name.strip().lower(),
+            Document.version > record.version,
+            Document.status == STATUS_INDEXED,
+        )
+        .first()
+    )
+    if newer_indexed:
+        purged = purge_document_vectors(record.id)
+        record.status = STATUS_REPLACED
+        record.failure_reason = None
+        db.commit()
+        try:
+            document_path(record).unlink(missing_ok=True)
+        except (FileNotFoundError, OSError):
+            logger.warning("Could not remove stale source file for document %s", record.id)
+        return purged
+
+    purged = 0
+    for previous in older:
+        if previous.status in VECTOR_BACKED_STATUSES:
+            purged += purge_document_vectors(previous.id)
+    paths: list[Path] = []
+    for previous in older:
+        if previous.storage_path:
+            try:
+                paths.append(document_path(previous))
+            except FileNotFoundError:
+                pass
+        previous.status = STATUS_REPLACED
+    record.status = STATUS_INDEXED
+    record.failure_reason = None
+    db.commit()
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove superseded source file %s", path, exc_info=True)
+    return purged
 
 
 def get_document(db: Session, document_id: uuid.UUID | str) -> Document | None:
@@ -334,6 +396,19 @@ def retry_document(db: Session, document_id: uuid.UUID | str) -> Document:
     return record
 
 
+def fail_stale_processing(db: Session) -> int:
+    """Mark interrupted processing jobs failed after a single-instance restart."""
+    records = db.query(Document).filter(Document.status == STATUS_PROCESSING).all()
+    for record in records:
+        record.status = STATUS_FAILED
+        record.failure_reason = (
+            "Processing was interrupted by a server restart. Retry the document."
+        )
+    if records:
+        db.commit()
+    return len(records)
+
+
 def delete_document(db: Session, record: Document) -> int:
     """Delete one document and its chunks (AI-39 AC-01).
 
@@ -342,11 +417,21 @@ def delete_document(db: Session, record: Document) -> int:
     "deleted" answer while the chatbot can still cite the file (AC-02).
     Returns the number of purged points.
     """
+    try:
+        source_path = document_path(record)
+    except FileNotFoundError:
+        source_path = None
+
     purged = 0
     if record.status in VECTOR_BACKED_STATUSES:
         purged = purge_document_vectors(record.id)
     db.delete(record)
     db.commit()
+    if source_path is not None:
+        try:
+            source_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove stored file %s", source_path, exc_info=True)
     return purged
 
 
