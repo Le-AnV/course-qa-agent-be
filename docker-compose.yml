@@ -40,7 +40,7 @@ services:
       APP_ENV: local
       DATABASE_URL: postgresql+psycopg://qa:qa@postgres:5432/course_qa
       QDRANT_URL: http://qdrant:6333
-      CORS_ORIGINS: '["http://localhost:3000"]'
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:3100"]'
     depends_on:
       postgres:
         condition: service_healthy
