@@ -31,6 +31,10 @@ class StudentClassRead(BaseModel):
     academic_year: str
     member_count: int
     document_count: int
+    # P5: roster capacity (None = unlimited).
+    capacity: int | None = None
+    # P7: ACTIVE | ARCHIVED.
+    status: str = "ACTIVE"
 
     model_config = {"from_attributes": True}
 
@@ -90,15 +94,26 @@ def _trainer_name(db: Session, trainer_id: uuid.UUID) -> str | None:
 
 
 def _member_class_ids(db: Session, user: User) -> set[uuid.UUID] | None:
-    """Class ids visible to the caller, or None for admins (everything)."""
+    """Class ids visible to the caller, or None for admins (everything).
+
+    Archived classes are hidden from teachers and students; admins keep access
+    so they can restore them.
+    """
     role = _role_name(db, user).upper()
     if role == "ADMIN":
         return None
     if role == "TRAINER":
-        return {c.id for c in db.query(Class.id).filter(Class.trainer_id == user.id).all()}
+        from app.services.course_service import class_ids_for_trainer
+
+        return class_ids_for_trainer(db, user.id, active_only=True)
     rows = (
         db.query(Enrollment.class_id)
-        .filter(Enrollment.student_id == user.id, Enrollment.status == "ACTIVE")
+        .join(Class, Enrollment.class_id == Class.id)
+        .filter(
+            Enrollment.student_id == user.id,
+            Enrollment.status == "ACTIVE",
+            Class.status != "ARCHIVED",
+        )
         .all()
     )
     return {r[0] for r in rows}
@@ -107,6 +122,9 @@ def _member_class_ids(db: Session, user: User) -> set[uuid.UUID] | None:
 def _require_member(db: Session, user: User, class_id: uuid.UUID) -> Class:
     section = db.query(Class).filter(Class.id == class_id).first()
     if section is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found.")
+    # Archived classes are gone from every workspace view too (not just lists).
+    if section.status == "ARCHIVED" and _role_name(db, user).upper() != "ADMIN":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found.")
     allowed = _member_class_ids(db, user)
     if allowed is not None and section.id not in allowed:
@@ -131,6 +149,8 @@ def _to_read(db: Session, section: Class) -> StudentClassRead:
         .count()
     )
     docs = db.query(Document).filter(Document.class_id == section.id).count()
+    from app.services import course_service
+
     return StudentClassRead(
         id=section.id,
         code=section.code,
@@ -141,6 +161,8 @@ def _to_read(db: Session, section: Class) -> StudentClassRead:
         academic_year=section.academic_year,
         member_count=members + 1,  # + trainer
         document_count=docs,
+        capacity=course_service.get_config(db, section.id)["capacity"],
+        status=section.status or "ACTIVE",
     )
 
 
@@ -180,13 +202,14 @@ def class_members(
 
     section = _require_member(db, user, _coerce_uuid(class_id))
     out: list[ClassMemberRead] = []
-    trainer = db.query(User).filter(User.id == section.trainer_id).first()
-    if trainer is not None:
+    from app.services import course_service
+
+    for trainer in course_service.list_trainers(db, section.id):
         out.append(
             ClassMemberRead(
-                id=trainer.id,
-                username=trainer.full_name,
-                email=trainer.email,
+                id=trainer["trainer_id"],
+                username=trainer["name"],
+                email=trainer["email"],
                 role="trainer",
             )
         )
@@ -279,7 +302,9 @@ def catalog(
     user: User = Depends(get_current_user),
 ):
     """Every class with the caller's relation to it (browse + register)."""
-    sections = db.query(Class).order_by(Class.code).all()
+    sections = (
+        db.query(Class).filter(Class.status != "ARCHIVED").order_by(Class.code).all()
+    )
     out: list[CatalogClassRead] = []
     for section in sections:
         enr = _enrollment_of(db, user.id, section.id)
@@ -309,7 +334,7 @@ def request_join(
             detail="Only students and teaching assistants can request to join a class.",
         )
     section = db.query(Class).filter(Class.id == _coerce_uuid(class_id)).first()
-    if section is None:
+    if section is None or section.status == "ARCHIVED":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found.")
     existing = _enrollment_of(db, user.id, section.id)
     if existing is not None and existing.status == "ACTIVE":
@@ -414,6 +439,8 @@ def approve_request(
 
     try:
         course_service.check_credit_cap(db, sid, section)
+        # P5: capacity is a hard gate on approval, not just a display number.
+        course_service.check_capacity(db, section.id)
     except CourseDomainError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     enr.status = "ACTIVE"
