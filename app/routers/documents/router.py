@@ -54,7 +54,6 @@ def accepted_types(
         ".txt": "Plain text",
         ".pptx": "PowerPoint",
         ".xlsx": "Excel",
-        ".csv": "CSV",
     }
     return [
         AcceptedTypeRead(extension=ext, mime=mime, label=labels[ext])

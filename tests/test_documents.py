@@ -149,11 +149,12 @@ def _zip_bytes(inner: str) -> bytes:
     return buf.getvalue()
 
 
-def test_accepted_types_lists_seven_material_formats(client, trainer_headers):
+def test_accepted_types_lists_six_material_formats(client, trainer_headers):
     response = client.get("/api/documents/accepted-types", headers=trainer_headers)
     assert response.status_code == 200
     extensions = {t["extension"] for t in response.json()}
-    assert extensions == {".pdf", ".docx", ".md", ".txt", ".pptx", ".xlsx", ".csv"}
+    assert extensions == {".pdf", ".docx", ".md", ".txt", ".pptx", ".xlsx"}
+    assert ".csv" not in extensions
 
 
 def test_accepted_types_requires_auth(client, student_headers):
