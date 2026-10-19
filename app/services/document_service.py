@@ -1,18 +1,24 @@
-"""Document service for Epic E2 (AI-35/37/41): upload validation, list, class tags.
+"""Document service for Epic E2 (AI-35/37/41/39): upload, list, tags, delete/replace.
 
 DB-backed (E1 models): class assignments resolve from ``course``/``class``
 rows instead of the former static stub, and uploads persist as ``document``
 rows with pending status. File bytes are validated then discarded — blob
 storage lands with the AI-55 indexing pipeline.
+
+AI-39 adds the delete/replace lifecycle: deleting purges the file's chunks
+from Qdrant (delete by ``document_id``), and replacing a file name versions
+the row and re-indexes while the superseded version stops answering.
 """
 
 import uuid
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.course import Class
 from app.models.document import Document
 from app.models.user import User
+from app.services.vector_store.qdrant_store import delete_points_by_document_id
 
 # Upload AC-01: 7 accepted material formats (images belong to the E3 vision path).
 ACCEPTED_EXTENSIONS: dict[str, str] = {
@@ -32,9 +38,25 @@ STATUS_PROCESSING = "processing"
 STATUS_INDEXED = "indexed"
 STATUS_REJECTED = "rejected"
 STATUS_FAILED = "failed"
+# AI-39 AC-03: a newer version of the same file name supersedes this row.
+STATUS_REPLACED = "replaced"
 VALID_STATUSES = frozenset(
-    {STATUS_PENDING, STATUS_PROCESSING, STATUS_INDEXED, STATUS_REJECTED, STATUS_FAILED}
+    {
+        STATUS_PENDING,
+        STATUS_PROCESSING,
+        STATUS_INDEXED,
+        STATUS_REJECTED,
+        STATUS_FAILED,
+        STATUS_REPLACED,
+    }
 )
+
+# Statuses whose chunks can exist in Qdrant; delete/replace must purge them.
+VECTOR_BACKED_STATUSES = frozenset({STATUS_PROCESSING, STATUS_INDEXED})
+
+
+class VectorPurgeError(RuntimeError):
+    """Qdrant could not be reached, so stale chunks cannot be removed safely."""
 
 
 def reset_store() -> None:
@@ -145,24 +167,85 @@ def validate_upload(
     return extension, ACCEPTED_EXTENSIONS[extension], size, class_uuid
 
 
+def latest_version(db: Session, class_id: uuid.UUID | str, file_name: str) -> Document | None:
+    """Newest row for one file name inside a class (AI-39 AC-03).
+
+    File names match case-insensitively, like the list search, so
+    ``Syllabus.pdf`` replaces ``syllabus.pdf``.
+    """
+    try:
+        class_uuid = uuid.UUID(str(class_id))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    needle = file_name.strip().lower()
+    if not needle:
+        return None
+    return (
+        db.query(Document)
+        .filter(
+            Document.class_id == class_uuid,
+            func.lower(Document.file_name) == needle,
+        )
+        .order_by(Document.version.desc(), Document.created_at.desc())
+        .first()
+    )
+
+
+def purge_document_vectors(document_id: uuid.UUID | str) -> int:
+    """Delete every chunk of one document from Qdrant (AI-39 AC-01/AC-03).
+
+    Returns the number of removed points (0 when the file was never indexed).
+    Raises ``VectorPurgeError`` when the vector store is unreachable so the
+    caller can refuse a delete/replace that would leave stale chunks behind
+    and keep answering student questions.
+    """
+    try:
+        return delete_points_by_document_id(str(document_id))
+    except VectorPurgeError:
+        raise
+    except Exception as exc:
+        raise VectorPurgeError(f"Cannot purge chunks of {document_id}: {exc}") from exc
+
+
 def create_document(
     db: Session, file_name: str, content: bytes, class_id: uuid.UUID | str, user: User
 ) -> Document:
-    """Persist an already-validated upload with pending status (Upload AC-02)."""
+    """Persist an already-validated upload.
+
+    Upload AC-02: a brand-new file starts ``pending`` (trainer approval).
+    AI-39 AC-03: a file name that already exists in the class is a
+    replacement — it becomes the next version, is handed straight to the
+    re-index pipeline (``processing``, no second approval), and the
+    superseded version is marked ``replaced`` with its chunks purged so the
+    chatbot stops answering from the outdated material.
+    """
     validated = validate_upload(db, file_name, content, class_id, user)
     if isinstance(validated, str):
         raise ValueError(validated)  # noqa: TRY004 - validation failure, not a type error
     extension, mime, size, class_uuid = validated
+    name = file_name.strip() or file_name
+    previous = latest_version(db, class_uuid, name)
     record = Document(
         class_id=class_uuid,
         uploaded_by=user.id,
-        file_name=file_name,
+        file_name=name,
         file_type=extension,
         mime_type=mime,
         size_bytes=size,
-        status=STATUS_PENDING,
+        status=STATUS_PENDING if previous is None else STATUS_PROCESSING,
+        version=1 if previous is None else previous.version + 1,
     )
     db.add(record)
+    if previous is not None:
+        # Purge before commit: a failed purge aborts the whole replacement
+        # instead of leaving the old version answering questions.
+        try:
+            if previous.status in VECTOR_BACKED_STATUSES:
+                purge_document_vectors(previous.id)
+        except VectorPurgeError:
+            db.rollback()  # drop the not-yet-committed new version
+            raise
+        previous.status = STATUS_REPLACED
     db.commit()
     db.refresh(record)
     return record
@@ -187,6 +270,62 @@ def approve_document(db: Session, document_id: uuid.UUID | str) -> Document:
     db.commit()
     db.refresh(record)
     return record
+
+
+def delete_document(db: Session, record: Document) -> int:
+    """Delete one document and its chunks (AI-39 AC-01).
+
+    Vector-backed files are purged first: when Qdrant is unreachable the row
+    is kept and ``VectorPurgeError`` propagates, so a trainer never gets a
+    "deleted" answer while the chatbot can still cite the file (AC-02).
+    Returns the number of purged points.
+    """
+    purged = 0
+    if record.status in VECTOR_BACKED_STATUSES:
+        purged = purge_document_vectors(record.id)
+    db.delete(record)
+    db.commit()
+    return purged
+
+
+def retrievable_document_ids(db: Session, class_id: uuid.UUID | str) -> set[str]:
+    """Ids inside one class that may still answer questions (AI-39 AC-02).
+
+    A document is retrievable while the row exists — deleted rows are gone
+    from the DB — and has not been superseded (``replaced``) or rejected.
+    """
+    try:
+        class_uuid = uuid.UUID(str(class_id))
+    except (TypeError, ValueError, AttributeError):
+        return set()
+    rows = (
+        db.query(Document.id)
+        .filter(
+            Document.class_id == class_uuid,
+            Document.status.in_((STATUS_PROCESSING, STATUS_INDEXED)),
+        )
+        .all()
+    )
+    return {str(row[0]) for row in rows}
+
+
+def filter_retrievable_chunks(db: Session, class_id: uuid.UUID | str, chunks: list) -> list:
+    """Drop retrieved chunks that no longer belong to a live document.
+
+    AI-39 AC-02: E4 RAG applies this after the Qdrant search and before
+    answer generation, so a deleted or replaced file can never be cited even
+    if its vectors were not fully purged yet. Chunks must carry
+    ``document_id`` metadata (``build_qdrant_payload``); unverifiable chunks
+    are dropped.
+    """
+    allowed = retrievable_document_ids(db, class_id)
+    kept = []
+    for chunk in chunks:
+        metadata = getattr(chunk, "metadata", None) or {}
+        document_id = str(metadata.get("document_id", ""))
+        if document_id and document_id in allowed:
+            kept.append(chunk)
+    return kept
 
 
 def list_documents(

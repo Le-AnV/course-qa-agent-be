@@ -31,7 +31,17 @@ class DocumentRead(BaseModel):
     class_id: str
     class_name: str
     status: str
+    version: int = 1
     created_at: datetime
+
+
+class DocumentDeleteResponse(BaseModel):
+    """AI-39 AC-01: the file is gone and its chunks were purged from Qdrant."""
+
+    deleted: str
+    file_name: str
+    version: int
+    purged_chunks: int = 0
 
 
 class DocumentUploadResult(BaseModel):

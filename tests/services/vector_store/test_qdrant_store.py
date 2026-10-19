@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain_core.documents import Document
 
-from app.services.vector_store.qdrant_store import QdrantStore
+from app.services.vector_store.qdrant_store import QdrantStore, delete_points_by_document_id
 
 
 @patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
@@ -138,3 +138,77 @@ def test_qdrant_store_as_retriever(mock_qdrant_client, mock_qdrant_vector_store)
     # Should call internal as_retriever with right arguments and return it
     mock_vector_store_instance.as_retriever.assert_called_once_with(search_kwargs={"k": 5})
     assert retriever == mock_retriever
+
+
+def test_delete_points_by_document_id_purges_matching_chunks():
+    """AI-39 (AC-01): one filter deletes every chunk of the file."""
+    client = MagicMock()
+    client.collection_exists.return_value = True
+    client.count.return_value = MagicMock(count=3)
+
+    removed = delete_points_by_document_id(
+        "doc-1",
+        url="http://test:6333",
+        collection_name="test_col",
+        client=client,
+    )
+
+    assert removed == 3
+    assert client.count.call_args.kwargs["collection_name"] == "test_col"
+    selector = client.delete.call_args.kwargs["points_selector"]
+    assert selector.must[0].key == "document_id"
+    assert selector.must[0].match.value == "doc-1"
+    assert client.delete.call_args.kwargs["wait"] is True
+
+
+def test_delete_points_by_document_id_skips_missing_collection():
+    """Nothing was ever indexed: report 0 without touching the server."""
+    client = MagicMock()
+    client.collection_exists.return_value = False
+
+    removed = delete_points_by_document_id(
+        "doc-1",
+        url="http://test:6333",
+        collection_name="test_col",
+        client=client,
+    )
+
+    assert removed == 0
+    client.delete.assert_not_called()
+
+
+def test_delete_points_by_document_id_against_real_qdrant_semantics():
+    """AI-39 (AC-01): the payload filter removes exactly one file's points.
+
+    Runs against qdrant-client's in-memory server implementation, so the
+    Filter/MatchValue payload selector is exercised for real (no Docker).
+    """
+    from qdrant_client import QdrantClient
+    from qdrant_client.http.models import Distance, PointStruct, VectorParams
+
+    client = QdrantClient(":memory:")
+    client.create_collection(
+        collection_name="test_col",
+        vectors_config=VectorParams(size=2, distance=Distance.COSINE),
+    )
+    client.upsert(
+        collection_name="test_col",
+        points=[
+            PointStruct(id=1, vector=[0.1, 0.2], payload={"document_id": "doc-1"}),
+            PointStruct(id=2, vector=[0.3, 0.4], payload={"document_id": "doc-1"}),
+            PointStruct(id=3, vector=[0.5, 0.6], payload={"document_id": "doc-2"}),
+        ],
+    )
+
+    removed = delete_points_by_document_id(
+        "doc-1",
+        url="http://unused",
+        collection_name="test_col",
+        client=client,
+    )
+
+    assert removed == 2
+    # Only the other document's chunk survives (AC-02: no answers from doc-1).
+    remaining = client.count(collection_name="test_col", exact=True).count
+    assert remaining == 1
+    assert [p.payload["document_id"] for p in client.scroll("test_col")[0]] == ["doc-2"]

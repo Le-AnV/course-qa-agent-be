@@ -340,3 +340,249 @@ def test_qdrant_payload_scopes_by_class(db_session, client, trainer_headers):
     assert payload["class_id"] == str(class_a.id)
     assert payload["document_id"] == str(record.id)
     assert uuid.UUID(payload["document_id"])
+
+
+# --- AI-39: delete & replace documents --------------------------------------
+
+
+class _Chunk:
+    """Retrieved chunk stand-in carrying the Qdrant payload metadata."""
+
+    def __init__(self, document_id: str | None = None) -> None:
+        self.metadata = {} if document_id is None else {"document_id": document_id}
+
+
+def _upload(client, headers, class_id, name, content=b"%PDF-1.4 x", mime="application/pdf"):
+    files = [("files", (name, content, mime))]
+    return client.post("/api/documents/", files=files, data={"class_id": class_id}, headers=headers)
+
+
+def test_delete_requires_confirmation_and_purges_vectors(
+    db_session, client, trainer_headers, monkeypatch
+):
+    """AI-39 AC-01: confirm is mandatory; the file + its chunks are removed."""
+    teacher = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    class_a = db_session.query(Class).filter(Class.code == "CS101-A").first()
+    record = document_service.create_document(db_session, "old.pdf", b"%PDF-a", class_a.id, teacher)
+    record.status = "indexed"
+    db_session.commit()
+
+    purged_ids: list[str] = []
+
+    def fake_purge(document_id):
+        purged_ids.append(str(document_id))
+        return 7
+
+    monkeypatch.setattr(document_service, "purge_document_vectors", fake_purge)
+
+    # AC-01: no confirmation, nothing happens.
+    unconfirmed = client.delete(f"/api/documents/{record.id}", headers=trainer_headers)
+    assert unconfirmed.status_code == 400
+    assert "confirm" in unconfirmed.json()["detail"]
+    assert document_service.get_document(db_session, record.id) is not None
+
+    response = client.delete(f"/api/documents/{record.id}?confirm=true", headers=trainer_headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["deleted"] == str(record.id)
+    assert body["file_name"] == "old.pdf"
+    assert body["purged_chunks"] == 7
+    assert purged_ids == [str(record.id)]
+
+    assert document_service.get_document(db_session, record.id) is None
+    listed = client.get(
+        "/api/documents/", params={"search": "old.pdf"}, headers=trainer_headers
+    ).json()
+    assert listed["total"] == 0
+    again = client.delete(f"/api/documents/{record.id}?confirm=true", headers=trainer_headers)
+    assert again.status_code == 404
+
+
+def test_delete_pending_document_skips_vector_purge(
+    db_session, client, trainer_headers, monkeypatch
+):
+    """A never-indexed file has no chunks: delete must not need Qdrant."""
+    teacher = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    class_a = db_session.query(Class).filter(Class.code == "CS101-A").first()
+    record = document_service.create_document(db_session, "new.pdf", b"%PDF-n", class_a.id, teacher)
+
+    called: list[str] = []
+    monkeypatch.setattr(
+        document_service, "purge_document_vectors", lambda document_id: called.append(str(document_id))
+    )
+    response = client.delete(f"/api/documents/{record.id}?confirm=true", headers=trainer_headers)
+    assert response.status_code == 200
+    assert response.json()["purged_chunks"] == 0
+    assert called == []
+
+
+def test_delete_is_refused_when_qdrant_is_unreachable(
+    db_session, client, trainer_headers, monkeypatch
+):
+    """AI-39 AC-02: never report 'deleted' while chunks can still answer."""
+    teacher = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    class_a = db_session.query(Class).filter(Class.code == "CS101-A").first()
+    record = document_service.create_document(db_session, "live.pdf", b"%PDF-l", class_a.id, teacher)
+    record.status = "indexed"
+    db_session.commit()
+
+    def boom(document_id):
+        raise document_service.VectorPurgeError("qdrant down")
+
+    monkeypatch.setattr(document_service, "purge_document_vectors", boom)
+    response = client.delete(f"/api/documents/{record.id}?confirm=true", headers=trainer_headers)
+    assert response.status_code == 503
+    assert "qdrant down" in response.json()["detail"]
+    assert document_service.get_document(db_session, record.id) is not None
+
+
+def test_delete_scope_blocks_other_trainer_and_student(
+    db_session, client, trainer_headers, other_trainer_headers, student_headers
+):
+    """AI-39 AC-04: only the owner's class is deletable; students never."""
+    teacher = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    class_a = db_session.query(Class).filter(Class.code == "CS101-A").first()
+    record = document_service.create_document(db_session, "own.pdf", b"%PDF-o", class_a.id, teacher)
+
+    forbidden = client.delete(f"/api/documents/{record.id}?confirm=true", headers=other_trainer_headers)
+    assert forbidden.status_code == 403
+    assert document_service.get_document(db_session, record.id) is not None
+
+    student = client.delete(f"/api/documents/{record.id}?confirm=true", headers=student_headers)
+    assert student.status_code == 403
+
+    unknown = client.delete(f"/api/documents/{uuid.uuid4()}?confirm=true", headers=trainer_headers)
+    assert unknown.status_code == 404
+
+
+def test_replace_same_name_creates_next_version_and_reindexes(
+    db_session, client, trainer_headers, monkeypatch
+):
+    """AI-39 AC-03: same name = new version, old chunks purged, re-indexed."""
+    class_a = _class_id(client, trainer_headers, "CS101-A")
+    purged_ids: list[str] = []
+
+    def fake_purge(document_id):
+        purged_ids.append(str(document_id))
+        return 4
+
+    monkeypatch.setattr(document_service, "purge_document_vectors", fake_purge)
+
+    first = _upload(client, trainer_headers, class_a, "syllabus.pdf")
+    first_doc = first.json()["uploaded"][0]["document"]
+    assert first_doc["version"] == 1
+    assert first_doc["status"] == "pending"
+    approved = client.post(f"/api/documents/{first_doc['id']}/approve", headers=trainer_headers)
+    assert approved.status_code == 200
+
+    second = _upload(
+        client, trainer_headers, class_a, "syllabus.pdf", content=b"%PDF-2.0 revision"
+    )
+    second_doc = second.json()["uploaded"][0]["document"]
+    assert second_doc["version"] == 2
+    assert second_doc["status"] == "processing"  # re-indexed without re-approval
+    assert purged_ids == [first_doc["id"]]
+
+    listed = client.get(
+        "/api/documents/", params={"search": "syllabus"}, headers=trainer_headers
+    ).json()
+    assert listed["total"] == 2
+    by_id = {row["id"]: row for row in listed["items"]}
+    assert by_id[first_doc["id"]]["status"] == "replaced"
+    assert by_id[second_doc["id"]]["version"] == 2
+
+    # The superseded version is still deletable (purge already happened, so
+    # deleting it must not touch Qdrant again).
+    frees = client.delete(f"/api/documents/{first_doc['id']}?confirm=true", headers=trainer_headers)
+    assert frees.status_code == 200
+    assert frees.json()["purged_chunks"] == 0
+    assert purged_ids == [first_doc["id"]]
+
+
+def test_replace_versions_are_scoped_per_class(client, trainer_headers, monkeypatch):
+    """AI-39 AC-03/AC-04: versioning is per class, never across trainers."""
+    class_a = _class_id(client, trainer_headers, "CS101-A")
+    class_b = _class_id(client, trainer_headers, "CS101-B")
+    called: list[str] = []
+    monkeypatch.setattr(
+        document_service, "purge_document_vectors", lambda document_id: called.append(str(document_id))
+    )
+
+    a1 = _upload(client, trainer_headers, class_a, "notes.txt", b"notes a", "text/plain")
+    b1 = _upload(client, trainer_headers, class_b, "notes.txt", b"notes b", "text/plain")
+    assert a1.json()["uploaded"][0]["document"]["version"] == 1
+    assert b1.json()["uploaded"][0]["document"]["version"] == 1
+
+    # Same name uploaded again in class A: v2. Class B stays at v1.
+    a2 = _upload(client, trainer_headers, class_a, "notes.txt", b"notes a v2", "text/plain")
+    assert a2.json()["uploaded"][0]["document"]["version"] == 2
+    b2 = _upload(client, trainer_headers, class_b, "notes.txt", b"notes b v2", "text/plain")
+    assert b2.json()["uploaded"][0]["document"]["version"] == 2
+    # Both previous rows were still pending (no chunks) → no purge needed.
+    assert called == []
+
+
+def test_failed_replace_keeps_old_version(client, trainer_headers, monkeypatch):
+    """A replace aborts when the outdated chunks cannot be purged."""
+    class_a = _class_id(client, trainer_headers, "CS101-A")
+    first = _upload(client, trainer_headers, class_a, "keep.pdf")
+    first_doc = first.json()["uploaded"][0]["document"]
+    client.post(f"/api/documents/{first_doc['id']}/approve", headers=trainer_headers)
+
+    def boom(document_id):
+        raise document_service.VectorPurgeError("qdrant down")
+
+    monkeypatch.setattr(document_service, "purge_document_vectors", boom)
+    response = _upload(client, trainer_headers, class_a, "keep.pdf", content=b"%PDF-2.0")
+    assert response.status_code == 201
+    result = response.json()["uploaded"][0]
+    assert result["document"] is None
+    assert result["error"] == "qdrant down"
+
+    rows = client.get(
+        "/api/documents/", params={"search": "keep.pdf"}, headers=trainer_headers
+    ).json()
+    assert rows["total"] == 1  # no v2 row was persisted
+    assert rows["items"][0]["status"] == "processing"  # old version untouched
+    assert rows["items"][0]["version"] == 1
+
+
+def test_deleted_and_replaced_chunks_are_not_retrievable(
+    db_session, client, trainer_headers, monkeypatch
+):
+    """AI-39 AC-02: the retrieval guard drops chunks of dead documents."""
+    teacher = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    class_a = db_session.query(Class).filter(Class.code == "CS101-A").first()
+    live = document_service.create_document(db_session, "live.pdf", b"%PDF-l", class_a.id, teacher)
+    gone = document_service.create_document(db_session, "gone.pdf", b"%PDF-g", class_a.id, teacher)
+    superseded = document_service.create_document(
+        db_session, "old-rev.pdf", b"%PDF-o", class_a.id, teacher
+    )
+    for record in (live, gone, superseded):
+        record.status = "indexed"
+    db_session.commit()
+
+    chunks = [
+        _Chunk(str(live.id)),
+        _Chunk(str(gone.id)),
+        _Chunk(str(superseded.id)),
+        _Chunk(),  # unverifiable payload: dropped
+    ]
+    monkeypatch.setattr(document_service, "purge_document_vectors", lambda document_id: 1)
+    assert (
+        client.delete(f"/api/documents/{gone.id}?confirm=true", headers=trainer_headers).status_code
+        == 200
+    )
+    superseded.status = "replaced"
+    db_session.commit()
+
+    assert document_service.filter_retrievable_chunks(db_session, class_a.id, chunks) == [chunks[0]]
+
+
+def test_list_accepts_replaced_status_filter(client, trainer_headers):
+    """The replaced status is a valid list filter after AI-39."""
+    response = client.get(
+        "/api/documents/", params={"status": "replaced"}, headers=trainer_headers
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 0

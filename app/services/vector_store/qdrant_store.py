@@ -6,12 +6,51 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, VectorParams
+from qdrant_client.http.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    VectorParams,
+)
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def delete_points_by_document_id(
+    document_id: str,
+    *,
+    url: str | None = None,
+    collection_name: str | None = None,
+    api_key: str | None = None,
+    client: QdrantClient | None = None,
+) -> int:
+    """Delete every point of one document from the shared collection.
+
+    AI-39 (AC-01/AC-03): chunks carry ``document_id`` in the payload
+    (``build_qdrant_payload``), so one filter removes the whole file.
+    Returns how many points were removed (0 when the collection is missing
+    or the document has no chunks). Idempotent — deleting twice is safe.
+    """
+    url = url or settings.qdrant_url
+    collection_name = collection_name or settings.collection_name
+    api_key = api_key if api_key is not None else settings.qdrant_api_key
+    if not url or not collection_name:
+        raise ValueError("qdrant_url and collection_name must be configured.")
+
+    client = client or QdrantClient(url=url, api_key=api_key)
+    if not client.collection_exists(collection_name):
+        return 0
+
+    selector = Filter(
+        must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))]
+    )
+    found = client.count(collection_name=collection_name, count_filter=selector, exact=True).count
+    client.delete(collection_name=collection_name, points_selector=selector, wait=True)
+    return found
 
 
 class QdrantStore:
