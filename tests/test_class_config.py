@@ -223,10 +223,52 @@ def test_trainer_outside_the_class_cannot_read_or_change_config(api_client, db_s
 
     owner = token_for(db_session, "t1@gmail.com", "trainer")
     ok = api_client.patch(
-        f"/api/classes/{class_id}/config", json={"capacity": 30}, headers=owner
+        f"/api/classes/{class_id}/config", json={"delivery_mode": "hybrid"}, headers=owner
     )
     assert ok.status_code == 200, ok.text
-    assert ok.json()["capacity"] == 30
+    assert ok.json()["delivery_mode"] == "hybrid"
+
+
+def test_only_admin_can_change_capacity(api_client, db_session):
+    admin = admin_headers(api_client)
+    trainer = make_user(api_client, admin, "t1@gmail.com", "Trainer One", "trainer")
+    class_id = make_class(api_client, admin, "CS101-A", trainer)
+    owner = token_for(db_session, "t1@gmail.com", "trainer")
+
+    denied = api_client.patch(
+        f"/api/classes/{class_id}/config", json={"capacity": 30}, headers=owner
+    )
+    assert denied.status_code == 403, denied.text
+    assert "admin" in denied.json()["detail"].lower()
+
+    # Clearing the limit is an admin decision as well.
+    clear_denied = api_client.patch(
+        f"/api/classes/{class_id}/config", json={"capacity": None}, headers=owner
+    )
+    assert clear_denied.status_code == 403, clear_denied.text
+
+    # A patch that mixes capacity with teaching fields is rejected whole.
+    mixed = api_client.patch(
+        f"/api/classes/{class_id}/config",
+        json={"capacity": 40, "delivery_mode": "online"},
+        headers=owner,
+    )
+    assert mixed.status_code == 403, mixed.text
+    assert api_client.get(f"/api/classes/{class_id}/config", headers=owner).json()[
+        "delivery_mode"
+    ] == "on_campus"
+
+    # Admins keep full control: set and clear.
+    set_by_admin = api_client.patch(
+        f"/api/classes/{class_id}/config", json={"capacity": 30}, headers=admin
+    )
+    assert set_by_admin.status_code == 200, set_by_admin.text
+    assert set_by_admin.json()["capacity"] == 30
+    clear_by_admin = api_client.patch(
+        f"/api/classes/{class_id}/config", json={"capacity": None}, headers=admin
+    )
+    assert clear_by_admin.status_code == 200, clear_by_admin.text
+    assert clear_by_admin.json()["capacity"] is None
 
 
 def student_auth(user_id: str) -> dict:
