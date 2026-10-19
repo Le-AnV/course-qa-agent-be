@@ -35,6 +35,8 @@ class Document(Base):
     # AI-39 (AC-03): uploading a file name that already exists in the class
     # creates the next version; version 1 is the original upload.
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    storage_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

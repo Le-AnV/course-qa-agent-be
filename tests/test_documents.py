@@ -20,7 +20,7 @@ from app.core.deps import get_db
 from app.core.security import hash_password
 from app.core.seed import seed_database
 from app.main import app
-from app.models.course import Class
+from app.models.course import Class, ClassTrainer
 from app.models.user import Account, Role, User
 from app.services import document_service
 
@@ -28,7 +28,7 @@ TEST_DB_URL = "sqlite://"
 
 
 @pytest.fixture()
-def db_session(monkeypatch):
+def db_session(monkeypatch, tmp_path):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
@@ -38,6 +38,7 @@ def db_session(monkeypatch):
     reset_engine()
     monkeypatch.setattr(settings, "database_url", TEST_DB_URL)
     monkeypatch.setattr(settings, "email_dry_run", True)
+    monkeypatch.setattr(settings, "document_storage_dir", tmp_path)
 
     engine = create_engine(
         TEST_DB_URL,
@@ -97,7 +98,12 @@ def _seed_classes(db: Session) -> None:
 
 
 @pytest.fixture()
-def client(db_session):
+def client(db_session, monkeypatch):
+    # Route-level lifecycle tests exercise scheduling without calling Gemini/Qdrant.
+    from app.services import ingestion_service
+
+    monkeypatch.setattr(ingestion_service, "process_document_in_background", lambda _id: None)
+
     def _override():
         try:
             yield db_session
@@ -312,15 +318,69 @@ def test_upload_to_unassigned_class_is_rejected(
     assert forbidden.status_code == 403
 
 
-def test_approve_trainer_only(db_session, client, trainer_headers, student_headers):
+def test_approve_trainer_only(db_session, client, trainer_headers, student_headers, monkeypatch):
+    from app.services import ingestion_service
+
     teacher = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
     class_a = db_session.query(Class).filter(Class.code == "CS101-A").first()
     record = document_service.create_document(db_session, "s.pdf", b"%PDF-s", class_a.id, teacher)
+    scheduled = []
+    monkeypatch.setattr(
+        ingestion_service,
+        "process_document_in_background",
+        lambda document_id: scheduled.append(document_id),
+    )
     forbidden = client.post(f"/api/documents/{record.id}/approve", headers=student_headers)
     assert forbidden.status_code == 403
     response = client.post(f"/api/documents/{record.id}/approve", headers=trainer_headers)
     assert response.status_code == 200
     assert response.json()["status"] == "processing"
+    assert scheduled == [str(record.id)]
+
+
+def test_reject_pending_document_and_prevent_invalid_transitions(
+    db_session, client, trainer_headers
+):
+    teacher = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    class_a = db_session.query(Class).filter(Class.code == "CS101-A").first()
+    record = document_service.create_document(
+        db_session, "reject.txt", b"lesson", class_a.id, teacher
+    )
+
+    response = client.post(f"/api/documents/{record.id}/reject", headers=trainer_headers)
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
+    again = client.post(f"/api/documents/{record.id}/reject", headers=trainer_headers)
+    assert again.status_code == 400
+
+
+def test_retry_failed_document_schedules_ingestion(
+    db_session, client, trainer_headers, monkeypatch
+):
+    from app.services import ingestion_service
+
+    teacher = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    class_a = db_session.query(Class).filter(Class.code == "CS101-A").first()
+    record = document_service.create_document(
+        db_session, "retry.txt", b"lesson", class_a.id, teacher
+    )
+    record.status = "failed"
+    record.failure_reason = "Gemini embedding quota exceeded."
+    db_session.commit()
+    scheduled = []
+    monkeypatch.setattr(
+        ingestion_service,
+        "process_document_in_background",
+        lambda document_id: scheduled.append(document_id),
+    )
+
+    response = client.post(f"/api/documents/{record.id}/retry", headers=trainer_headers)
+    assert response.status_code == 200
+    assert response.json()["status"] == "processing"
+    assert response.json()["failure_reason"] is None
+    assert scheduled == [str(record.id)]
+    again = client.post(f"/api/documents/{record.id}/retry", headers=trainer_headers)
+    assert again.status_code == 400
 
 
 def test_approve_other_class_is_forbidden(
@@ -331,6 +391,40 @@ def test_approve_other_class_is_forbidden(
     record = document_service.create_document(db_session, "s.pdf", b"%PDF-s", class_a.id, teacher)
     response = client.post(f"/api/documents/{record.id}/approve", headers=other_trainer_headers)
     assert response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("action", "initial_status"),
+    (("approve", "pending"), ("reject", "pending"), ("retry", "failed")),
+)
+def test_only_uploader_can_manage_document(
+    action,
+    initial_status,
+    db_session,
+    client,
+    other_trainer_headers,
+):
+    uploader = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    other = db_session.query(User).filter(User.email == "other-teacher@academic.edu.vn").first()
+    class_a = db_session.query(Class).filter(Class.code == "CS101-A").first()
+    db_session.add(ClassTrainer(class_id=class_a.id, trainer_id=other.id))
+    record = document_service.create_document(
+        db_session,
+        f"uploader-only-{action}.txt",
+        b"lesson",
+        class_a.id,
+        uploader,
+    )
+    record.status = initial_status
+    db_session.commit()
+
+    response = client.post(
+        f"/api/documents/{record.id}/{action}",
+        headers=other_trainer_headers,
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Only the uploader can manage this document."
 
 
 def test_qdrant_payload_scopes_by_class(db_session, client, trainer_headers):
@@ -559,14 +653,19 @@ def test_deleted_and_replaced_chunks_are_not_retrievable(
     superseded = document_service.create_document(
         db_session, "old-rev.pdf", b"%PDF-o", class_a.id, teacher
     )
+    processing = document_service.create_document(
+        db_session, "processing.pdf", b"%PDF-p", class_a.id, teacher
+    )
     for record in (live, gone, superseded):
         record.status = "indexed"
+    processing.status = "processing"
     db_session.commit()
 
     chunks = [
         _Chunk(str(live.id)),
         _Chunk(str(gone.id)),
         _Chunk(str(superseded.id)),
+        _Chunk(str(processing.id)),
         _Chunk(),  # unverifiable payload: dropped
     ]
     monkeypatch.setattr(document_service, "purge_document_vectors", lambda document_id: 1)

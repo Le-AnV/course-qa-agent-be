@@ -31,6 +31,7 @@ class DocumentRead(BaseModel):
     class_id: str
     class_name: str
     status: str
+    failure_reason: str | None = None
     version: int = 1
     created_at: datetime
 

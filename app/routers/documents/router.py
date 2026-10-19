@@ -5,7 +5,16 @@ via ``app.core.deps.require_trainer``. Identity is the DB ``User`` row;
 class scope resolves from ``course``/``class`` tables.
 """
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_db, require_trainer
@@ -20,10 +29,18 @@ from app.schemas.documents import (
     DocumentUploadResponse,
     DocumentUploadResult,
 )
-from app.services import document_service
+from app.services import document_service, ingestion_service
 from app.services.document_service import ACCEPTED_EXTENSIONS, VALID_STATUSES
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
+
+
+def _require_uploader(record: Document, user: User) -> None:
+    if record.uploaded_by != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the uploader can manage this document.",
+        )
 
 
 def _record_to_read(db: Session, record: Document) -> DocumentRead:
@@ -37,6 +54,7 @@ def _record_to_read(db: Session, record: Document) -> DocumentRead:
         class_id=str(record.class_id),
         class_name=document_service.class_name(db, record.class_id),
         status=record.status,
+        failure_reason=record.failure_reason,
         version=record.version,
         created_at=record.created_at,
     )
@@ -72,6 +90,7 @@ def classes_mine(
 
 @router.post("/", response_model=DocumentUploadResponse, status_code=201)
 async def upload_documents(
+    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
     class_id: str = Form(...),
     user: User = Depends(require_trainer),
@@ -95,6 +114,10 @@ async def upload_documents(
             # Replace accepted only when the outdated chunks are gone (AC-02).
             results.append(DocumentUploadResult(file_name=name, error=str(exc)))
             continue
+        if record.status == document_service.STATUS_PROCESSING:
+            background_tasks.add_task(
+                ingestion_service.process_document_in_background, str(record.id)
+            )
         results.append(DocumentUploadResult(file_name=name, document=_record_to_read(db, record)))
     return DocumentUploadResponse(uploaded=results)
 
@@ -134,6 +157,7 @@ def get_documents(
 @router.post("/{document_id}/approve", response_model=DocumentRead)
 def approve_document(
     document_id: str,
+    background_tasks: BackgroundTasks,
     user: User = Depends(require_trainer),
     db: Session = Depends(get_db),
 ) -> DocumentRead:
@@ -148,10 +172,54 @@ def approve_document(
         raise HTTPException(status_code=404, detail="Document not found.")
     if record.class_id not in document_service.my_class_ids(db, user):
         raise HTTPException(status_code=403, detail="Class is not assigned to you.")
+    _require_uploader(record, user)
     try:
         record = document_service.approve_document(db, document_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    background_tasks.add_task(ingestion_service.process_document_in_background, str(record.id))
+    return _record_to_read(db, record)
+
+
+@router.post("/{document_id}/reject", response_model=DocumentRead)
+def reject_document(
+    document_id: str,
+    user: User = Depends(require_trainer),
+    db: Session = Depends(get_db),
+) -> DocumentRead:
+    """Reject a pending document within the trainer's assigned classes."""
+    record = document_service.get_document(db, document_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    if record.class_id not in document_service.my_class_ids(db, user):
+        raise HTTPException(status_code=403, detail="Class is not assigned to you.")
+    _require_uploader(record, user)
+    try:
+        record = document_service.reject_document(db, document_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _record_to_read(db, record)
+
+
+@router.post("/{document_id}/retry", response_model=DocumentRead)
+def retry_document(
+    document_id: str,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_trainer),
+    db: Session = Depends(get_db),
+) -> DocumentRead:
+    """Retry a failed document through the ingestion pipeline."""
+    record = document_service.get_document(db, document_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    if record.class_id not in document_service.my_class_ids(db, user):
+        raise HTTPException(status_code=403, detail="Class is not assigned to you.")
+    _require_uploader(record, user)
+    try:
+        record = document_service.retry_document(db, document_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    background_tasks.add_task(ingestion_service.process_document_in_background, str(record.id))
     return _record_to_read(db, record)
 
 

@@ -1,5 +1,6 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from zipfile import ZipFile
 
 import pytest
 
@@ -56,3 +57,32 @@ def test_document_loader_routes_xlsx_and_xls(tmp_path: Path):
         res_xls = document_loader(str(xls_path))
         mock_excel.assert_called_with(str(xls_path))
         assert res_xls["markdown"] == "excel content"
+
+
+def test_document_loader_reads_markdown_and_text_files(tmp_path: Path):
+    markdown_path = tmp_path / "notes.md"
+    markdown_path.write_text("# Topic\nMarkdown body", encoding="utf-8")
+    text_path = tmp_path / "notes.txt"
+    text_path.write_text("Plain text body", encoding="utf-8")
+
+    assert document_loader(markdown_path)["markdown"] == "# Topic\nMarkdown body"
+    assert document_loader(text_path)["markdown"] == "Plain text body"
+
+
+def test_document_loader_reads_pptx_slide_text(tmp_path: Path):
+    pptx_path = tmp_path / "slides.pptx"
+    with ZipFile(pptx_path, "w") as archive:
+        archive.writestr(
+            "ppt/slides/slide1.xml",
+            '<p:sld xmlns:p="p" xmlns:a="a"><a:p><a:r><a:t>First slide</a:t></a:r></a:p></p:sld>',
+        )
+        archive.writestr(
+            "ppt/slides/slide2.xml",
+            '<p:sld xmlns:p="p" xmlns:a="a"><a:p><a:r><a:t>Second slide</a:t></a:r></a:p></p:sld>',
+        )
+
+    parsed = document_loader(pptx_path)
+
+    assert "First slide" in parsed["markdown"]
+    assert "Second slide" in parsed["markdown"]
+    assert "<!-- page break -->" in parsed["markdown"]

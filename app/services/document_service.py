@@ -2,23 +2,28 @@
 
 DB-backed (E1 models): class assignments resolve from ``course``/``class``
 rows instead of the former static stub, and uploads persist as ``document``
-rows with pending status. File bytes are validated then discarded — blob
-storage lands with the AI-55 indexing pipeline.
+rows with pending status. Original uploads are stored on the persistent
+document volume for the AI-55 pipeline to process after approval.
 
 AI-39 adds the delete/replace lifecycle: deleting purges the file's chunks
 from Qdrant (delete by ``document_id``), and replacing a file name versions
 the row and re-indexes while the superseded version stops answering.
 """
 
+import logging
 import uuid
+from pathlib import Path
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.course import Class
 from app.models.document import Document
 from app.models.user import User
 from app.services.vector_store.qdrant_store import delete_points_by_document_id
+
+logger = logging.getLogger(__name__)
 
 # Upload AC-01: 6 accepted material formats (images belong to the E3 vision path).
 ACCEPTED_EXTENSIONS: dict[str, str] = {
@@ -200,6 +205,34 @@ def purge_document_vectors(document_id: uuid.UUID | str) -> int:
         raise VectorPurgeError(f"Cannot purge chunks of {document_id}: {exc}") from exc
 
 
+def store_upload_file(
+    document_id: uuid.UUID,
+    file_name: str,
+    content: bytes,
+) -> Path:
+    """Store the original upload for processing after approval."""
+    storage_dir = settings.document_storage_dir
+    storage_dir.mkdir(parents=True, exist_ok=True)
+
+    extension = Path(file_name).suffix.lower()
+    storage_path = storage_dir / f"{document_id}{extension}"
+    storage_path.write_bytes(content)
+    return storage_path
+
+
+def document_path(record: Document) -> Path:
+    """Resolve a source file while keeping access inside the storage root."""
+    if not record.storage_path:
+        raise FileNotFoundError("Document file is not available.")
+
+    root = settings.document_storage_dir.resolve()
+    stored = Path(record.storage_path)
+    path = stored.resolve() if stored.is_absolute() else (root / stored).resolve()
+    if not path.is_relative_to(root):
+        raise FileNotFoundError("Document file is not available.")
+    return path
+
+
 def create_document(
     db: Session, file_name: str, content: bytes, class_id: uuid.UUID | str, user: User
 ) -> Document:
@@ -218,28 +251,36 @@ def create_document(
     extension, mime, size, class_uuid = validated
     name = file_name.strip() or file_name
     previous = latest_version(db, class_uuid, name)
+    document_id = uuid.uuid4()
+    stored_path = store_upload_file(document_id, name, content)
     record = Document(
+        id=document_id,
         class_id=class_uuid,
         uploaded_by=user.id,
         file_name=name,
         file_type=extension,
         mime_type=mime,
         size_bytes=size,
+        storage_path=str(stored_path),
         status=STATUS_PENDING if previous is None else STATUS_PROCESSING,
         version=1 if previous is None else previous.version + 1,
     )
     db.add(record)
-    if previous is not None:
-        # Purge before commit: a failed purge aborts the whole replacement
-        # instead of leaving the old version answering questions.
-        try:
+    try:
+        if previous is not None:
+            # Purge before commit: a failed purge aborts the whole replacement
+            # instead of leaving the old version answering questions.
             if previous.status in VECTOR_BACKED_STATUSES:
                 purge_document_vectors(previous.id)
-        except VectorPurgeError:
-            db.rollback()  # drop the not-yet-committed new version
-            raise
-        previous.status = STATUS_REPLACED
-    db.commit()
+            previous.status = STATUS_REPLACED
+        db.commit()
+    except Exception:
+        db.rollback()
+        try:
+            stored_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove uncommitted upload %s", stored_path, exc_info=True)
+        raise
     db.refresh(record)
     return record
 
@@ -260,6 +301,34 @@ def approve_document(db: Session, document_id: uuid.UUID | str) -> Document:
     if record.status != STATUS_PENDING:
         raise ValueError(f"Only pending documents can be approved (is {record.status}).")
     record.status = STATUS_PROCESSING
+    record.failure_reason = None
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def reject_document(db: Session, document_id: uuid.UUID | str) -> Document:
+    """Trainer rejection: pending -> rejected."""
+    record = get_document(db, document_id)
+    if record is None:
+        raise KeyError(str(document_id))
+    if record.status != STATUS_PENDING:
+        raise ValueError(f"Only pending documents can be rejected (is {record.status}).")
+    record.status = STATUS_REJECTED
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def retry_document(db: Session, document_id: uuid.UUID | str) -> Document:
+    """Trainer retry: failed -> processing."""
+    record = get_document(db, document_id)
+    if record is None:
+        raise KeyError(str(document_id))
+    if record.status != STATUS_FAILED:
+        raise ValueError(f"Only failed documents can be retried (is {record.status}).")
+    record.status = STATUS_PROCESSING
+    record.failure_reason = None
     db.commit()
     db.refresh(record)
     return record
@@ -284,8 +353,9 @@ def delete_document(db: Session, record: Document) -> int:
 def retrievable_document_ids(db: Session, class_id: uuid.UUID | str) -> set[str]:
     """Ids inside one class that may still answer questions (AI-39 AC-02).
 
-    A document is retrievable while the row exists — deleted rows are gone
-    from the DB — and has not been superseded (``replaced``) or rejected.
+    Only successfully indexed documents may answer questions. Deleted rows
+    are absent; replaced, rejected, failed, pending, and processing rows are
+    excluded.
     """
     try:
         class_uuid = uuid.UUID(str(class_id))
@@ -295,7 +365,7 @@ def retrievable_document_ids(db: Session, class_id: uuid.UUID | str) -> set[str]
         db.query(Document.id)
         .filter(
             Document.class_id == class_uuid,
-            Document.status.in_((STATUS_PROCESSING, STATUS_INDEXED)),
+            Document.status == STATUS_INDEXED,
         )
         .all()
     )
