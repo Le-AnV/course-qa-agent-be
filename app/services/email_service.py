@@ -194,6 +194,29 @@ def _send_one(
 
 _QUEUE_LOCK = threading.Lock()
 
+# Live progress of the drain, readable from any request thread so the admin UI
+# can show "running" (and disable the button) even after a page reload.
+_DRAIN_STATE: dict[str, object] = {
+    "draining": False,
+    "started_at": None,
+    "total": 0,
+    "done": 0,
+    "sent": 0,
+    "failed": 0,
+}
+
+
+def drain_status() -> dict:
+    """Snapshot of the running drain: the UI polls this while it is going."""
+    return {
+        "draining": bool(_DRAIN_STATE["draining"]),
+        "drain_started_at": _DRAIN_STATE["started_at"],
+        "drain_total": int(_DRAIN_STATE["total"]),
+        "drain_done": int(_DRAIN_STATE["done"]),
+        "drain_sent": int(_DRAIN_STATE["sent"]),
+        "drain_failed": int(_DRAIN_STATE["failed"]),
+    }
+
 
 def process_queue(db: Session, max_messages: int | None = None, sleep_between: bool = True) -> dict:
     """Send pending emails oldest-first at the configured per-minute rate (AC-09).
@@ -224,26 +247,39 @@ def _drain_queue(db: Session, max_messages: int | None = None, sleep_between: bo
         q = q.limit(max_messages)
     pending_ids = [e.id for e in q.all()]
     sent = failed = 0
-    for i, eid in enumerate(pending_ids):
-        # Re-read inside the drain: skip rows another drain already handled.
-        entry = db.query(EmailOutbox).filter(EmailOutbox.id == eid).first()
-        if entry is None or entry.status != EMAIL_PENDING:
-            continue
-        entry.attempts += 1
-        try:
-            _send_one(host, port, sender, app_password, entry.to_email, entry.subject, entry.body, cfg["email_dry_run"])
-            entry.status = EMAIL_SENT
-            entry.last_error = ""
-            entry.sent_at = datetime.now(UTC)
-            sent += 1
-        except Exception as exc:  # noqa: BLE001 — recorded per row for the admin report
-            entry.status = EMAIL_FAILED
-            entry.last_error = str(exc)[:2000]
-            failed += 1
-        db.commit()
-        if sleep_between and i < len(pending_ids) - 1 and delay > 0 and not cfg["email_dry_run"]:
-            time.sleep(delay)
-    return {"processed": len(pending_ids), "sent": sent, "failed": failed, "busy": False}
+    _DRAIN_STATE.update(
+        draining=True,
+        started_at=datetime.now(UTC),
+        total=len(pending_ids),
+        done=0,
+        sent=0,
+        failed=0,
+    )
+    try:
+        for i, eid in enumerate(pending_ids):
+            # Re-read inside the drain: skip rows another drain already handled.
+            entry = db.query(EmailOutbox).filter(EmailOutbox.id == eid).first()
+            if entry is None or entry.status != EMAIL_PENDING:
+                _DRAIN_STATE.update(done=i + 1, sent=sent, failed=failed)
+                continue
+            entry.attempts += 1
+            try:
+                _send_one(host, port, sender, app_password, entry.to_email, entry.subject, entry.body, cfg["email_dry_run"])
+                entry.status = EMAIL_SENT
+                entry.last_error = ""
+                entry.sent_at = datetime.now(UTC)
+                sent += 1
+            except Exception as exc:  # noqa: BLE001 — recorded per row for the admin report
+                entry.status = EMAIL_FAILED
+                entry.last_error = str(exc)[:2000]
+                failed += 1
+            db.commit()
+            _DRAIN_STATE.update(done=i + 1, sent=sent, failed=failed)
+            if sleep_between and i < len(pending_ids) - 1 and delay > 0 and not cfg["email_dry_run"]:
+                time.sleep(delay)
+        return {"processed": len(pending_ids), "sent": sent, "failed": failed, "busy": False}
+    finally:
+        _DRAIN_STATE["draining"] = False
 
 
 def queue_stats(db: Session) -> dict:
@@ -251,6 +287,7 @@ def queue_stats(db: Session) -> dict:
         "pending": db.query(EmailOutbox).filter(EmailOutbox.status == EMAIL_PENDING).count(),
         "sent": db.query(EmailOutbox).filter(EmailOutbox.status == EMAIL_SENT).count(),
         "failed": db.query(EmailOutbox).filter(EmailOutbox.status == EMAIL_FAILED).count(),
+        **drain_status(),
     }
 
 
