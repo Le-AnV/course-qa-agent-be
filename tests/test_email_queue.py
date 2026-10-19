@@ -138,7 +138,7 @@ def test_stats_endpoint_returns_drain_fields(api_client: TestClient):
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["draining"] is False
-    assert set(["draining", "drain_total", "drain_done", "drain_sent", "drain_failed"]).issubset(body)
+    assert {"draining", "drain_total", "drain_done", "drain_sent", "drain_failed"}.issubset(body)
 
 
 def test_concurrent_drain_reports_busy_without_second_run(db_session: Session, monkeypatch):

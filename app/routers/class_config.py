@@ -77,15 +77,19 @@ def read_info(
     is_trainer = role == "TRAINER" and section.id in course_service.class_ids_for_trainer(
         db, user.id
     )
-    if role != "ADMIN" and not is_trainer:
-        # Students only see the class page of a live class they are enrolled in.
-        if section.status == course_service.STATUS_ARCHIVED or not course_service.is_active_member(
-            db, section.id, user.id
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only this class' trainers and members can read its information.",
-            )
+    # Students only see the class page of a live class they are enrolled in.
+    if (
+        role != "ADMIN"
+        and not is_trainer
+        and (
+            section.status == course_service.STATUS_ARCHIVED
+            or not course_service.is_active_member(db, section.id, user.id)
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only this class' trainers and members can read its information.",
+        )
     return ClassInfoRead(**course_service.get_info(db, section.id))
 
 

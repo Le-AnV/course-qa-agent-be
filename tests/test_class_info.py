@@ -200,7 +200,7 @@ def test_enrolled_students_read_but_never_write(api_client, db_session):
     admin = admin_headers(api_client)
     trainer = make_user(api_client, admin, "t1@gmail.com", "Trainer One", "trainer")
     enrolled = make_user(api_client, admin, "s1@gmail.com", "Student One", "student")
-    outsider = make_user(api_client, admin, "s2@gmail.com", "Student Two", "student")
+    make_user(api_client, admin, "s2@gmail.com", "Student Two", "student")
     class_id = make_class(api_client, admin, "CS101-A", trainer)
     enroll(db_session, class_id, enrolled)
 
@@ -232,7 +232,7 @@ def test_enrolled_students_read_but_never_write(api_client, db_session):
 def test_another_trainer_cannot_write_the_class_page(api_client, db_session):
     admin = admin_headers(api_client)
     owner = make_user(api_client, admin, "t1@gmail.com", "Trainer One", "trainer")
-    other = make_user(api_client, admin, "t2@gmail.com", "Trainer Two", "trainer")
+    make_user(api_client, admin, "t2@gmail.com", "Trainer Two", "trainer")
     class_id = make_class(api_client, admin, "CS101-A", owner)
 
     res = api_client.patch(
