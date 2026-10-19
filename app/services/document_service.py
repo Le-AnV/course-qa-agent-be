@@ -20,7 +20,7 @@ from app.models.document import Document
 from app.models.user import User
 from app.services.vector_store.qdrant_store import delete_points_by_document_id
 
-# Upload AC-01: 7 accepted material formats (images belong to the E3 vision path).
+# Upload AC-01: 6 accepted material formats (images belong to the E3 vision path).
 ACCEPTED_EXTENSIONS: dict[str, str] = {
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -28,7 +28,6 @@ ACCEPTED_EXTENSIONS: dict[str, str] = {
     ".txt": "text/plain",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".csv": "text/csv",
 }
 
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024  # Upload AC-01: 100MB per file.
@@ -101,7 +100,6 @@ def detect_content_kind(extension: str, content: bytes) -> str | None:
 
     Returns None when content is consistent (Upload AC-06, stdlib only).
     """
-    import csv
     import io
     import zipfile
 
@@ -123,18 +121,13 @@ def detect_content_kind(extension: str, content: bytes) -> str | None:
         if not any(n.startswith(expected) for n in names):
             return f"content is not a real {extension} file"
         return None
-    if extension in (".md", ".txt", ".csv"):
+    if extension in (".md", ".txt"):
         try:
             text = content.decode("utf-8")
         except UnicodeDecodeError:
             return f"content is not a real {extension} (UTF-8 text) file"
         if "\x00" in text:
             return f"content is not a real {extension} (UTF-8 text) file"
-        if extension == ".csv":
-            try:
-                list(csv.reader(io.StringIO(text)))
-            except csv.Error:
-                return "content is not a real CSV file"
         return None
     return f"unsupported file format: {extension}"
 
