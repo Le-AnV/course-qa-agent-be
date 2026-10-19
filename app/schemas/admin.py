@@ -40,18 +40,104 @@ class ClassAssign(BaseModel):
     trainer_id: uuid.UUID | None = None
 
 
+class ClassTrainerAdd(BaseModel):
+    """Co-trainer to add (mid-semester handover: A starts, B takes over)."""
+
+    trainer_id: uuid.UUID
+
+
+class ClassTrainerRead(BaseModel):
+    trainer_id: uuid.UUID
+    name: str | None = None
+    email: str | None = None
+    # The primary trainer is the one stored in ``class.trainer_id``.
+    is_primary: bool = False
+
+
 class ClassRead(BaseModel):
     id: uuid.UUID
     code: str
     trainer_id: uuid.UUID | None = None
     trainer_name: str | None = None
+    # Primary trainer first, then extra trainers on the class.
+    trainers: list[ClassTrainerRead] = []
     credits: int = 3
     student_count: int = 0
+    # P5: roster capacity (None = unlimited). P7: ACTIVE | ARCHIVED.
+    capacity: int | None = None
+    status: str = "ACTIVE"
     # AC-12: delete warning data.
     document_count: int = 0
     ticket_count: int = 0
 
     model_config = {"from_attributes": True}
+
+
+class ClassStatusUpdate(BaseModel):
+    """P7: archive hides a class from teachers/students; ACTIVE restores it."""
+
+    status: Literal["ACTIVE", "ARCHIVED"]
+
+
+class ClassConfigRead(BaseModel):
+    class_id: uuid.UUID
+    capacity: int | None = None
+    delivery_mode: Literal["on_campus", "online", "hybrid"] = "on_campus"
+    default_language: Literal["en", "vi"] = "en"
+    answer_scope: Literal["syllabus_only", "syllabus_first", "open"] = "syllabus_first"
+    citation_required: bool = True
+    max_answer_words: int = 250
+    session_length_minutes: int = 90
+
+
+class ClassConfigUpdate(BaseModel):
+    """Only the fields present in the request are changed.
+
+    ``capacity=None`` clears the limit, so omit the key to leave it untouched.
+    """
+
+    capacity: int | None = Field(default=None, ge=1, le=500)
+    delivery_mode: Literal["on_campus", "online", "hybrid"] | None = None
+    default_language: Literal["en", "vi"] | None = None
+    answer_scope: Literal["syllabus_only", "syllabus_first", "open"] | None = None
+    citation_required: bool | None = None
+    max_answer_words: int | None = Field(default=None, ge=50, le=1000)
+    session_length_minutes: int | None = Field(default=None, ge=30, le=180)
+
+
+class ClassConfigCopy(BaseModel):
+    """P6: reuse another class' configuration as a template."""
+
+    source_class_id: uuid.UUID
+
+
+class ClassConfigSourceRead(BaseModel):
+    """A class the caller may copy a configuration from."""
+
+    id: uuid.UUID
+    code: str
+    name: str
+
+
+class ClassInfoRead(BaseModel):
+    """The class page a teacher fills in and students read (all fields optional)."""
+
+    class_id: uuid.UUID
+    description: str | None = None
+    meeting_url: str | None = None
+    group_url: str | None = None
+    schedule_note: str | None = None
+    note: str | None = None
+
+
+class ClassInfoUpdate(BaseModel):
+    """Only the fields present in the request are changed; "" clears a field."""
+
+    description: str | None = Field(default=None, max_length=2000)
+    meeting_url: str | None = Field(default=None, max_length=500)
+    group_url: str | None = Field(default=None, max_length=500)
+    schedule_note: str | None = Field(default=None, max_length=200)
+    note: str | None = Field(default=None, max_length=2000)
 
 
 # --- Accounts (AC-03, AC-11, AC-12) ---
@@ -119,6 +205,14 @@ class EmailQueueStats(BaseModel):
     pending: int
     sent: int
     failed: int
+    # Live drain progress (AC-09): the admin UI shows "running" + progress and
+    # disables "Process queue now" until `draining` goes back to false.
+    draining: bool = False
+    drain_started_at: datetime | None = None
+    drain_total: int = 0
+    drain_done: int = 0
+    drain_sent: int = 0
+    drain_failed: int = 0
 
 
 class EmailOutboxRead(BaseModel):
