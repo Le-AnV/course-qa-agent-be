@@ -303,7 +303,7 @@ def check_capacity(db: Session, class_id: uuid.UUID | str) -> None:
     if current >= capacity:
         raise DomainError(
             f"Class '{section.code}' is full: {current}/{capacity} students. "
-            "Raise the capacity in Course Settings to accept more."
+            "Ask an admin to raise the capacity (Admin > Classes)."
         )
 
 

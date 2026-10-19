@@ -19,6 +19,10 @@ again. The values are typed and constrained; nothing here is free-form text.
 - The surface is staff-only: the primary trainer, any co-trainer, or an admin.
   Students never reach it (`403` through `_require_class_teacher`; unknown class
   `404`).
+- The roster capacity is an **admin-owned setting**: admins set or clear it,
+  trainers of the class read it (the teacher UI shows it read-only). Any
+  `PATCH` carrying `capacity` from a non-admin is rejected whole with `403`;
+  the teaching fields stay writable by the class' trainers.
 - Capacity is optional. Empty (`null`) means unlimited; otherwise it is an integer
   in `1..500` and can never drop below the current active roster.
 - Once the roster is full, the join flow refuses new members with `400`
@@ -37,7 +41,7 @@ again. The values are typed and constrained; nothing here is free-form text.
 |---|---|---|
 | `GET /api/classes/config-sources` | Any staff | Classes the caller may copy from — never archived, never a class the caller does not teach (admins see all classes). Returns `[{id, code, name}]`. |
 | `GET /api/classes/{class_id}/config` | Admin / class trainer | Read the configuration. |
-| `PATCH /api/classes/{class_id}/config` | Admin / class trainer | Partial update — omitted fields keep their value. |
+| `PATCH /api/classes/{class_id}/config` | Admin (all fields) / class trainer (teaching fields; `capacity` → `403`) | Partial update — omitted fields keep their value. |
 | `POST /api/classes/{class_id}/config/copy` | Admin / class trainer | Body `{"source_class_id": "..."}`; copies the teaching fields, never capacity. |
 
 `ClassConfigRead` contract:
@@ -67,8 +71,8 @@ Domain errors surfaced as `400` with a readable message:
 - Setting capacity below the current roster:
   `"Capacity cannot be lower than the current roster (N)."`
 - Joining a full class (shared with enrollment):
-  `"Class 'CS101-A' is full: 40/40 students. Raise the capacity in Course
-  Settings to accept more."`
+  `"Class 'CS101-A' is full: 40/40 students. Ask an admin to raise the
+  capacity (Admin > Classes)."`
 - Copy source not taught by the caller: `400`. Copy source archived: `400`.
 
 ## Backend responsibilities
@@ -101,7 +105,9 @@ Domain errors surfaced as `400` with a readable message:
 - `tests/test_class_config.py` (12 tests): role matrix (`403` for students,
   `404` unknown class), typed vocab (`422`), partial updates, capacity floor vs
   roster (`400`), full-roster join refusal, copy excludes capacity, archived
-  sources rejected, config-sources scoping.
+  sources rejected, config-sources scoping, capacity admin-only (`403` for
+  class trainers; a patch mixing `capacity` with teaching fields is rejected
+  whole).
 
 Run from the backend repository root:
 
@@ -114,7 +120,7 @@ uv run ruff check .
 
 | Jira criterion | Agreed implementation |
 |---|---|
-| AC-01: Trainer/co-trainer/admin read & update; everyone else rejected | `_require_class_teacher` on every config route; students never see the surface. |
+| AC-01: Trainer/co-trainer/admin read & update; everyone else rejected | `_require_class_teacher` on every config route; students never see the surface. Capacity updates are admin-only (`403` for class trainers) while teaching fields stay open to them. |
 | AC-02: Values constrained, invalid → 422 | Typed literals and numeric bounds in `ClassConfigUpdate`; FastAPI answers `422`. |
 | AC-03: Capacity optional 1..500, never below roster, full roster refuses joins | `null` = unlimited; `update_config` compares against the active roster (`400`); `check_capacity` blocks joins (`400`). |
 | AC-04: Partial update semantics | `model_dump(exclude_unset=True)` — omitted keys are untouched. |

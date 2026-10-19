@@ -1,9 +1,10 @@
 """Class configuration — capacity (P5) and typed teaching config (P6).
 
-Prefix: /api/classes. Writable by admins and by the trainers of that class
-(primary or co-trainer); students never see this surface. Each class has one
-configuration row, and any class' configuration can be copied onto another as
-a reusable template.
+Prefix: /api/classes. The teaching fields are writable by admins and by the
+trainers of that class (primary or co-trainer); the roster capacity is
+admin-only — trainers read it but cannot change it. Students never see this
+surface. Each class has one configuration row, and any class' configuration
+can be copied onto another as a reusable template.
 """
 
 from __future__ import annotations
@@ -128,9 +129,19 @@ def update_config(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Change only the fields sent — omitted fields keep their current value."""
+    """Change only the fields sent — omitted fields keep their current value.
+
+    The roster capacity is an admin decision: a trainer of the class may edit
+    the teaching fields, but any patch carrying ``capacity`` is rejected whole.
+    """
     section = _require_class_teacher(db, user, class_id)
     changes = payload.model_dump(exclude_unset=True)
+    role = (user_service.role_name_of(user) or "").upper()
+    if "capacity" in changes and role != "ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an admin can change the roster capacity.",
+        )
     try:
         values = course_service.update_config(db, section.id, changes)
     except DomainError as exc:
