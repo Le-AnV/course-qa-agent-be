@@ -1,4 +1,4 @@
-"""Documents router: upload / list / approve, scoped by class (AI-35/37/41).
+"""Documents router: upload / list / approve / delete, scoped by class (AI-35/37/41/39).
 
 Auth (AI-25/27): all endpoints require a Bearer JWT for a trainer or admin
 via ``app.core.deps.require_trainer``. Identity is the DB ``User`` row;
@@ -14,6 +14,7 @@ from app.models.user import User
 from app.schemas.documents import (
     AcceptedTypeRead,
     ClassMineRead,
+    DocumentDeleteResponse,
     DocumentListResponse,
     DocumentRead,
     DocumentUploadResponse,
@@ -36,6 +37,7 @@ def _record_to_read(db: Session, record: Document) -> DocumentRead:
         class_id=str(record.class_id),
         class_name=document_service.class_name(db, record.class_id),
         status=record.status,
+        version=record.version,
         created_at=record.created_at,
     )
 
@@ -76,7 +78,11 @@ async def upload_documents(
     user: User = Depends(require_trainer),
     db: Session = Depends(get_db),
 ) -> DocumentUploadResponse:
-    """Multi-file material upload (Upload AC-04); each file validated (AC-06)."""
+    """Multi-file material upload (Upload AC-04); each file validated (AC-06).
+
+    AI-39 AC-03: a file name already used inside the class becomes the next
+    version (handed straight to re-indexing) and supersedes the old one.
+    """
     results: list[DocumentUploadResult] = []
     for upload in files:
         content = await upload.read()
@@ -84,6 +90,10 @@ async def upload_documents(
         try:
             record = document_service.create_document(db, name, content, class_id, user)
         except ValueError as exc:
+            results.append(DocumentUploadResult(file_name=name, error=str(exc)))
+            continue
+        except document_service.VectorPurgeError as exc:
+            # Replace accepted only when the outdated chunks are gone (AC-02).
             results.append(DocumentUploadResult(file_name=name, error=str(exc)))
             continue
         results.append(DocumentUploadResult(file_name=name, document=_record_to_read(db, record)))
@@ -144,3 +154,37 @@ def approve_document(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return _record_to_read(db, record)
+
+
+@router.delete("/{document_id}", response_model=DocumentDeleteResponse)
+def delete_document(
+    document_id: str,
+    confirm: bool = Query(default=False),
+    user: User = Depends(require_trainer),
+    db: Session = Depends(get_db),
+) -> DocumentDeleteResponse:
+    """Delete a document and purge its chunks from Qdrant (AI-39 AC-01/AC-04).
+
+    Destructive, so it requires ``?confirm=true`` — the UI shows a confirm
+    dialog first. Class scope matches approve: another trainer's document is
+    never listed (AC-04) and is refused here by id too. When Qdrant cannot be
+    reached for a vector-backed file, nothing is deleted and the API answers
+    ``503`` so the outdated material can never keep answering (AC-02).
+    """
+    if not confirm:
+        raise HTTPException(
+            status_code=400, detail="Deletion requires confirmation (?confirm=true)."
+        )
+    record = document_service.get_document(db, document_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    if record.class_id not in document_service.my_class_ids(db, user):
+        raise HTTPException(status_code=403, detail="Class is not assigned to you.")
+    deleted_id, file_name, version = str(record.id), record.file_name, record.version
+    try:
+        purged = document_service.delete_document(db, record)
+    except document_service.VectorPurgeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return DocumentDeleteResponse(
+        deleted=deleted_id, file_name=file_name, version=version, purged_chunks=purged
+    )

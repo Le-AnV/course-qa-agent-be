@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, Uuid, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -29,8 +29,12 @@ class Document(Base):
     mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     # Lifecycle mirrors the service statuses: pending -> processing -> indexed,
-    # with rejected / failed as terminal states (Upload AC-02, AI-55 pipeline).
+    # with rejected / failed / replaced as terminal states (Upload AC-02,
+    # AI-55 pipeline; replaced = superseded by a newer version, AI-39).
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    # AI-39 (AC-03): uploading a file name that already exists in the class
+    # creates the next version; version 1 is the original upload.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
