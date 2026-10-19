@@ -49,12 +49,17 @@ def _role_name(user: User) -> str:
 
 
 def my_class_ids(db: Session, user: User) -> list[uuid.UUID]:
-    """Class ids visible to the caller (Upload AC-05 / List AC-05)."""
+    """Class ids visible to the caller (Upload AC-05 / List AC-05).
+
+    Archived classes leave every workspace surface, so they are excluded.
+    """
     role = _role_name(user).upper()
     if role == "ADMIN":
         return [c.id for c in db.query(Class.id).all()]
     if role == "TRAINER":
-        return [c.id for c in db.query(Class.id).filter(Class.trainer_id == user.id).all()]
+        from app.services.course_service import class_ids_for_trainer
+
+        return sorted(class_ids_for_trainer(db, user.id, active_only=True), key=str)
     return []
 
 

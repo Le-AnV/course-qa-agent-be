@@ -20,6 +20,9 @@ from app.schemas.admin import (
     ClassAssign,
     ClassCreate,
     ClassRead,
+    ClassStatusUpdate,
+    ClassTrainerAdd,
+    ClassTrainerRead,
     ConnectionTestResult,
     CourseCreate,
     CourseRead,
@@ -60,8 +63,13 @@ def _class_to_read(db: Session, section: Class) -> ClassRead:
         code=section.code,
         trainer_id=section.trainer_id,
         trainer_name=course_service.user_display_name(db, section.trainer_id),
+        trainers=[
+            ClassTrainerRead(**t) for t in course_service.list_trainers(db, section.id)
+        ],
         credits=section.credits or 0,
         student_count=course_service.count_students(db, section.id),
+        capacity=course_service.get_config(db, section.id)["capacity"],
+        status=section.status or course_service.STATUS_ACTIVE,
         document_count=warnings["document_count"],
         ticket_count=warnings["ticket_count"],
     )
@@ -71,7 +79,16 @@ def _user_to_read(db: Session, user: User) -> UserRead:
     # ERD: no ``User.class_id``. Class scope = trainer slot or enrollment.
     class_id: uuid.UUID | None = None
     class_code: str | None = None
-    owned = db.query(Class).filter(Class.trainer_id == user.id).first()
+    # Primary trainer OR co-trainer: both count as "teaching this class".
+    trainer_class_ids = course_service.class_ids_for_trainer(db, user.id)
+    owned = (
+        db.query(Class)
+        .filter(Class.id.in_(trainer_class_ids))
+        .order_by(Class.code)
+        .first()
+        if trainer_class_ids
+        else None
+    )
     if owned is not None:
         class_id, class_code = owned.id, owned.code
     else:
@@ -168,6 +185,51 @@ def assign_staff(
 ):
     try:
         section = course_service.assign_staff(db, class_id, payload.trainer_id)
+    except course_service.DomainError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return _class_to_read(db, section)
+
+
+@router.post("/classes/{class_id}/trainers", response_model=ClassRead)
+def add_class_trainer(
+    class_id: uuid.UUID,
+    payload: ClassTrainerAdd,
+    db: Session = Depends(get_db),
+    _=Depends(require_admin),
+):
+    """Add a co-trainer (teacher A starts the term, teacher B can take over)."""
+    try:
+        course_service.add_trainer(db, class_id, payload.trainer_id)
+    except course_service.DomainError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return _class_to_read(db, course_service.get_class(db, class_id))
+
+
+@router.delete("/classes/{class_id}/trainers/{trainer_id}", response_model=ClassRead)
+def remove_class_trainer(
+    class_id: uuid.UUID,
+    trainer_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _=Depends(require_admin),
+):
+    """Remove a co-trainer; the primary trainer is changed via /assign."""
+    try:
+        course_service.remove_trainer(db, class_id, trainer_id)
+    except course_service.DomainError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return _class_to_read(db, course_service.get_class(db, class_id))
+
+
+@router.patch("/classes/{class_id}/status", response_model=ClassRead)
+def set_class_status(
+    class_id: uuid.UUID,
+    payload: ClassStatusUpdate,
+    db: Session = Depends(get_db),
+    _=Depends(require_admin),
+):
+    """P7: archive a class instead of deleting it; ACTIVE restores it."""
+    try:
+        section = course_service.set_class_status(db, class_id, payload.status)
     except course_service.DomainError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     return _class_to_read(db, section)
