@@ -43,3 +43,53 @@ def test_recursive_chunker():
     assert len(chunks) >= 1
     # Check that metadata was preserved
     assert all(c.metadata.get("page_number") == 1 for c in chunks)
+
+
+def test_markdown_chunker_slide_locators():
+    markdown = """<!-- Slide number: 1 -->
+# Slide 1 Title
+Slide 1 content.
+<!-- Slide number: 2 -->
+# Slide 2 Title
+Slide 2 content without header break.
+<!-- Slide number: 3 -->
+Slide 3 content.
+"""
+    chunks = markdown_chunker(markdown, metadata={"file_name": "presentation.pptx", "type": "pptx"})
+
+    assert len(chunks) >= 2
+    assert any(c.metadata.get("slide_number") == 1 for c in chunks)
+    assert any(c.metadata.get("slide_number") == 2 for c in chunks)
+    assert any(c.metadata.get("locator") == "Slide 1" for c in chunks)
+
+    # Verify that <!-- Slide number: X --> tags are cleaned from chunk text
+    for c in chunks:
+        assert "<!-- Slide number:" not in c.page_content
+
+
+def test_markdown_chunker_excel_drops_page_number():
+    markdown = """# Training Schedule
+## Course Information
+Technical Group: Software Engineering
+### Expected Outcomes
+Outcome 1: RAG Architecture
+"""
+    chunks = markdown_chunker(markdown, metadata={"file_name": "syllabus.xlsx", "type": "excel"})
+
+    assert len(chunks) > 0
+    # AC requirement: Excel metadata must NOT have page_number, but uses header/locator
+    for c in chunks:
+        assert "page_number" not in c.metadata
+        assert "locator" in c.metadata
+        assert c.metadata["locator"] in ("Course Information", "Expected Outcomes", "Training Schedule")
+
+
+def test_markdown_chunker_cleans_bold_headers():
+    markdown = """# **Clean Title**
+## *Italic Section*
+Some text.
+"""
+    chunks = markdown_chunker(markdown)
+    assert chunks[0].metadata["Header 1"] == "Clean Title"
+    assert chunks[0].metadata["Header 2"] == "Italic Section"
+
