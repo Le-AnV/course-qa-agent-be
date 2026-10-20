@@ -1,25 +1,11 @@
-"""PDF document loader module."""
+"""PDF document loader module using PyMuPDF4LLM."""
 
+from pathlib import Path
 from typing import Any
 
+import pymupdf4llm
 import pypdfium2 as pdfium
-from marker.config.parser import ConfigParser
-from marker.converters.pdf import PdfConverter
-from marker.models import create_model_dict
 from PIL import Image
-
-# Configure marker PDF converter
-_marker_config = {
-    "output_format": "markdown",
-    "mode": "fast",
-    "disable_ocr": True,
-}
-_config_parser = ConfigParser(_marker_config)
-_MODEL_DICT = create_model_dict()
-_CONVERTER = PdfConverter(
-    config=_config_parser.generate_config_dict(),
-    artifact_dict=_MODEL_DICT,
-)
 
 
 def extract_raw_embedded_images(file_path: str, min_size: int = 60) -> dict[str, Image.Image]:
@@ -45,23 +31,45 @@ def extract_raw_embedded_images(file_path: str, min_size: int = 60) -> dict[str,
     return images
 
 
-def pdf_loader(file_path: str) -> dict[str, Any]:
-    """Load and parse a PDF file into Markdown and extract images.
+def pdf_loader(file_path: str | Path, extract_images: bool = True) -> dict[str, Any]:
+    """Load and parse a PDF file into Markdown with preserved headings using PyMuPDF4LLM.
 
     Args:
-        file_path (str): The path to the PDF file.
+        file_path (str | Path): The path to the PDF file.
+        extract_images (bool): Whether to extract embedded images. Defaults to True.
 
     Returns:
-        dict[str, Any]: A dictionary containing the generated markdown, metadata, and extracted images.
-    """
-    rendered = _CONVERTER(file_path)
+        dict[str, Any]: A dictionary containing markdown, metadata, and extracted images.
 
-    images = dict(rendered.images) if rendered.images else {}
-    if not images:
-        images = extract_raw_embedded_images(file_path)
+    Raises:
+        FileNotFoundError: If the PDF file does not exist.
+        ValueError: If the PDF file is empty or contains no readable text or images.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"PDF file not found: {file_path}")
+
+    # Convert PDF to structured Markdown (with font-size-based headings #, ##, etc.)
+    markdown_content = pymupdf4llm.to_markdown(str(path))
+
+    images: dict[str, Image.Image] = {}
+    if extract_images:
+        images = extract_raw_embedded_images(str(path))
+
+    if not markdown_content.strip() and not images:
+        raise ValueError(f"PDF file '{path.name}' is empty or contains no readable text/images.")
+
+    metadata = {
+        "source": str(path),
+        "file_name": path.name,
+        "extension": path.suffix.lower(),
+        "type": "pdf",
+        "loader": "pymupdf4llm",
+    }
+
 
     return {
-        "markdown": rendered.markdown,
-        "metadata": rendered.metadata,
+        "markdown": markdown_content,
+        "metadata": metadata,
         "images": images,
     }
