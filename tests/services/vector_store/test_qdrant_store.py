@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain_core.documents import Document
 
+from app.config import settings
 from app.services.vector_store.qdrant_store import QdrantStore, delete_points_by_document_id
 
 
@@ -212,3 +213,47 @@ def test_delete_points_by_document_id_against_real_qdrant_semantics():
     remaining = client.count(collection_name="test_col", exact=True).count
     assert remaining == 1
     assert [p.payload["document_id"] for p in client.scroll("test_col")[0]] == ["doc-2"]
+
+
+@patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
+@patch("app.services.vector_store.qdrant_store.QdrantClient")
+def test_similarity_search_with_score_forwards_class_filter(
+    mock_qdrant_client, mock_qdrant_vector_store
+):
+    """AI-65 (AC-01): scored retrieval is filtered to the caller's class."""
+
+    mock_client_instance = mock_qdrant_client.return_value
+    mock_client_instance.collection_exists.return_value = True
+    mock_vector_store_instance = mock_qdrant_vector_store.return_value
+    expected = [(Document(page_content="chunk"), 0.87)]
+    mock_vector_store_instance.similarity_search_with_score.return_value = expected
+
+    store = QdrantStore(embeddings=MagicMock(), url="dummy", collection_name="dummy")
+    result = store.similarity_search_with_score("question", k=5, class_id="class-1")
+
+    assert result == expected
+    kwargs = mock_vector_store_instance.similarity_search_with_score.call_args.kwargs
+    assert kwargs["k"] == 5
+    selector = kwargs["filter"]
+    assert selector.must[0].key == "class_id"
+    assert selector.must[0].match.value == "class-1"
+
+
+@patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
+@patch("app.services.vector_store.qdrant_store.QdrantClient")
+def test_similarity_search_with_score_without_class_has_no_filter(
+    mock_qdrant_client, mock_qdrant_vector_store
+):
+    """Admin-wide retrieval may omit the class filter; chunks still carry metadata."""
+
+    mock_client_instance = mock_qdrant_client.return_value
+    mock_client_instance.collection_exists.return_value = True
+    mock_vector_store_instance = mock_qdrant_vector_store.return_value
+    mock_vector_store_instance.similarity_search_with_score.return_value = []
+
+    store = QdrantStore(embeddings=MagicMock(), url="dummy", collection_name="dummy")
+    store.similarity_search_with_score("question")
+
+    kwargs = mock_vector_store_instance.similarity_search_with_score.call_args.kwargs
+    assert kwargs["filter"] is None
+    assert kwargs["k"] == settings.retriever_top_k
