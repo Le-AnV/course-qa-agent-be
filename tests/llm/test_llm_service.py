@@ -4,10 +4,12 @@ import pytest
 from google.genai import errors
 
 from app.config import Settings
-from app.services.llm_service import (
+from app.services.llm import (
     LlmConfigurationError,
     LlmConnectionError,
     check_llm_connection,
+    get_llm_model,
+    get_vlm_model,
 )
 
 
@@ -53,7 +55,7 @@ def test_llm_connection_lists_models_without_generating_content(monkeypatch):
         clients.append(client)
         return client
 
-    monkeypatch.setattr("app.services.llm_service.genai.Client", create_client)
+    monkeypatch.setattr("app.services.llm.checker.genai.Client", create_client)
     config = Settings(_env_file=None, google_api_key="gemini-secret")
 
     result = check_llm_connection(config)
@@ -63,18 +65,50 @@ def test_llm_connection_lists_models_without_generating_content(monkeypatch):
     assert clients[0].closed is True
 
 
-def test_llm_connection_rejects_missing_api_key():
+def test_llm_connection_rejects_missing_api_key(monkeypatch):
     """Reject a Gemini connection check when no member key is configured."""
-    config = Settings(_env_file=None)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    config = Settings(_env_file=None, google_api_key=None)
 
     with pytest.raises(LlmConfigurationError):
         check_llm_connection(config)
 
 
+def test_get_llm_model_success():
+    """Ensure get_llm_model instantiates ChatGoogleGenerativeAI with expected config."""
+    config = Settings(_env_file=None, google_api_key="test-key")
+    llm = get_llm_model(config)
+
+    assert llm.model == config.llm_model
+    assert llm.temperature == config.llm_temperature
+    assert llm.google_api_key.get_secret_value() == "test-key"
+
+
+def test_get_vlm_model_success():
+    """Ensure get_vlm_model instantiates ChatGoogleGenerativeAI with expected VLM config."""
+    config = Settings(_env_file=None, google_api_key="test-key")
+    vlm = get_vlm_model(config)
+
+    assert vlm.model == config.vlm_model
+    assert vlm.temperature == config.vlm_temperature
+    assert vlm.google_api_key.get_secret_value() == "test-key"
+
+
+def test_get_llm_model_rejects_missing_api_key(monkeypatch):
+    """Reject get_llm_model when no API key is configured."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    config = Settings(_env_file=None, google_api_key=None)
+
+    with pytest.raises(LlmConfigurationError, match="Gemini API key is required"):
+        get_llm_model(config)
+
+
 def test_llm_connection_rejects_unavailable_configured_model(monkeypatch):
     """Reject a key that cannot access the model fixed in application config."""
     monkeypatch.setattr(
-        "app.services.llm_service.genai.Client",
+        "app.services.llm.checker.genai.Client",
         lambda **kwargs: FakeGeminiClient(["models/another-model"]),
     )
     config = Settings(_env_file=None, google_api_key="gemini-secret")
@@ -98,7 +132,7 @@ def test_llm_connection_hides_provider_error_details(monkeypatch):
             )
 
     monkeypatch.setattr(
-        "app.services.llm_service.genai.Client",
+        "app.services.llm.checker.genai.Client",
         lambda **kwargs: FailingGeminiClient([]),
     )
     config = Settings(_env_file=None, google_api_key="gemini-secret")
