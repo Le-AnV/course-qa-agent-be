@@ -50,7 +50,12 @@ def pdf_loader(file_path: str | Path, extract_images: bool = True) -> dict[str, 
         raise FileNotFoundError(f"PDF file not found: {file_path}")
 
     # Convert PDF to structured Markdown (with font-size-based headings #, ##, etc.)
-    markdown_content = pymupdf4llm.to_markdown(str(path))
+    pages = pymupdf4llm.to_markdown(str(path), page_chunks=True)
+    if isinstance(pages, list):
+        markdown_pages = [p.get("text", "") for p in pages if isinstance(p, dict)]
+        markdown_content = "\n\n<!-- page break -->\n\n".join(markdown_pages)
+    else:
+        markdown_content = str(pages)
 
     images: dict[str, Image.Image] = {}
     if extract_images:

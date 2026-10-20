@@ -433,10 +433,18 @@ def excel_loader(file_path: str | Path) -> dict[str, Any]:
     Args:
         file_path: Path to the ``.xlsx`` syllabus file.
 
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If the Excel file is empty or contains no readable syllabus text.
+
     Returns:
         Dict with keys ``markdown`` (str), ``metadata`` (dict), and ``images`` (dict).
     """
-    workbook = load_workbook(str(file_path), data_only=True)
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    workbook = load_workbook(str(path), data_only=True)
 
     sections: list[str] = []
 
@@ -470,8 +478,11 @@ def excel_loader(file_path: str | Path) -> dict[str, Any]:
 
     markdown = "\n\n".join(s for s in sections if s.strip())
 
+    if not markdown.strip():
+        raise ValueError(f"Excel file '{path.name}' is empty or contains no readable text.")
+
     return {
         "markdown": markdown,
-        "metadata": {"source": str(file_path), "type": "excel"},
+        "metadata": {"source": str(path), "type": "excel"},
         "images": {},
     }

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from openpyxl import Workbook
 
 from app.services.ingestion.loader.excel_loader import excel_loader
@@ -12,14 +13,14 @@ def test_excel_loader_empty_workbook(tmp_path: Path):
     ws.title = "EmptySheet"
     wb.save(str(excel_path))
 
-    result = excel_loader(str(excel_path))
+    with pytest.raises(ValueError, match="empty or contains no readable text"):
+        excel_loader(str(excel_path))
 
-    assert "markdown" in result
-    assert "metadata" in result
-    assert "images" in result
-    assert result["metadata"]["type"] == "excel"
-    assert result["metadata"]["source"] == str(excel_path)
-    assert result["markdown"] == ""
+
+def test_excel_loader_file_not_found(tmp_path: Path):
+    non_existent = tmp_path / "not_found.xlsx"
+    with pytest.raises(FileNotFoundError, match="File not found"):
+        excel_loader(str(non_existent))
 
 
 def test_excel_loader_with_cover_and_syllabus(tmp_path: Path):

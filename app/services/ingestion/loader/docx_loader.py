@@ -1,9 +1,11 @@
 """Microsoft Word document (.docx and legacy .doc) loader module with heading preservation and image extraction."""
 
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -91,6 +93,27 @@ def _build_style_map(docx_path: Path) -> str:
     """
 
 
+def _inject_page_breaks_into_docx(docx_path: Path) -> BytesIO:
+    """Inject page break markers into word/document.xml if page breaks exist."""
+    buf_out = BytesIO()
+    try:
+        with (
+            zipfile.ZipFile(docx_path, "r") as zin,
+            zipfile.ZipFile(buf_out, "w") as zout,
+        ):
+            for item in zin.infolist():
+                    content = zin.read(item.filename)
+                    if item.filename == "word/document.xml":
+                        marker = b'<w:r><w:t xml:space="preserve">\n\n&lt;!-- page break --&gt;\n\n</w:t></w:r>'
+                        content = re.sub(rb"<w:lastRenderedPageBreak\s*/>", marker, content)
+                        content = re.sub(rb'<w:br\s+[^>]*w:type=["\']page["\'][^>]*/>', marker, content)
+                    zout.writestr(item, content)
+        buf_out.seek(0)
+        return buf_out
+    except Exception:  # noqa: BLE001
+        return BytesIO(docx_path.read_bytes())
+
+
 def docx_loader(file_path: str | Path) -> dict[str, Any]:
     """Load a Word document (.docx or .doc), convert to Markdown, and extract images.
 
@@ -135,12 +158,12 @@ def docx_loader(file_path: str | Path) -> dict[str, Any]:
             img_idx += 1
             return {"src": img_name, "alt": img_name}
 
-        with open(target_docx, "rb") as f:
-            html_result = mammoth.convert_to_html(
-                f,
-                style_map=style_map,
-                convert_image=mammoth.images.inline(image_handler),
-            ).value
+        docx_stream = _inject_page_breaks_into_docx(target_docx)
+        html_result = mammoth.convert_to_html(
+            docx_stream,
+            style_map=style_map,
+            convert_image=mammoth.images.inline(image_handler),
+        ).value
 
         html_converter = HtmlConverter()
         markdown_text = (html_converter.convert_string(html_result).text_content or "").strip()
