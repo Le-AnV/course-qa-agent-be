@@ -47,3 +47,57 @@ def test_excel_loader_with_cover_and_syllabus(tmp_path: Path):
     md = result["markdown"]
     assert "Python Core Course" in md
     assert "Programming Fundamentals" in md
+
+
+def test_excel_loader_falls_back_to_generic_workbook_and_skips_empty_sheets(tmp_path: Path):
+    excel_path = tmp_path / "lesson.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Notes"
+    ws.append(["STT", "Nội dung"])
+    ws.append([1, "Dòng 1"])
+    ws.append([2, "Dòng 2"])
+    wb.create_sheet(title="Empty")
+    wb.save(str(excel_path))
+
+    result = excel_loader(excel_path)
+
+    assert "# Notes" in result["markdown"]
+    assert "## Notes—Row 2" in result["markdown"]
+    assert "STT: 1" in result["markdown"]
+    assert "Nội dung: Dòng 1" in result["markdown"]
+    assert "Empty" not in result["markdown"]
+
+
+def test_excel_loader_keeps_generic_sheet_beside_specialized_cover(tmp_path: Path):
+    excel_path = tmp_path / "mixed.xlsx"
+    wb = Workbook()
+    cover = wb.active
+    cover.title = "Cover"
+    cover["B11"] = "Course"
+    notes = wb.create_sheet(title="Notes")
+    notes.append(["STT", "Nội dung"])
+    notes.append([1, "Dòng 1"])
+    wb.save(str(excel_path))
+
+    result = excel_loader(excel_path)
+
+    assert "# Course" in result["markdown"]
+    assert "# Notes" in result["markdown"]
+    assert "Nội dung: Dòng 1" in result["markdown"]
+
+
+def test_excel_loader_uses_generic_parser_for_non_template_syllabus_sheet(tmp_path: Path):
+    excel_path = tmp_path / "generic_syllabus.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Syllabus"
+    ws.append(["STT", "Nội dung"])
+    ws.append([1, "Dòng 1"])
+    wb.save(str(excel_path))
+
+    result = excel_loader(excel_path)
+
+    assert "# Syllabus" in result["markdown"]
+    assert "Nội dung: Dòng 1" in result["markdown"]
+    assert "Technical Group:" not in result["markdown"]

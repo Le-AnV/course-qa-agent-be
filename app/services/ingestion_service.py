@@ -40,7 +40,7 @@ def _load_document(path: str) -> dict:
     # Import lazily because the PDF loader initializes heavyweight models.
     from app.services.ingestion.parser import document_loader
 
-    return document_loader(path)
+    return document_loader(path, clean=False)
 
 
 def process_document(db: Session, document_id: uuid.UUID | str) -> None:
