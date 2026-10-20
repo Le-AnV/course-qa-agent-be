@@ -10,7 +10,7 @@ from app.core.database import Base, get_session_local, reset_engine
 from app.core.deps import get_db
 from app.main import app
 from app.services.email_service import EmailDeliveryError
-from app.services.llm_service import LlmConnectionError
+from app.services.llm import LlmConnectionError
 
 TEST_DB_URL = "sqlite://"
 

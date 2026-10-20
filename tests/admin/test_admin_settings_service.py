@@ -34,9 +34,11 @@ def test_build_admin_settings_returns_confirmed_values_without_secrets():
     assert "smtp-secret" not in response.model_dump_json()
 
 
-def test_build_admin_settings_reports_missing_optional_credentials():
+def test_build_admin_settings_reports_missing_optional_credentials(monkeypatch):
     """Report unset credentials as not configured without raising an error."""
-    config = Settings(_env_file=None)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    config = Settings(_env_file=None, google_api_key=None)
 
     response = build_admin_settings(config)
 

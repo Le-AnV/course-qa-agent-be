@@ -46,7 +46,7 @@ from app.services.email_service import (
     EmailDeliveryError,
     send_test_email,
 )
-from app.services.llm_service import (
+from app.services.llm import (
     LlmConfigurationError,
     LlmConnectionError,
     check_llm_connection,
