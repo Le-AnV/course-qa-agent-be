@@ -8,6 +8,14 @@ value, update `app/config.py`, rebuild/redeploy the backend Docker image, and
 re-embed data if the embedding model or vector size changes. Dashboard editing and
 database-backed configuration are outside this task's current scope.
 
+> **AI-65 update:** `retrieval_threshold` is now the exception. AI-65 (AC-05 /
+> T35) stores the active value in `system_config` and exposes it through
+> `GET/PATCH /api/admin/retrieval-config`, so an admin can change it without a
+> redeploy. `settings.retrieval_threshold = 0.8` remains the documented default
+> used when no valid DB value exists. See
+> `docs/design/ai-65-retrieval-score-threshold.md`. The other values below stay
+> fixed in code.
+
 The Jira default of two students for a content gap is outdated. The team's current
 decision is to require at least 10% of active students in the class.
 

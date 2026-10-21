@@ -168,6 +168,50 @@ class QdrantStore:
         k = k or settings.retriever_top_k
         return self.vector_store.similarity_search(query, k=k)
 
+    @retry(
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(5),
+        before_sleep=lambda retry_state: logger.warning(
+            "Retrying Qdrant scored search... Attempt %s. Error: %s",
+            retry_state.attempt_number,
+            getattr(retry_state.outcome, "exception", lambda: None)() or "unknown error",
+        ),
+    )
+    def similarity_search_with_score(
+        self,
+        query: str,
+        k: int | None = None,
+        *,
+        class_id: str | None = None,
+    ) -> list[tuple[Document, float]]:
+        """Return ``(chunk, score)`` pairs so callers can apply a threshold.
+
+        AI-65 (AC-01): retrieval always runs class-scoped. The ``class_id``
+        payload filter matches ``build_qdrant_payload``, so a student can
+        never retrieve another class's material. The score is the Qdrant
+        cosine similarity for the configured collection.
+
+        Args:
+            query (str): The natural-language question.
+            k (int | None): Number of chunks to return. Defaults to settings.retriever_top_k.
+            class_id (str | None): Only return chunks of this class when provided.
+
+        Returns:
+            list[tuple[Document, float]]: Chunks paired with their similarity score.
+        """
+        k = k or settings.retriever_top_k
+        query_filter = None
+        if class_id:
+            query_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.class_id",
+                        match=MatchValue(value=str(class_id)),
+                    )
+                ]
+            )
+        return self.vector_store.similarity_search_with_score(query, k=k, filter=query_filter)
+
     def as_retriever(self, **kwargs):
         """Get the underlying Qdrant vector store as a LangChain retriever.
 

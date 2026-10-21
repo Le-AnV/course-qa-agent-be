@@ -547,6 +547,9 @@ def excel_loader(file_path: str | Path) -> dict[str, Any]:
     if not markdown.strip():
         raise ValueError(f"Excel file '{path.name}' is empty or contains no readable text.")
 
+    if not markdown.strip():
+        raise ValueError(f"Excel file '{path.name}' is empty or contains no readable text.")
+
     return {
         "markdown": markdown,
         "metadata": {"source": str(path), "type": "excel"},

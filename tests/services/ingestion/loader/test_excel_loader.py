@@ -47,8 +47,6 @@ def test_excel_loader_with_cover_and_syllabus(tmp_path: Path):
     md = result["markdown"]
     assert "Python Core Course" in md
     assert "Programming Fundamentals" in md
-
-
 def test_excel_loader_falls_back_to_generic_workbook_and_skips_empty_sheets(tmp_path: Path):
     excel_path = tmp_path / "lesson.xlsx"
     wb = Workbook()
