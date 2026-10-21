@@ -157,7 +157,7 @@ def test_delete_points_by_document_id_purges_matching_chunks():
     assert removed == 3
     assert client.count.call_args.kwargs["collection_name"] == "test_col"
     selector = client.delete.call_args.kwargs["points_selector"]
-    assert selector.must[0].key == "document_id"
+    assert selector.must[0].key == "metadata.document_id"
     assert selector.must[0].match.value == "doc-1"
     assert client.delete.call_args.kwargs["wait"] is True
 
@@ -195,9 +195,15 @@ def test_delete_points_by_document_id_against_real_qdrant_semantics():
     client.upsert(
         collection_name="test_col",
         points=[
-            PointStruct(id=1, vector=[0.1, 0.2], payload={"document_id": "doc-1"}),
-            PointStruct(id=2, vector=[0.3, 0.4], payload={"document_id": "doc-1"}),
-            PointStruct(id=3, vector=[0.5, 0.6], payload={"document_id": "doc-2"}),
+            PointStruct(
+                id=1, vector=[0.1, 0.2], payload={"metadata": {"document_id": "doc-1"}}
+            ),
+            PointStruct(
+                id=2, vector=[0.3, 0.4], payload={"metadata": {"document_id": "doc-1"}}
+            ),
+            PointStruct(
+                id=3, vector=[0.5, 0.6], payload={"metadata": {"document_id": "doc-2"}}
+            ),
         ],
     )
 
@@ -212,7 +218,9 @@ def test_delete_points_by_document_id_against_real_qdrant_semantics():
     # Only the other document's chunk survives (AC-02: no answers from doc-1).
     remaining = client.count(collection_name="test_col", exact=True).count
     assert remaining == 1
-    assert [p.payload["document_id"] for p in client.scroll("test_col")[0]] == ["doc-2"]
+    assert [p.payload["metadata"]["document_id"] for p in client.scroll("test_col")[0]] == [
+        "doc-2"
+    ]
 
 
 @patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
@@ -235,7 +243,7 @@ def test_similarity_search_with_score_forwards_class_filter(
     kwargs = mock_vector_store_instance.similarity_search_with_score.call_args.kwargs
     assert kwargs["k"] == 5
     selector = kwargs["filter"]
-    assert selector.must[0].key == "class_id"
+    assert selector.must[0].key == "metadata.class_id"
     assert selector.must[0].match.value == "class-1"
 
 

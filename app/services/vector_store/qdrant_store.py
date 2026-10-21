@@ -46,7 +46,12 @@ def delete_points_by_document_id(
         return 0
 
     selector = Filter(
-        must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))]
+        must=[
+            FieldCondition(
+                key="metadata.document_id",
+                match=MatchValue(value=document_id),
+            )
+        ]
     )
     found = client.count(collection_name=collection_name, count_filter=selector, exact=True).count
     client.delete(collection_name=collection_name, points_selector=selector, wait=True)
@@ -189,7 +194,12 @@ class QdrantStore:
         query_filter = None
         if class_id:
             query_filter = Filter(
-                must=[FieldCondition(key="class_id", match=MatchValue(value=str(class_id)))]
+                must=[
+                    FieldCondition(
+                        key="metadata.class_id",
+                        match=MatchValue(value=str(class_id)),
+                    )
+                ]
             )
         return self.vector_store.similarity_search_with_score(query, k=k, filter=query_filter)
 
