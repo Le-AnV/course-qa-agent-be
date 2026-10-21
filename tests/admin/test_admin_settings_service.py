@@ -38,7 +38,12 @@ def test_build_admin_settings_reports_missing_optional_credentials(monkeypatch):
     """Report unset credentials as not configured without raising an error."""
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    config = Settings(_env_file=None, google_api_key=None)
+    config = Settings(
+        _env_file=None,
+        google_api_key=None,
+        smtp_sender_email=None,
+        smtp_app_password=None,
+    )
 
     response = build_admin_settings(config)
 

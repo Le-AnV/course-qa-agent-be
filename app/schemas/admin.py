@@ -283,3 +283,19 @@ class ConnectionTestResult(BaseModel):
 
     success: bool
     message: str = Field(min_length=1)
+
+
+# --- AI-65 retrieval score threshold (admin-configurable, T35) ---
+class RetrievalConfigRead(BaseModel):
+    """Active KB-vs-Internet threshold plus the documented default."""
+
+    threshold: float = Field(ge=0, le=1)
+    default_threshold: float = Field(ge=0, le=1)
+    is_default: bool
+    updated_at: datetime | None = None
+
+
+class RetrievalConfigUpdate(BaseModel):
+    """New threshold; applies to the next question (AC-05)."""
+
+    threshold: float = Field(ge=0, le=1)
