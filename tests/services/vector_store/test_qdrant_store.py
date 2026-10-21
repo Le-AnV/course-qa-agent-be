@@ -9,6 +9,20 @@ from app.config import settings
 from app.services.vector_store.qdrant_store import QdrantStore, delete_points_by_document_id
 
 
+def _embedding_retry_error():
+    from tenacity import RetryError, retry, stop_after_attempt, wait_none
+
+    @retry(stop=stop_after_attempt(1), wait=wait_none())
+    def fail():
+        raise RuntimeError("embedding failed")
+
+    try:
+        fail()
+    except RetryError as error:
+        return error
+    raise AssertionError("Expected retry error")
+
+
 @patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
 @patch("app.services.vector_store.qdrant_store.QdrantClient")
 def test_qdrant_store_initialization(mock_qdrant_client, mock_qdrant_vector_store):
@@ -58,6 +72,41 @@ def test_qdrant_store_add_documents_retry(mock_qdrant_client, mock_qdrant_vector
 
     assert result == ["id1"]
     assert mock_vector_store_instance.add_documents.call_count == 2
+
+
+@patch("time.sleep", return_value=None)
+@patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
+@patch("app.services.vector_store.qdrant_store.QdrantClient")
+def test_qdrant_store_does_not_retry_embedding_retry_error(
+    mock_qdrant_client, mock_qdrant_vector_store, mock_sleep
+):
+    """Qdrant must not multiply retries already exhausted by the embedder."""
+    mock_qdrant_client.return_value.collection_exists.return_value = True
+    mock_store = mock_qdrant_vector_store.return_value
+    mock_store.add_documents.side_effect = _embedding_retry_error()
+    store = QdrantStore(embeddings=MagicMock(), url="dummy", collection_name="dummy")
+
+    with pytest.raises(Exception, match="RetryError"):
+        store.add_documents([Document(page_content="lesson")])
+
+    assert mock_store.add_documents.call_count == 1
+
+
+@patch("time.sleep", return_value=None)
+@patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
+@patch("app.services.vector_store.qdrant_store.QdrantClient")
+def test_qdrant_store_does_not_retry_embedding_quota_error(
+    mock_qdrant_client, mock_qdrant_vector_store, mock_sleep
+):
+    mock_qdrant_client.return_value.collection_exists.return_value = True
+    mock_store = mock_qdrant_vector_store.return_value
+    mock_store.add_documents.side_effect = Exception("429 RESOURCE_EXHAUSTED: quota exceeded")
+    store = QdrantStore(embeddings=MagicMock(), url="dummy", collection_name="dummy")
+
+    with pytest.raises(Exception, match="RESOURCE_EXHAUSTED"):
+        store.add_documents([Document(page_content="lesson")])
+
+    assert mock_store.add_documents.call_count == 1
 
 
 @patch("time.sleep", return_value=None)
@@ -196,13 +245,19 @@ def test_delete_points_by_document_id_against_real_qdrant_semantics():
         collection_name="test_col",
         points=[
             PointStruct(
-                id=1, vector=[0.1, 0.2], payload={"metadata": {"document_id": "doc-1"}}
+                id=1,
+                vector=[0.1, 0.2],
+                payload={"metadata": {"document_id": "doc-1"}},
             ),
             PointStruct(
-                id=2, vector=[0.3, 0.4], payload={"metadata": {"document_id": "doc-1"}}
+                id=2,
+                vector=[0.3, 0.4],
+                payload={"metadata": {"document_id": "doc-1"}},
             ),
             PointStruct(
-                id=3, vector=[0.5, 0.6], payload={"metadata": {"document_id": "doc-2"}}
+                id=3,
+                vector=[0.5, 0.6],
+                payload={"metadata": {"document_id": "doc-2"}},
             ),
         ],
     )

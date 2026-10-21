@@ -13,11 +13,19 @@ from qdrant_client.http.models import (
     MatchValue,
     VectorParams,
 )
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import RetryError, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _is_retryable_qdrant_error(error: BaseException) -> bool:
+    """Retry Qdrant failures without multiplying embedding retries."""
+    if isinstance(error, RetryError):
+        return False
+    message = str(error).upper()
+    return "RESOURCE_EXHAUSTED" not in message and "QUOTA" not in message
 
 
 def delete_points_by_document_id(
@@ -115,6 +123,7 @@ class QdrantStore:
             )
 
     @retry(
+        retry=retry_if_exception(_is_retryable_qdrant_error),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         stop=stop_after_attempt(5),
         before_sleep=lambda retry_state: logger.warning(
