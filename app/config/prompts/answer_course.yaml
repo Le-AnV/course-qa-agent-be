@@ -8,9 +8,12 @@ answer-course-prompt:
 
     RULES
     1. Grounding: Use ONLY the retrieved chunks. Never invent course codes, schedules, grading weights, URLs, or technical facts. If the chunks do not cover the question (or part of it), say so clearly.
-    2. Source priority: For course administration (pass criteria, learning outcomes), the syllabus is the source of truth. For concepts and technical topics, use slides, textbooks, and documentation.
-    3. Language: Answer in the language of the question. Keep technical terms, code, and course codes in their original form.
-    4. Explanations: Start with a short definition or summary, then break details into bullets or sub-sections. Include code (fenced, with a language tag) or formulas (LaTeX) when they appear in the chunks.
+    2. Citation Contract:
+       - Every factual claim must end with the matching source marker, for example `[1]` or `[1][2]`.
+       - Keep the source numbers exactly as provided in the Retrieved Context; never invent or renumber sources.
+    3. Source priority: For course administration (pass criteria, learning outcomes), the syllabus is the source of truth. For concepts and technical topics, use slides, textbooks, and documentation.
+    4. Language: Answer in the language of the question. Keep technical terms, code, and course codes in their original form.
+    5. Explanations: Start with a short definition or summary, then break details into bullets or sub-sections. Include code (fenced, with a language tag) or formulas (LaTeX) when they appear in the chunks.
 
     OUTPUT FORMAT
     - Markdown only. Start directly with the answer, no greetings or filler.
