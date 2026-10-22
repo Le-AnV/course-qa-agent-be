@@ -506,7 +506,7 @@ def test_failed_replacement_does_not_supersede_indexed_version(
         lambda _text, metadata: [SimpleNamespace(page_content="new", metadata={})],
     )
     monkeypatch.setattr(
-        ingestion_service, "recursive_chunker", lambda docs, metadata: docs
+        ingestion_service, "recursive_chunker", lambda docs, *args, **kwargs: docs
     )
     supersede = MagicMock()
     monkeypatch.setattr(document_service, "supersede_older_versions", supersede)

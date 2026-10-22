@@ -93,3 +93,11 @@ Some text.
     assert chunks[0].metadata["Header 1"] == "Clean Title"
     assert chunks[0].metadata["Header 2"] == "Italic Section"
 
+
+def test_markdown_chunker_metadata_override_safety():
+    markdown = "<!-- Slide number: 5 -->\n# Slide Title\nContent"
+    chunks = markdown_chunker(markdown, metadata={"file_name": "test.pptx", "locator": "Initial"})
+    assert chunks[0].metadata["locator"] == "Slide 5"
+    assert chunks[0].metadata["file_name"] == "test.pptx"
+
+

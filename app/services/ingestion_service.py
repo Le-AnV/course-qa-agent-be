@@ -62,7 +62,7 @@ def process_document(db: Session, document_id: uuid.UUID | str) -> None:
 
         metadata = document_service.build_qdrant_payload(record)
         chunks = markdown_chunker(markdown, metadata=metadata)
-        chunks = recursive_chunker(chunks, metadata=metadata)
+        chunks = recursive_chunker(chunks)
         if not chunks:
             raise ValueError("Document did not produce any searchable chunks.")
         for index, chunk in enumerate(chunks):
