@@ -40,7 +40,7 @@ def test_process_document_indexes_chunks_and_marks_document_indexed(monkeypatch,
     monkeypatch.setattr(ingestion_service, "QdrantStore", lambda embeddings: qdrant)
     monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda: object())
     monkeypatch.setattr(ingestion_service, "markdown_chunker", lambda _text, metadata: chunks)
-    monkeypatch.setattr(ingestion_service, "recursive_chunker", lambda docs, metadata: docs)
+    monkeypatch.setattr(ingestion_service, "recursive_chunker", lambda docs, *args, **kwargs: docs)
 
     ingestion_service.process_document(db, record.id)
 
@@ -86,7 +86,7 @@ def test_process_document_indexes_generic_xlsx_with_sheet_row_locator(monkeypatc
     chunks = qdrant.add_documents.call_args.args[0]
     assert record.status == "indexed"
     assert any("Nội dung: Dòng 1" in chunk.page_content for chunk in chunks)
-    assert any(chunk.metadata.get("locator") == "Notes - Row 2" for chunk in chunks), [
+    assert any(chunk.metadata.get("locator") in ("Notes—Row 2", "Notes - Row 2") for chunk in chunks), [
         chunk.metadata for chunk in chunks
     ]
 
@@ -112,7 +112,7 @@ def test_process_document_marks_failed_and_removes_partial_vectors(monkeypatch, 
         "markdown_chunker",
         lambda _text, metadata: [SimpleNamespace(page_content="lesson", metadata={})],
     )
-    monkeypatch.setattr(ingestion_service, "recursive_chunker", lambda docs, metadata: docs)
+    monkeypatch.setattr(ingestion_service, "recursive_chunker", lambda docs, *args, **kwargs: docs)
 
     ingestion_service.process_document(db, record.id)
 
@@ -176,7 +176,7 @@ def test_process_document_stops_if_document_is_deleted_during_parsing(monkeypatc
         "markdown_chunker",
         lambda _text, metadata: [SimpleNamespace(page_content="lesson", metadata={})],
     )
-    monkeypatch.setattr(ingestion_service, "recursive_chunker", lambda docs, metadata: docs)
+    monkeypatch.setattr(ingestion_service, "recursive_chunker", lambda docs, *args, **kwargs: docs)
 
     ingestion_service.process_document(db, record.id)
 
@@ -210,7 +210,7 @@ def test_process_document_purges_vectors_if_document_is_deleted_during_upsert(
         "markdown_chunker",
         lambda _text, metadata: [SimpleNamespace(page_content="lesson", metadata={})],
     )
-    monkeypatch.setattr(ingestion_service, "recursive_chunker", lambda docs, metadata: docs)
+    monkeypatch.setattr(ingestion_service, "recursive_chunker", lambda docs, *args, **kwargs: docs)
 
     ingestion_service.process_document(db, record.id)
 

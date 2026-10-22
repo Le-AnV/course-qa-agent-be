@@ -1,241 +1,75 @@
-"""Markdown cleaner and text normalization module for ingestion pipelines.
+"""Markdown cleaner for ingestion pipelines.
 
-Prepares and standardizes Markdown extracted from PDF, Word (.docx/.doc),
-PowerPoint (.pptx/.ppt), and Text files before chunking and embedding.
+Normalizes Markdown extracted from PDF, Word, PowerPoint, and text loaders before
+chunking and embedding. Code, math, and HTML comments (locators such as
+`<!-- Slide number: 1 -->` or `<!-- page break -->`) are protected and restored untouched.
 """
 
-import os
 import re
 import unicodedata
 
-# Common typographic ligatures and smart punctuation
-LIGATURES_MAP = {
-    "\ufb00": "ff",
-    "\ufb01": "fi",
-    "\ufb02": "fl",
-    "\ufb03": "ffi",
-    "\ufb04": "ffl",
-    "\u201c": '"',
-    "\u201d": '"',
-    "\u2018": "'",
-    "\u2019": "'",
-    "\u2013": "-",
-    "\u2014": " - ",
-    "\u00a0": " ",
-}
+# Blocks that must never be modified during text normalization.
+# A single alternation ensures a single pass: the leftmost match wins,
+# so "$" inside code or backticks inside HTML comments are never misread.
+_PROTECTED = re.compile(
+    r"""
+      (?P<fence>`{3,}|~{3,})[\s\S]*?(?P=fence)   # Fenced code blocks
+    | `[^`\n]+`                                  # Inline code
+    | <!--[\s\S]*?-->                            # HTML comments / locator tags
+    | \$\$[\s\S]*?\$\$                           # Block math
+    | \$(?=\S)[^$\n]*?(?<=\S)\$(?!\d)            # Inline math (excludes currency like "$5 and $10")
+    """,
+    re.VERBOSE,
+)
+_PLACEHOLDER = re.compile(r"\x00(\d+)\x00")
+
+# Character translation table:
+# Non-breaking space -> standard space; zero-width spaces and BOM -> removed.
+_CHAR_MAP = str.maketrans({"\u00a0": " ", "\u200b": None, "\ufeff": None})
+
+# Standalone lines that represent only a page number:
+# e.g., "Page 3", "Trang 3/10", "- 12 -", "12".
+_PAGE_NUMBER = re.compile(
+    r"""^[ \t]*(?:
+        [-–—_]*[ \t]*(?:page|trang)[ \t]*\d+(?:[ \t]*(?:of|/)[ \t]*\d+)?[ \t]*[-–—_]*
+      | [-–—_]+[ \t]*\d+[ \t]*[-–—_]+
+      | \d{1,4}
+    )[ \t]*$\n?""",
+    re.IGNORECASE | re.MULTILINE | re.VERBOSE,
+)
+
+# Soft hyphenation break: "infor-\nmation" -> "information".
+# Requires letters on both sides, a single line break, and ensures the next word
+# does not start with an uppercase ASCII letter to avoid joining proper nouns or abbreviations
+# (e.g. keeps "COVID-\n19" and "Bà Rịa-\nVũng Tàu" separate).
+_HYPHEN_BREAK = re.compile(r"(?<=[^\W\d_])-[ \t]*\n[ \t]*(?=[^\W\d_A-Z])")
+
+# Soft-wrapped sentences: line ends with a letter, digit, or comma, and the next line
+# starts with a lowercase letter. Headings, list items, quotes, and table rows are preserved.
+_LINE_WRAP = re.compile(
+    r"^(?![ \t]*(?:#|[-*+>|]|\d+[.)][ \t]))(.*[\w,])\n(?=[^\W\d_A-Z])",
+    re.MULTILINE,
+)
+
+_HEADING = re.compile(r"^(#{1,6})(?=[^\s#])", re.MULTILINE)  # Standardizes "##Title" -> "## Title"
+_TRAILING_WS = re.compile(r"[ \t]+$", re.MULTILINE)
+_BLANK_LINES = re.compile(r"\n{3,}")
 
 
-def protect_special_blocks(text: str) -> tuple[str, dict[str, str]]:
-    """Extract and protect code blocks, inline code, math formulas, and HTML comments.
+def _protect(text: str) -> tuple[str, list[str]]:
+    """Replace protected code, math, and locator blocks with NUL-delimited placeholders."""
+    blocks: list[str] = []
 
-    Prevents downstream regex cleaning from corrupting code syntax, mathematical expressions,
-    or locator metadata tags (e.g., <!-- Slide number: 1 -->, <!-- page break -->).
+    def stash(match: re.Match) -> str:
+        blocks.append(match[0])
+        return f"\x00{len(blocks) - 1}\x00"
 
-    Args:
-        text (str): The original markdown text.
-
-    Returns:
-        tuple[str, dict[str, str]]: A tuple containing the text with placeholders
-        and a mapping of placeholders to original blocks.
-    """
-    placeholders: dict[str, str] = {}
-    counter = 0
-
-    def replacer(match: re.Match) -> str:
-        nonlocal counter
-        key = f"__PROTECTED_BLOCK_{counter}__"
-        placeholders[key] = match.group(0)
-        counter += 1
-        return key
-
-    # 1. Fenced Code Blocks (```...```)
-    text = re.sub(r"```[\s\S]*?```", replacer, text)
-
-    # 2. Inline Code (`...`)
-    text = re.sub(r"`[^`\n]+`", replacer, text)
-
-    # 3. HTML Comments / Locators (<!-- ... -->)
-    text = re.sub(r"<!--[\s\S]*?-->", replacer, text)
-
-    # 4. Block Math ($$...$$)
-    text = re.sub(r"\$\$[\s\S]*?\$\$", replacer, text)
-
-    # 5. Inline Math ($...$)
-    text = re.sub(r"(?<!\$)\$(?!\$)[\s\S]+?(?<!\$)\$(?!\$)", replacer, text)
-
-    return text, placeholders
+    return _PROTECTED.sub(stash, text), blocks
 
 
-def restore_special_blocks(text: str, placeholders: dict[str, str]) -> str:
-    """Restore previously protected blocks from placeholders.
-
-    Args:
-        text (str): The text containing placeholders.
-        placeholders (dict[str, str]): Mapping of placeholders to original block contents.
-
-    Returns:
-        str: Restored markdown text.
-    """
-    for key, val in placeholders.items():
-        text = text.replace(key, val)
-    return text
-
-
-def clean_unicode_and_ligatures(text: str) -> str:
-    """Normalize Unicode to NFC and resolve typography ligatures.
-
-    - Applies Unicode NFC normalization (crucial for Vietnamese diacritics).
-    - Replaces typographic ligatures (fi, fl, ffi, ffl) and smart quotes with standard ASCII equivalents.
-    - Removes zero-width and invisible control characters.
-
-    Args:
-        text (str): The input text.
-
-    Returns:
-        str: Normalized text.
-    """
-    text = unicodedata.normalize("NFC", text)
-
-    for bad_char, good_char in LIGATURES_MAP.items():
-        text = text.replace(bad_char, good_char)
-
-    # Strip zero-width spaces and invisible characters
-    text = re.sub(r"[\u200b\u200c\u200d\uFEFF]", "", text)
-
-    return text
-
-
-def clean_page_artifacts(text: str, custom_watermarks: list[str] | None = None) -> str:
-    """Remove header/footer artifacts such as standalone page numbers and watermarks.
-
-    Note: Locator comments like <!-- page break --> or <!-- Slide number: X --> are
-    protected before this function runs.
-
-    Args:
-        text (str): The input text.
-        custom_watermarks (list[str] | None): Optional list of exact watermark lines to remove.
-
-    Returns:
-        str: Text with stray page numbers and watermarks removed.
-    """
-    # Remove lines containing only page numbers (e.g. "Page 1", "- 12 -", "12")
-    text = re.sub(
-        r"^(?:[-_]*page\s*\d+[-_]*|[-_]+\s*\d+\s*[-_]+|\s*\d{1,4}\s*)$",
-        "",
-        text,
-        flags=re.IGNORECASE | re.MULTILINE,
-    )
-
-    if custom_watermarks:
-        for wm in custom_watermarks:
-            pattern = rf"^\s*{re.escape(wm)}\s*$"
-            text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.MULTILINE)
-
-    return text
-
-
-def clean_hyphenation_and_wrapping(text: str, rejoin_line_wraps: bool = False) -> str:
-    """Repair words broken across lines by a hyphen and optionally soft line wraps.
-
-    Args:
-        text (str): The input text.
-        rejoin_line_wraps (bool): Whether to rejoin sentences broken across lines.
-            Defaults to False to prevent merging intentional bullet points or slide lines.
-
-    Returns:
-        str: Text with repaired hyphenation.
-    """
-    # Rejoin words broken across line break by hyphen (e.g. "thông-\n tin" -> "thôngtin")
-    text = re.sub(r"(\b[\w\u00C0-\u1EF9]+)-\s*\n\s*([\w\u00C0-\u1EF9]+\b)", r"\1\2", text)
-
-    if rejoin_line_wraps:
-        # Rejoin hard line breaks within a sentence
-        text = re.sub(r"([a-z\u00C0-\u1EF9,])\n([A-Za-z\u00C0-\u1EF9])", r"\1 \2", text)
-
-    return text
-
-
-def clean_latex_math(text: str) -> str:
-    """Optimize and merge fragmented LaTeX inline math formulas.
-
-    Args:
-        text (str): The input text.
-
-    Returns:
-        str: Text with optimized LaTeX formulas.
-    """
-    # Merge consecutive inline math blocks separated by basic operators ($a$ + $b$ = $c$ -> $a + b = c$)
-    pattern = r"\$\s*([^\$\n]+?)\s*\$\s*([\+\-\*\/=><])\s*\$\s*([^\$\n]+?)\s*\$"
-    while re.search(pattern, text):
-        text = re.sub(pattern, r"$\1 \2 \3$", text)
-
-    # Remove extra spaces inside inline math tags ($ x $ -> $x$)
-    text = re.sub(r"\$\s+([^\$\n]+?)\s+\$", r"$\1$", text)
-
-    return text
-
-
-def clean_markdown_formatting(text: str) -> str:
-    """Standardize markdown headings, table line breaks, and excessive blank lines.
-
-    Args:
-        text (str): The input text.
-
-    Returns:
-        str: Standardized markdown text.
-    """
-    # Ensure headings have a space after '#' (e.g. "##Header" -> "## Header")
-    text = re.sub(r"^(#{1,6})([^\s#])", r"\1 \2", text, flags=re.MULTILINE)
-
-    # Strip trailing whitespace on each line
-    text = re.sub(r"[ \t]+$", "", text, flags=re.MULTILINE)
-
-    # Clean up <br> tags within markdown tables to preserve cell spacing
-    lines = text.splitlines()
-    cleaned_lines = []
-    for line in lines:
-        if line.strip().startswith("|") and line.strip().endswith("|"):
-            cleaned_line = re.sub(r"<br\s*/?>", " ", line)
-            cleaned_lines.append(cleaned_line)
-        else:
-            cleaned_lines.append(line)
-    text = "\n".join(cleaned_lines)
-
-    # Collapse 3 or more consecutive newlines into 2
-    text = re.sub(r"\n{3,}", "\n\n", text)
-
-    return text.strip()
-
-
-def clean_image_tags(text: str, base_image_dir: str | None = None) -> str:
-    """Remove orphaned image tags if corresponding image files do not exist.
-
-    Args:
-        text (str): The input text.
-        base_image_dir (str | None): Directory containing extracted image files.
-
-    Returns:
-        str: Text with invalid image tags removed.
-    """
-    def check_image(match: re.Match) -> str:
-        img_path = match.group(2).strip()
-        if not img_path:
-            return ""
-        if base_image_dir:
-            full_path = os.path.join(base_image_dir, img_path)
-            if not os.path.exists(full_path):
-                return ""
-        return match.group(0)
-
-    # Remove invalid markdown image tags
-    text = re.sub(r"!\[(.*?)\]\((.*?)\)", check_image, text)
-
-    # Remove orphaned standalone captions
-    text = re.sub(
-        r"^\s*(?:Figure|Fig\.|Hình)\s*\d+[\s:.-]*$", "", text, flags=re.IGNORECASE | re.MULTILINE
-    )
-
-    return text
+def _restore(text: str, blocks: list[str]) -> str:
+    """Restore all protected blocks back to their original text in a single pass."""
+    return _PLACEHOLDER.sub(lambda m: blocks[int(m[1])], text) if blocks else text
 
 
 def clean_markdown(
@@ -243,55 +77,66 @@ def clean_markdown(
     watermarks: list[str] | None = None,
     rejoin_line_wraps: bool = False,
 ) -> str:
-    """Execute the full normalization pipeline on raw Markdown extracted from any loader.
+    """Clean and standardize raw Markdown extracted from any document loader.
+
+    Pipeline:
+    1. Line-ending normalization (CRLF/CR -> LF) and NUL-byte stripping.
+    2. Protection of sensitive blocks (code fences, inline code, HTML locators, math).
+    3. Invisible character cleanup and Unicode NFC normalization (essential for Vietnamese diacritics).
+    4. Stripping of isolated page numbers and custom watermark lines.
+    5. Repair of soft-hyphenated words and optional rejoining of soft line wraps.
+    6. Markdown syntax standardization (heading spacing, trailing whitespace, blank line collapse).
+    7. Single-pass restoration of protected blocks.
 
     Args:
-        markdown_text (str): Raw Markdown text from PDF, Word, PPTX, or Text loader.
-        watermarks (list[str] | None): Optional list of watermarks to strip.
-        rejoin_line_wraps (bool): Whether to merge hard line breaks within sentences. Defaults to False.
+        markdown_text: Raw Markdown string extracted from PDF, Word, PPTX, Excel, or Text loader.
+        watermarks: Optional list of exact watermark lines (case-insensitive) to strip.
+        rejoin_line_wraps: If True, merges hard line breaks inside ongoing sentences.
+            Defaults to False so bullet points, slide lines, and poetry remain intact.
 
     Returns:
-        str: Cleaned, standardized Markdown ready for chunking and embedding.
+        Cleaned, normalized Markdown string ready for semantic chunking and embedding.
     """
     if not markdown_text or not markdown_text.strip():
         return ""
 
-    # Step 1: Protect code blocks, math expressions, and HTML comments (locators)
-    text, placeholders = protect_special_blocks(markdown_text)
+    # 1. Normalize line endings; strip NULs to safely use \x00 as placeholder delimiter.
+    text = markdown_text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
 
-    # Step 2: Unicode & Typography normalization (NFC, ligatures, smart quotes)
-    text = clean_unicode_and_ligatures(text)
+    # 2. Protect code blocks, math expressions, and HTML comment locators.
+    text, blocks = _protect(text)
 
-    # Step 3: Remove page artifacts and watermarks
-    text = clean_page_artifacts(text, custom_watermarks=watermarks)
+    # 3. Clean control characters and normalize Unicode to NFC format.
+    text = unicodedata.normalize("NFC", text.translate(_CHAR_MAP))
 
-    # Step 4: Repair hyphenation across line breaks
-    text = clean_hyphenation_and_wrapping(text, rejoin_line_wraps=rejoin_line_wraps)
+    # 4. Remove standalone page number artifacts and watermarks.
+    text = _PAGE_NUMBER.sub("", text)
+    if watermarks:
+        valid_watermarks = [w.strip() for w in watermarks if w and w.strip()]
+        if valid_watermarks:
+            alternatives = "|".join(map(re.escape, valid_watermarks))
+            text = re.sub(
+                rf"^[ \t]*(?:{alternatives})[ \t]*$\n?",
+                "",
+                text,
+                flags=re.IGNORECASE | re.MULTILINE,
+            )
 
-    # Step 5: Clean LaTeX math formatting
-    text = clean_latex_math(text)
+    # 5. Fix hyphenation breaks and optionally rejoin wrapped sentence lines.
+    text = _HYPHEN_BREAK.sub("", text)
+    if rejoin_line_wraps:
+        text = _LINE_WRAP.sub(r"\1 ", text)
 
-    # Step 6: Restore protected code, math, and locator blocks
-    text = restore_special_blocks(text, placeholders)
+    # 6. Normalize Markdown syntax (heading spacing, trailing whitespace, consecutive newlines).
+    text = _HEADING.sub(r"\1 ", text)
+    text = _TRAILING_WS.sub("", text)
+    text = _BLANK_LINES.sub("\n\n", text).strip()
 
-    # Step 7: Clean Markdown syntax (heading spaces, table <br>, trailing spaces, newlines)
-    text = clean_markdown_formatting(text)
-
-    return text
+    # 7. Restore all protected blocks untouched.
+    return _restore(text, blocks)
 
 
-# Backwards compatibility alias
+# Backwards compatibility alias for existing loader integrations
 clean_marker_markdown = clean_markdown
 
-__all__ = [
-    "clean_hyphenation_and_wrapping",
-    "clean_image_tags",
-    "clean_latex_math",
-    "clean_markdown",
-    "clean_markdown_formatting",
-    "clean_marker_markdown",
-    "clean_page_artifacts",
-    "clean_unicode_and_ligatures",
-    "protect_special_blocks",
-    "restore_special_blocks",
-]
+__all__ = ["clean_markdown", "clean_marker_markdown"]

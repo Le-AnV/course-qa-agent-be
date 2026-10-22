@@ -13,73 +13,76 @@ def _clean_header_text(text: str) -> str:
     return re.sub(r"(\*\*|__|\*|_|~~)", "", text).strip()
 
 
+def _get_deepest_header(metadata: dict) -> str | None:
+    """Return the deepest available markdown header from metadata."""
+    return (
+        metadata.get("Header 4")
+        or metadata.get("Header 3")
+        or metadata.get("Header 2")
+        or metadata.get("Header 1")
+    )
+
+
 def markdown_chunker(
     markdown: str,
     metadata: dict | None = None,
     headers_to_split_on: list[tuple[str, str]] | None = None,
 ) -> list[Document]:
-    """Split markdown text into chunks based on headers and add page numbers.
+    """Split markdown text into semantic chunks based on headers, tracking locators and page numbers.
+
+    All loaders in `app/services/ingestion/loader` output structured Markdown with standard markers:
+    - PowerPoint: contains `<!-- Slide number: X -->` tags.
+    - PDF & Word: contain `<!-- page break -->` tags.
+    - Excel, Web & Plain Text: unpaginated content organized by section headers (`#`, `##`, `###`).
 
     Args:
         markdown: The markdown text to split.
-        metadata: Optional dictionary containing metadata.
+        metadata: Optional dictionary containing document metadata (e.g. file_name, class_id).
         headers_to_split_on: Optional list of tuples specifying headers to split on.
 
     Returns:
-        List of Document chunks split by headers.
+        List of Document chunks with normalized metadata and sanitized text.
     """
     settings = get_settings()
     headers = headers_to_split_on or settings.headers_to_split_on
 
     markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers, strip_headers=True)
-
     chunks = markdown_splitter.split_text(markdown)
 
-    # 1. Clean markdown formatting in extracted header metadata
-    for chunk in chunks:
-        for k in list(chunk.metadata.keys()):
-            if k.startswith("Header ") and isinstance(chunk.metadata[k], str):
-                chunk.metadata[k] = _clean_header_text(chunk.metadata[k])
+    meta = metadata or {}
 
-    # 2. Check for Slide locators <!-- Slide number: X -->
+    # Pre-index slide markers and page break positions in raw markdown
     slide_matches = list(
         re.finditer(r"<!--\s*Slide\s*number:\s*(\d+)\s*-->", markdown, flags=re.IGNORECASE)
     )
-
-    # 3. Check for Page breaks <!-- page break -->
     page_breaks = [
         m.start() for m in re.finditer(r"<!--\s*page\s*break\s*-->", markdown, flags=re.IGNORECASE)
     ]
 
-    is_excel = False
-    if metadata:
-        file_type = str(metadata.get("type", "") or metadata.get("file_type", "")).lower()
-        file_name = str(metadata.get("file_name", "")).lower()
-        if file_type in ("excel", "xlsx", "xls") or file_name.endswith((".xlsx", ".xls")):
-            is_excel = True
-
     search_start = 0
 
     for chunk in chunks:
-        # Find chunk position in original markdown
+        # 1. Clean markdown styling inside extracted header metadata
+        for k in list(chunk.metadata.keys()):
+            if k.startswith("Header ") and isinstance(chunk.metadata[k], str):
+                chunk.metadata[k] = _clean_header_text(chunk.metadata[k])
+
+        # 2. Inherit base document metadata (base metadata first, chunk metadata overrides)
+        chunk.metadata = {**meta, **chunk.metadata}
+
+        # 3. Locate chunk start position in original markdown text
         snippet = chunk.page_content[:50].strip()
-        if snippet:
-            idx = markdown.find(snippet, search_start)
-            if idx != -1:
-                search_start = idx
-            else:
-                idx = search_start
+        idx = markdown.find(snippet, search_start) if snippet else search_start
+        if idx != -1:
+            search_start = idx
         else:
             idx = search_start
 
-        deepest_header = (
-            chunk.metadata.get("Header 4")
-            or chunk.metadata.get("Header 3")
-            or chunk.metadata.get("Header 2")
-            or chunk.metadata.get("Header 1")
-        )
+        # 4. Resolve locator & pagination based on structural markers
+        deepest_header = _get_deepest_header(chunk.metadata)
 
         if slide_matches:
+            # PowerPoint presentations track slide numbers
             current_slide = 1
             for sm in slide_matches:
                 if sm.start() <= idx:
@@ -90,43 +93,25 @@ def markdown_chunker(
             chunk.metadata["page_number"] = current_slide
             chunk.metadata["locator"] = f"Slide {current_slide}"
         elif page_breaks:
+            # Paginated documents (PDF, Word) track physical page breaks
             page_num = 1 + sum(1 for pb in page_breaks if pb < idx)
             chunk.metadata["page_number"] = page_num
             chunk.metadata["locator"] = f"Page {page_num}"
         else:
-            if deepest_header:
-                chunk.metadata["locator"] = deepest_header
-            if not is_excel:
-                chunk.metadata["page_number"] = 1
-
-    if metadata:
-        for chunk in chunks:
-            chunk.metadata.update(metadata)
-
-    # For Excel: explicitly remove page_number as requested
-    if is_excel:
-        for chunk in chunks:
+            # Unpaginated documents (Excel, Web, Plain Markdown) rely on section headers
             chunk.metadata.pop("page_number", None)
-            if "locator" not in chunk.metadata:
-                deepest = (
-                    chunk.metadata.get("Header 3")
-                    or chunk.metadata.get("Header 2")
-                    or chunk.metadata.get("Header 1")
-                )
-                if deepest:
-                    chunk.metadata["locator"] = deepest
+            chunk.metadata["locator"] = deepest_header or meta.get("file_name", "Document")
 
-    # Clean up page break and slide number tags inside chunk contents
-    for chunk in chunks:
+        # 5. Sanitize internal locator tags from chunk page_content
         chunk.page_content = re.sub(
-            r"<!--\s*page\s*break\s*-->\s*", "\n\n", chunk.page_content, flags=re.IGNORECASE
-        )
-        chunk.page_content = re.sub(
-            r"<!--\s*Slide\s*number:\s*\d+\s*-->\s*", "\n\n", chunk.page_content, flags=re.IGNORECASE
-        )
-        chunk.page_content = chunk.page_content.strip()
+            r"<!--\s*(?:page\s*break|Slide\s*number:\s*\d+)\s*-->\s*",
+            "\n\n",
+            chunk.page_content,
+            flags=re.IGNORECASE,
+        ).strip()
 
-    return chunks
+    # Filter out empty ghost chunks that only contained stripped locator tags
+    return [c for c in chunks if c.page_content]
 
 
 def recursive_chunker(
