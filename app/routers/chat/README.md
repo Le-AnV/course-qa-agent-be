@@ -11,10 +11,10 @@ SSE streaming chat endpoint + agent orchestration. Prefix: `/api/chat`.
 | AI-67 | Internet Source Agent | Unassigned | To Do |
 | AI-69 | Chat Processing Status & System Errors | Unassigned | To Do |
 
-**Flow (TECHSTACK §3.1):**
-1. Embed query → Qdrant top-k **filtered by student's class** (student cannot pick class).
-2. LangChain Agent (Gemini): score ≥ threshold (default 0.8) → answer from KB; score < threshold → `web_search` tool.
-3. **Always returns a result, 100% confident** — internet sources carry a separate label.
-4. Stream via SSE; keep query language (vi→vi, en→en).
+**AI-61 document-only chat flow:**
+1. Embed the query and retrieve up to 20 chunks from Qdrant, filtered by the requested class; the API verifies the caller's class access.
+2. Keep only indexed documents and rerank candidates with the configured multilingual Cross Encoder.
+3. Send the best five chunks to one grounded Gemini answer stream. The answer prompt requires an abstention when the selected passages do not support the answer.
+4. Stream retrieval/generation progress stages, answer tokens, and citations via SSE; preserve the query language.
 
-**Key notes:** threshold configurable in E8 (AI-107); web_search provider TBD from mentor — stub it meanwhile (TECHSTACK §7.4). Core logic in `services/rag_service.py`.
+The streaming AI-61 endpoint does not search the web. AI-65's separate source-routing service and AI-67's Internet provider remain outside this document-only chat path. The Cross Encoder model is downloaded on first use and cached in the Compose `reranker_cache` volume.

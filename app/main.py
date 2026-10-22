@@ -15,6 +15,7 @@ from app.core.deps import get_db
 from app.core.seed import seed_database
 from app.routers.admin.router import router as admin_router
 from app.routers.auth.router import router as auth_router
+from app.routers.chat.router import router as chat_router
 from app.routers.class_config import router as class_config_router
 from app.routers.documents import router as documents_router
 from app.routers.history import router as history_router
@@ -58,6 +59,7 @@ app.add_middleware(
 # Per-Epic routers land here as sprints progress.
 app.include_router(auth_router)
 app.include_router(admin_router)
+app.include_router(chat_router)
 app.include_router(class_config_router)
 app.include_router(documents_router)
 app.include_router(history_router)

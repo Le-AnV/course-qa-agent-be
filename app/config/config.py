@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     # Model configuration
     embedding_model: str = Field(default="gemini-embedding-2", validation_alias="EMBEDDING_MODEL")
     embedding_device: str | None = Field(default=None, validation_alias="EMBEDDING_DEVICE")
+    reranker_model: str = Field(
+        default="cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+        validation_alias="RERANKER_MODEL",
+    )
 
     llm_model: ClassVar[str] = "models/gemini-3.8-flash"
     llm_temperature: float = Field(default=1.0, validation_alias="LLM_TEMPERATURE")
