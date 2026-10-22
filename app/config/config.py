@@ -47,7 +47,7 @@ class Settings(BaseSettings):
         separators: List of string separators used for recursive character splitting.
         headers_to_split_on: List of tuples specifying markdown headers to split on.
         retriever_top_k: Default number of relevant chunks retrieved per query.
-        prompt_file: File path pointing to prompt.yaml.
+        prompt_file: File path or directory pointing to prompt templates.
         log_level: Logging verbosity level (DEBUG, INFO, WARNING, ERROR).
     """
 
@@ -167,7 +167,7 @@ class Settings(BaseSettings):
 
     # Prompt configuration
     prompt_file: Path = Field(
-        default=Path(__file__).resolve().parent / "prompt.yaml",
+        default=Path(__file__).resolve().parent / "prompts",
         validation_alias="PROMPT_FILE",
     )
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")

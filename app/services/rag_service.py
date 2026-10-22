@@ -488,7 +488,12 @@ def _generate(
 
 
 def _format_prompt(prompt_name: str, context: str, question: str) -> tuple[str, str]:
-    prompt = get_prompt_manager().format(prompt_name, context=context, question=question)
+    prompt = get_prompt_manager().format(
+        prompt_name,
+        chunk=context,
+        context=context,
+        question=question,
+    )
     return str(prompt["system-prompt"]), str(prompt["user-prompt"])
 
 
