@@ -41,9 +41,11 @@ services:
       DATABASE_URL: postgresql+psycopg://qa:qa@postgres:5432/course_qa
       QDRANT_URL: http://qdrant:6333
       DOCUMENT_STORAGE_DIR: /app/storage/documents
+      HF_HOME: /app/model-cache
       CORS_ORIGINS: '["http://localhost:3000","http://localhost:3100","http://127.0.0.1:3000","http://127.0.0.1:3100"]'
     volumes:
       - document_storage:/app/storage
+      - reranker_cache:/app/model-cache
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,3 +78,5 @@ volumes:
     name: course-qa-agent_pgadmin_data
   document_storage:
     name: course-qa-agent_document_storage
+  reranker_cache:
+    name: course-qa-agent_reranker_cache
