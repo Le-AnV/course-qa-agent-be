@@ -25,6 +25,14 @@ class CourseRead(BaseModel):
 
 
 # --- Classes (standalone: class IS the subject) ---
+class ClassPrerequisiteRead(BaseModel):
+    """A class that must be passed before joining this one."""
+
+    id: uuid.UUID
+    code: str
+    name: str
+
+
 class ClassCreate(BaseModel):
     code: str = Field(min_length=1, max_length=50)
     # ERD: class.trainer_id NOT NULL — trainer required at creation.
@@ -34,6 +42,12 @@ class ClassCreate(BaseModel):
     academic_year: str = Field(default="2026", max_length=20)
     # Manual credits entered at class creation; hard-capped 20/semester at enrollment.
     credits: int = Field(default=3, ge=1, le=6)
+    # Subjects a student must have passed before joining this class.
+    prerequisite_class_ids: list[uuid.UUID] = []
+
+
+class ClassPrerequisiteUpdate(BaseModel):
+    prerequisite_class_ids: list[uuid.UUID] = []
 
 
 class ClassAssign(BaseModel):
@@ -69,6 +83,8 @@ class ClassRead(BaseModel):
     # AC-12: delete warning data.
     document_count: int = 0
     ticket_count: int = 0
+    # Subjects a student must have passed before joining this class.
+    prerequisites: list[ClassPrerequisiteRead] = []
 
     model_config = {"from_attributes": True}
 

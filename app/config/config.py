@@ -57,9 +57,13 @@ class Settings(BaseSettings):
     cors_origins: list[str] = [
         "http://localhost:3000",
         "http://localhost:3001",
+        "http://localhost:3100",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
+        "http://127.0.0.1:3100",
     ]
+    # Optional regex for extra dev origins; local defaults to any localhost port.
+    cors_origin_regex: str | None = None
     database_url: str = "postgresql+psycopg://qa:qa@localhost:5432/course_qa"
 
     # Vector store configuration

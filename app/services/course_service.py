@@ -15,7 +15,15 @@ import uuid
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.models.course import Class, ClassConfig, ClassInfo, ClassTrainer, Course, Enrollment
+from app.models.course import (
+    Class,
+    ClassConfig,
+    ClassInfo,
+    ClassPrerequisite,
+    ClassTrainer,
+    Course,
+    Enrollment,
+)
 from app.models.user import Role, User
 
 
@@ -100,6 +108,7 @@ def create_class(
     semester: str = "S1",
     academic_year: str = "2026",
     credits: int = 3,
+    prerequisite_class_ids: list[uuid.UUID] | None = None,
 ) -> Class:
     """Create a standalone class (the class IS the subject — no course binding).
 
@@ -122,6 +131,7 @@ def create_class(
     trainer = db.query(User).filter(User.id == tid).first()
     if trainer is None:
         raise DomainError("Trainer account does not exist.")
+    prereq_ids = _validate_prerequisite_ids(db, prerequisite_class_ids, class_id=None)
     section = Class(
         trainer_id=tid,
         code=code,
@@ -131,6 +141,9 @@ def create_class(
         credits=credits,
     )
     db.add(section)
+    db.flush()
+    for pid in prereq_ids:
+        db.add(ClassPrerequisite(class_id=section.id, prerequisite_class_id=pid))
     db.commit()
     db.refresh(section)
     return section
@@ -617,6 +630,109 @@ def check_credit_cap(db: Session, student_id: uuid.UUID | str, section: Class) -
             f"Exceeds {MAX_SEMESTER_CREDITS} credits per semester "
             f"(currently {total}, class is {section.credits})."
         )
+
+
+def _validate_prerequisite_ids(
+    db: Session,
+    ids: list[uuid.UUID] | None,
+    class_id: uuid.UUID | None,
+) -> list[uuid.UUID]:
+    """Dedupe; reject self-reference and unknown classes."""
+    out: list[uuid.UUID] = []
+    for raw in ids or []:
+        pid = _coerce_uuid(raw)
+        if class_id is not None and pid == class_id:
+            raise DomainError("A class cannot be its own prerequisite.")
+        if pid not in out:
+            out.append(pid)
+    if not out:
+        return []
+    found = {row[0] for row in db.query(Class.id).filter(Class.id.in_(out)).all()}
+    unknown = [str(pid) for pid in out if pid not in found]
+    if unknown:
+        raise DomainError(f"Prerequisite class not found: {', '.join(unknown)}.")
+    return out
+
+
+def class_prerequisites(db: Session, class_id: uuid.UUID | str) -> list[Class]:
+    cid = _coerce_uuid(class_id)
+    return (
+        db.query(Class)
+        .join(ClassPrerequisite, ClassPrerequisite.prerequisite_class_id == Class.id)
+        .filter(ClassPrerequisite.class_id == cid)
+        .order_by(Class.code)
+        .all()
+    )
+
+
+def set_class_prerequisites(
+    db: Session,
+    class_id: uuid.UUID | str,
+    prerequisite_class_ids: list[uuid.UUID] | None,
+) -> list[Class]:
+    cid = _coerce_uuid(class_id)
+    if get_class(db, cid) is None:
+        raise DomainError("Class does not exist.")
+    ids = _validate_prerequisite_ids(db, prerequisite_class_ids, cid)
+    db.query(ClassPrerequisite).filter(ClassPrerequisite.class_id == cid).delete()
+    for pid in ids:
+        db.add(ClassPrerequisite(class_id=cid, prerequisite_class_id=pid))
+    db.commit()
+    return class_prerequisites(db, cid)
+
+
+def missing_prerequisites(
+    db: Session, student_id: uuid.UUID | str, section: Class
+) -> list[Class]:
+    """Prerequisites of ``section`` the student has not passed yet."""
+    prereqs = class_prerequisites(db, section.id)
+    if not prereqs:
+        return []
+    passed = {
+        row[0]
+        for row in db.query(Enrollment.class_id)
+        .filter(
+            Enrollment.student_id == _coerce_uuid(student_id),
+            Enrollment.result == "PASSED",
+            Enrollment.class_id.in_([p.id for p in prereqs]),
+        )
+        .all()
+    }
+    return [p for p in prereqs if p.id not in passed]
+
+
+def check_prerequisites(
+    db: Session, student_id: uuid.UUID | str, section: Class
+) -> None:
+    missing = missing_prerequisites(db, student_id, section)
+    if missing:
+        names = ", ".join(f"{m.code} — {m.name}" for m in missing)
+        raise DomainError(f"Prerequisites not passed: {names}.")
+
+
+def set_enrollment_result(
+    db: Session,
+    class_id: uuid.UUID | str,
+    student_id: uuid.UUID | str,
+    result: str | None,
+) -> Enrollment:
+    """Trainer marks a term result; PASSED unlocks dependent classes."""
+    if result not in (None, "PASSED", "FAILED"):
+        raise DomainError("Result must be PASSED, FAILED or null.")
+    enr = (
+        db.query(Enrollment)
+        .filter(
+            Enrollment.class_id == _coerce_uuid(class_id),
+            Enrollment.student_id == _coerce_uuid(student_id),
+        )
+        .first()
+    )
+    if enr is None:
+        raise DomainError("Student is not enrolled in this class.")
+    enr.result = result
+    db.commit()
+    db.refresh(enr)
+    return enr
 
 
 def user_display_name(db: Session, user_id: uuid.UUID | str | None) -> str | None:

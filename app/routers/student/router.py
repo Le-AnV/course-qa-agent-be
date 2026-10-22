@@ -44,6 +44,8 @@ class ClassMemberRead(BaseModel):
     username: str
     email: str
     role: str
+    # Trainer-marked term result: null | PASSED | FAILED.
+    result: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -59,10 +61,25 @@ class ClassDocumentRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class PrerequisiteRead(BaseModel):
+    id: uuid.UUID
+    code: str
+    name: str
+
+
+class EnrollmentResultUpdate(BaseModel):
+    """null clears the mark; PASSED unlocks classes requiring this one."""
+
+    result: str | None = None
+
+
 class CatalogClassRead(StudentClassRead):
     """One class in the catalog plus the caller's relation to it."""
 
     my_status: str = "none"  # active | pending | none
+    # Prerequisites the caller has not passed yet; empty means unlocked.
+    blocked_prerequisites: list[PrerequisiteRead] = []
+    can_request: bool = True
 
 
 class JoinRequestRead(BaseModel):
@@ -214,15 +231,23 @@ def class_members(
             )
         )
     students = (
-        db.query(User)
+        db.query(User, Enrollment)
         .join(Enrollment, Enrollment.student_id == User.id)
         .filter(Enrollment.class_id == section.id, Enrollment.status == "ACTIVE")
         .order_by(User.full_name)
         .all()
     )
-    for s in students:
+    for s, enr in students:
         role = (user_service.role_name_of(s) or "STUDENT").lower()
-        out.append(ClassMemberRead(id=s.id, username=s.full_name, email=s.email, role=role))
+        out.append(
+            ClassMemberRead(
+                id=s.id,
+                username=s.full_name,
+                email=s.email,
+                role=role,
+                result=enr.result,
+            )
+        )
     return out
 
 
@@ -306,6 +331,8 @@ def catalog(
         db.query(Class).filter(Class.status != "ARCHIVED").order_by(Class.code).all()
     )
     out: list[CatalogClassRead] = []
+    from app.services import course_service
+
     for section in sections:
         enr = _enrollment_of(db, user.id, section.id)
         if enr is not None and enr.status == "ACTIVE":
@@ -316,8 +343,23 @@ def catalog(
             my_status = "active"
         else:
             my_status = "none"
+        # Only requestable roles are gated; trainers/admin see the catalog as-is.
+        blocked = (
+            course_service.missing_prerequisites(db, user.id, section)
+            if _role_name(db, user).upper() in ("STUDENT", "TEACHING_ASSISTANT")
+            else []
+        )
         base = _to_read(db, section)
-        out.append(CatalogClassRead(**base.model_dump(), my_status=my_status))
+        out.append(
+            CatalogClassRead(
+                **base.model_dump(),
+                my_status=my_status,
+                blocked_prerequisites=[
+                    PrerequisiteRead(id=p.id, code=p.code, name=p.name) for p in blocked
+                ],
+                can_request=not blocked,
+            )
+        )
     return out
 
 
@@ -336,6 +378,12 @@ def request_join(
     section = db.query(Class).filter(Class.id == _coerce_uuid(class_id)).first()
     if section is None or section.status == "ARCHIVED":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found.")
+    from app.services import course_service
+
+    try:
+        course_service.check_prerequisites(db, user.id, section)
+    except course_service.DomainError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     existing = _enrollment_of(db, user.id, section.id)
     if existing is not None and existing.status == "ACTIVE":
         raise HTTPException(
@@ -438,6 +486,7 @@ def approve_request(
     from app.services.course_service import DomainError as CourseDomainError
 
     try:
+        course_service.check_prerequisites(db, sid, section)
         course_service.check_credit_cap(db, sid, section)
         # P5: capacity is a hard gate on approval, not just a display number.
         course_service.check_capacity(db, section.id)
@@ -475,3 +524,43 @@ def reject_request(
     db.delete(enr)
     db.commit()
     return {"rejected": str(sid), "class_id": str(section.id)}
+
+
+@router.patch(
+    "/classes/{class_id}/members/{student_id}/result",
+    response_model=ClassMemberRead,
+)
+def set_member_result(
+    class_id: str,
+    student_id: str,
+    payload: EnrollmentResultUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Mark a member's term result. Trainer only — TAs and admins cannot grade."""
+    from app.services import course_service, user_service
+
+    try:
+        sid = uuid.UUID(str(student_id))
+        cid = uuid.UUID(str(class_id))
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found.")
+    if _role_name(db, user).upper() != "TRAINER" or (
+        cid not in course_service.class_ids_for_trainer(db, user.id)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the class trainer can record results.",
+        )
+    try:
+        enr = course_service.set_enrollment_result(db, cid, sid, payload.result)
+    except course_service.DomainError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    student = db.query(User).filter(User.id == sid).first()
+    return ClassMemberRead(
+        id=sid,
+        username=student.full_name if student else "",
+        email=student.email if student else "",
+        role=(user_service.role_name_of(student) or "STUDENT").lower() if student else "student",
+        result=enr.result,
+    )

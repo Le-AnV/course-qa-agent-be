@@ -19,6 +19,8 @@ from app.schemas.admin import (
     AdminSettingsRead,
     ClassAssign,
     ClassCreate,
+    ClassPrerequisiteRead,
+    ClassPrerequisiteUpdate,
     ClassRead,
     ClassStatusUpdate,
     ClassTrainerAdd,
@@ -74,6 +76,10 @@ def _class_to_read(db: Session, section: Class) -> ClassRead:
         status=section.status or course_service.STATUS_ACTIVE,
         document_count=warnings["document_count"],
         ticket_count=warnings["ticket_count"],
+        prerequisites=[
+            ClassPrerequisiteRead(id=p.id, code=p.code, name=p.name)
+            for p in course_service.class_prerequisites(db, section.id)
+        ],
     )
 
 
@@ -164,6 +170,7 @@ def create_class(payload: ClassCreate, db: Session = Depends(get_db), _=Depends(
             semester=payload.semester,
             academic_year=payload.academic_year,
             credits=payload.credits,
+            prerequisite_class_ids=payload.prerequisite_class_ids,
         )
     except course_service.DomainError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
@@ -176,6 +183,23 @@ def list_classes(
     _=Depends(require_admin),
 ):
     return [_class_to_read(db, s) for s in course_service.list_classes(db)]
+
+
+@router.patch("/classes/{class_id}/prerequisites", response_model=ClassRead)
+def set_class_prerequisites(
+    class_id: uuid.UUID,
+    payload: ClassPrerequisiteUpdate,
+    db: Session = Depends(get_db),
+    _=Depends(require_admin),
+):
+    """Replace the subjects a student must pass before joining this class."""
+    try:
+        course_service.set_class_prerequisites(
+            db, class_id, payload.prerequisite_class_ids
+        )
+    except course_service.DomainError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return _class_to_read(db, course_service.get_class(db, class_id))
 
 
 @router.patch("/classes/{class_id}/assign", response_model=ClassRead)
