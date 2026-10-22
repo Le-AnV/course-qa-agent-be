@@ -5,11 +5,17 @@ import logging
 from langchain_core.embeddings import Embeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from pydantic import SecretStr
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _is_retryable_embedding_error(error: BaseException) -> bool:
+    """Retry transient failures, but fail fast when provider quota is exhausted."""
+    message = str(error).upper()
+    return "RESOURCE_EXHAUSTED" not in message and "QUOTA" not in message
 
 
 class GeminiEmbedding(Embeddings):
@@ -38,6 +44,7 @@ class GeminiEmbedding(Embeddings):
         )
 
     @retry(
+        retry=retry_if_exception(_is_retryable_embedding_error),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         stop=stop_after_attempt(5),
         before_sleep=lambda retry_state: logger.warning(
@@ -58,6 +65,7 @@ class GeminiEmbedding(Embeddings):
         return self._embeddings.embed_documents(texts)
 
     @retry(
+        retry=retry_if_exception(_is_retryable_embedding_error),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         stop=stop_after_attempt(5),
         before_sleep=lambda retry_state: logger.warning(

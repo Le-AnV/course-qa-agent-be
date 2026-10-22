@@ -127,6 +127,22 @@ def test_embed_documents_max_retries_exceeded(mock_google_embeddings, mock_sleep
     assert mock_instance.embed_documents.call_count == 5
 
 
+@patch("time.sleep", return_value=None)
+@patch("app.services.embedding.gemini_embedding.GoogleGenerativeAIEmbeddings")
+def test_embed_documents_does_not_retry_exhausted_quota(mock_google_embeddings, mock_sleep):
+    """A minute quota cannot recover on the normal short retry schedule."""
+    mock_instance = mock_google_embeddings.return_value
+    mock_instance.embed_documents.side_effect = Exception(
+        "429 RESOURCE_EXHAUSTED: embedding quota exceeded"
+    )
+    embedder = GeminiEmbedding(api_key="dummy_key", model="dummy_model")
+
+    with pytest.raises(Exception, match="RESOURCE_EXHAUSTED"):
+        embedder.embed_documents(["lesson"])
+
+    assert mock_instance.embed_documents.call_count == 1
+
+
 @patch("app.services.embedding.gemini_embedding.GoogleGenerativeAIEmbeddings")
 def test_embed_documents_empty_list(mock_google_embeddings):
     """Test behavior when passing an empty list of documents."""

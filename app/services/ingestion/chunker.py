@@ -8,6 +8,11 @@ from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharac
 from app.config.config import get_settings
 
 
+def _clean_header_text(text: str) -> str:
+    """Strip markdown formatting (*, _, ~~) and extra whitespace from headers."""
+    return re.sub(r"(\*\*|__|\*|_|~~)", "", text).strip()
+
+
 def markdown_chunker(
     markdown: str,
     metadata: dict | None = None,
@@ -30,10 +35,29 @@ def markdown_chunker(
 
     chunks = markdown_splitter.split_text(markdown)
 
-    # Calculate starting page number for each chunk
+    # 1. Clean markdown formatting in extracted header metadata
+    for chunk in chunks:
+        for k in list(chunk.metadata.keys()):
+            if k.startswith("Header ") and isinstance(chunk.metadata[k], str):
+                chunk.metadata[k] = _clean_header_text(chunk.metadata[k])
+
+    # 2. Check for Slide locators <!-- Slide number: X -->
+    slide_matches = list(
+        re.finditer(r"<!--\s*Slide\s*number:\s*(\d+)\s*-->", markdown, flags=re.IGNORECASE)
+    )
+
+    # 3. Check for Page breaks <!-- page break -->
     page_breaks = [
         m.start() for m in re.finditer(r"<!--\s*page\s*break\s*-->", markdown, flags=re.IGNORECASE)
     ]
+
+    is_excel = False
+    if metadata:
+        file_type = str(metadata.get("type", "") or metadata.get("file_type", "")).lower()
+        file_name = str(metadata.get("file_name", "")).lower()
+        if file_type in ("excel", "xlsx", "xls") or file_name.endswith((".xlsx", ".xls")):
+            is_excel = True
+
     search_start = 0
 
     for chunk in chunks:
@@ -48,18 +72,59 @@ def markdown_chunker(
         else:
             idx = search_start
 
-        page_num = 1 + sum(1 for pb in page_breaks if pb < idx)
-        chunk.metadata["page_number"] = page_num
+        deepest_header = (
+            chunk.metadata.get("Header 4")
+            or chunk.metadata.get("Header 3")
+            or chunk.metadata.get("Header 2")
+            or chunk.metadata.get("Header 1")
+        )
+
+        if slide_matches:
+            current_slide = 1
+            for sm in slide_matches:
+                if sm.start() <= idx:
+                    current_slide = int(sm.group(1))
+                else:
+                    break
+            chunk.metadata["slide_number"] = current_slide
+            chunk.metadata["page_number"] = current_slide
+            chunk.metadata["locator"] = f"Slide {current_slide}"
+        elif page_breaks:
+            page_num = 1 + sum(1 for pb in page_breaks if pb < idx)
+            chunk.metadata["page_number"] = page_num
+            chunk.metadata["locator"] = f"Page {page_num}"
+        else:
+            if deepest_header:
+                chunk.metadata["locator"] = deepest_header
+            if not is_excel:
+                chunk.metadata["page_number"] = 1
 
     if metadata:
         for chunk in chunks:
             chunk.metadata.update(metadata)
 
-    # Clean up page break tags inside chunk contents
+    # For Excel: explicitly remove page_number as requested
+    if is_excel:
+        for chunk in chunks:
+            chunk.metadata.pop("page_number", None)
+            if "locator" not in chunk.metadata:
+                deepest = (
+                    chunk.metadata.get("Header 3")
+                    or chunk.metadata.get("Header 2")
+                    or chunk.metadata.get("Header 1")
+                )
+                if deepest:
+                    chunk.metadata["locator"] = deepest
+
+    # Clean up page break and slide number tags inside chunk contents
     for chunk in chunks:
         chunk.page_content = re.sub(
             r"<!--\s*page\s*break\s*-->\s*", "\n\n", chunk.page_content, flags=re.IGNORECASE
         )
+        chunk.page_content = re.sub(
+            r"<!--\s*Slide\s*number:\s*\d+\s*-->\s*", "\n\n", chunk.page_content, flags=re.IGNORECASE
+        )
+        chunk.page_content = chunk.page_content.strip()
 
     return chunks
 

@@ -13,11 +13,19 @@ from qdrant_client.http.models import (
     MatchValue,
     VectorParams,
 )
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import RetryError, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _is_retryable_qdrant_error(error: BaseException) -> bool:
+    """Retry Qdrant failures without multiplying embedding retries."""
+    if isinstance(error, RetryError):
+        return False
+    message = str(error).upper()
+    return "RESOURCE_EXHAUSTED" not in message and "QUOTA" not in message
 
 
 def delete_points_by_document_id(
@@ -46,7 +54,12 @@ def delete_points_by_document_id(
         return 0
 
     selector = Filter(
-        must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))]
+        must=[
+            FieldCondition(
+                key="metadata.document_id",
+                match=MatchValue(value=document_id),
+            )
+        ]
     )
     found = client.count(collection_name=collection_name, count_filter=selector, exact=True).count
     client.delete(collection_name=collection_name, points_selector=selector, wait=True)
@@ -110,6 +123,7 @@ class QdrantStore:
             )
 
     @retry(
+        retry=retry_if_exception(_is_retryable_qdrant_error),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         stop=stop_after_attempt(5),
         before_sleep=lambda retry_state: logger.warning(
@@ -153,6 +167,50 @@ class QdrantStore:
         """
         k = k or settings.retriever_top_k
         return self.vector_store.similarity_search(query, k=k)
+
+    @retry(
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(5),
+        before_sleep=lambda retry_state: logger.warning(
+            "Retrying Qdrant scored search... Attempt %s. Error: %s",
+            retry_state.attempt_number,
+            getattr(retry_state.outcome, "exception", lambda: None)() or "unknown error",
+        ),
+    )
+    def similarity_search_with_score(
+        self,
+        query: str,
+        k: int | None = None,
+        *,
+        class_id: str | None = None,
+    ) -> list[tuple[Document, float]]:
+        """Return ``(chunk, score)`` pairs so callers can apply a threshold.
+
+        AI-65 (AC-01): retrieval always runs class-scoped. The ``class_id``
+        payload filter matches ``build_qdrant_payload``, so a student can
+        never retrieve another class's material. The score is the Qdrant
+        cosine similarity for the configured collection.
+
+        Args:
+            query (str): The natural-language question.
+            k (int | None): Number of chunks to return. Defaults to settings.retriever_top_k.
+            class_id (str | None): Only return chunks of this class when provided.
+
+        Returns:
+            list[tuple[Document, float]]: Chunks paired with their similarity score.
+        """
+        k = k or settings.retriever_top_k
+        query_filter = None
+        if class_id:
+            query_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.class_id",
+                        match=MatchValue(value=str(class_id)),
+                    )
+                ]
+            )
+        return self.vector_store.similarity_search_with_score(query, k=k, filter=query_filter)
 
     def as_retriever(self, **kwargs):
         """Get the underlying Qdrant vector store as a LangChain retriever.

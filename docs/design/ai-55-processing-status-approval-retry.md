@@ -31,20 +31,21 @@ Upload → pending → Approve → processing → indexed
 
 ### Backend
 
-- `DOCUMENT_STORAGE_DIR` configures persistent storage. Docker Compose mounts `/app/storage/documents`; local development uses the configured local storage directory. Stored paths are resolved and checked against the storage root.
-- `document_service` validates and persists uploads, assigns versions, enforces status transitions, and handles source/vector cleanup for deletion and replacement.
-- The documents API provides approve, reject, and retry actions. Actions require authentication, class access, and uploader ownership. Approval and retry schedule `ingestion_service.process_document_in_background`.
-- `ingestion_service` delegates extraction to the shared AI-49 document loader, cleans and chunks the text, adds locator and document metadata, embeds with Gemini, and stores chunks in Qdrant.
+- `app/config/config.py` adds `DOCUMENT_STORAGE_DIR` (default `/app/storage/documents`). Docker Compose mounts persistent storage so original uploads survive container recreation; local development uses the configured local storage directory. Stored paths are resolved and checked against the storage root.
+- `app/services/document_service.py` validates and persists uploads, assigns versions, enforces the status transitions, and handles source/vector cleanup for deletion and replacement.
+- `app/routers/documents/router.py` provides approve, reject, and retry actions. Each checks authentication, assigned class access, and uploader ownership. Approval and retry schedule `ingestion_service.process_document_in_background` after the HTTP response returns.
+- `app/services/ingestion_service.py` delegates extraction to the shared AI-49 document loader, cleans and chunks the text, adds locator and document metadata, embeds with Gemini, and stores chunks in Qdrant.
 - Before writing chunks, ingestion purges existing vectors for that `document_id`; retries therefore replace that document's chunks instead of adding duplicates. If a document is deleted or cancelled during vector writing, the new vectors are purged where possible.
-- On success, the service marks the document `indexed` and supersedes older versions. On failure, it removes partial vectors where possible, marks the active processing record `failed`, and records a sanitized, actionable reason. Provider details remain in backend logs.
+- On success, the service marks the document `indexed` and supersedes older versions. On failure, it removes partial vectors where possible, marks the document `failed`, and `_failure_reason` maps known failures to actionable messages: Gemini embedding quota, missing stored file, and Qdrant unavailability. Unknown failures get a short generic message; provider details remain in backend logs.
+- `app/models/document.py` and migration `0013_document_failure_reason.py` persist the nullable `failure_reason` field. `DocumentRead` returns it to the UI.
 - At startup, documents left in `processing` are marked `failed` with a retry message. This recovery assumes one backend instance; FastAPI `BackgroundTasks` is not a durable job queue.
 
 ### Frontend
 
-- `features/documents/class-materials.tsx` displays status and provides Approve/Reject for pending documents and Retry for failed documents.
-- Processing rows show three animated green dots. The list polls every three seconds while processing documents exist, including when pagination or a status filter would otherwise hide them.
-- Failed rows expose the failure reason in a tooltip and accessible text.
-- `lib/documents.ts` calls the document actions and maps `failure_reason` into the frontend document model.
+- `features/documents/class-materials.tsx` displays document status and provides Approve/Reject for pending documents and Retry for failed documents.
+- While any listed document is `processing`, the list polls every three seconds, including when pagination or a status filter would otherwise hide processing rows. Processing rows show three animated green dots.
+- Failed rows show the failure reason in a tooltip and accessible text.
+- `lib/documents.ts` calls the approval, rejection, and retry endpoints and maps `failure_reason` into the frontend document model.
 
 ## 4. API actions
 
@@ -79,9 +80,10 @@ Jira describes the successful processing state as **Done**; the API and database
 
 ## 7. Operational notes
 
-- Processing uses FastAPI `BackgroundTasks`. If the backend restarts during processing, startup recovery marks the document failed so a trainer can retry. Multi-instance deployment would need durable jobs or processing leases.
-- Gemini quota exhaustion is reported as a friendly failure reason. Retrying before quota is available again can fail again.
+- Processing uses FastAPI `BackgroundTasks`. If the backend restarts during processing, startup recovery marks the document failed so a trainer can retry. Multi-instance deployment would need durable jobs or processing leases; a persistent worker queue would be a separate reliability enhancement if required for deployment.
+- Gemini quota exhaustion is reported as a friendly failure reason. Retrying while the provider quota is still exhausted fails again; retry after quota reset or configure a key with available quota.
 - Only documents processed after approval have vectors in Qdrant; pending and rejected uploads are not ingested.
+- A document in `indexed` status means its chunks were written successfully to Qdrant; to verify Q&A, ask a question whose answer appears in that document and confirm the response cites it.
 
 ## 8. Focused test commands
 
@@ -89,6 +91,8 @@ Run from `course-qa-agent-be`:
 
 ```powershell
 python -m pytest --basetemp=.pytest-base-ai55-merge tests/services/ingestion/loader/test_excel_loader.py tests/services/ingestion/test_ingestion_service.py tests/services/vector_store/test_qdrant_store.py -q
+uv run pytest tests/test_documents.py tests/services/ingestion/test_ingestion_service.py -q
+uv run ruff check app/services/ingestion_service.py app/services/document_service.py app/routers/documents/router.py tests/test_documents.py tests/services/ingestion/test_ingestion_service.py
 ```
 
 For frontend document tests, run from `course-qa-agent-fe`:
@@ -96,3 +100,5 @@ For frontend document tests, run from `course-qa-agent-fe`:
 ```powershell
 npm run test
 ```
+
+For a UI smoke check, upload a small supported document, approve it, observe `Processing` and the animated indicator, then confirm it becomes `Indexed`. To check failure handling, use a controlled provider failure and confirm the UI shows the failure reason and Retry action. Avoid deliberately exhausting a shared API quota.

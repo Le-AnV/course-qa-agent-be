@@ -5,7 +5,22 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain_core.documents import Document
 
+from app.config import settings
 from app.services.vector_store.qdrant_store import QdrantStore, delete_points_by_document_id
+
+
+def _embedding_retry_error():
+    from tenacity import RetryError, retry, stop_after_attempt, wait_none
+
+    @retry(stop=stop_after_attempt(1), wait=wait_none())
+    def fail():
+        raise RuntimeError("embedding failed")
+
+    try:
+        fail()
+    except RetryError as error:
+        return error
+    raise AssertionError("Expected retry error")
 
 
 @patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
@@ -57,6 +72,41 @@ def test_qdrant_store_add_documents_retry(mock_qdrant_client, mock_qdrant_vector
 
     assert result == ["id1"]
     assert mock_vector_store_instance.add_documents.call_count == 2
+
+
+@patch("time.sleep", return_value=None)
+@patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
+@patch("app.services.vector_store.qdrant_store.QdrantClient")
+def test_qdrant_store_does_not_retry_embedding_retry_error(
+    mock_qdrant_client, mock_qdrant_vector_store, mock_sleep
+):
+    """Qdrant must not multiply retries already exhausted by the embedder."""
+    mock_qdrant_client.return_value.collection_exists.return_value = True
+    mock_store = mock_qdrant_vector_store.return_value
+    mock_store.add_documents.side_effect = _embedding_retry_error()
+    store = QdrantStore(embeddings=MagicMock(), url="dummy", collection_name="dummy")
+
+    with pytest.raises(Exception, match="RetryError"):
+        store.add_documents([Document(page_content="lesson")])
+
+    assert mock_store.add_documents.call_count == 1
+
+
+@patch("time.sleep", return_value=None)
+@patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
+@patch("app.services.vector_store.qdrant_store.QdrantClient")
+def test_qdrant_store_does_not_retry_embedding_quota_error(
+    mock_qdrant_client, mock_qdrant_vector_store, mock_sleep
+):
+    mock_qdrant_client.return_value.collection_exists.return_value = True
+    mock_store = mock_qdrant_vector_store.return_value
+    mock_store.add_documents.side_effect = Exception("429 RESOURCE_EXHAUSTED: quota exceeded")
+    store = QdrantStore(embeddings=MagicMock(), url="dummy", collection_name="dummy")
+
+    with pytest.raises(Exception, match="RESOURCE_EXHAUSTED"):
+        store.add_documents([Document(page_content="lesson")])
+
+    assert mock_store.add_documents.call_count == 1
 
 
 @patch("time.sleep", return_value=None)
@@ -156,7 +206,7 @@ def test_delete_points_by_document_id_purges_matching_chunks():
     assert removed == 3
     assert client.count.call_args.kwargs["collection_name"] == "test_col"
     selector = client.delete.call_args.kwargs["points_selector"]
-    assert selector.must[0].key == "document_id"
+    assert selector.must[0].key == "metadata.document_id"
     assert selector.must[0].match.value == "doc-1"
     assert client.delete.call_args.kwargs["wait"] is True
 
@@ -194,9 +244,21 @@ def test_delete_points_by_document_id_against_real_qdrant_semantics():
     client.upsert(
         collection_name="test_col",
         points=[
-            PointStruct(id=1, vector=[0.1, 0.2], payload={"document_id": "doc-1"}),
-            PointStruct(id=2, vector=[0.3, 0.4], payload={"document_id": "doc-1"}),
-            PointStruct(id=3, vector=[0.5, 0.6], payload={"document_id": "doc-2"}),
+            PointStruct(
+                id=1,
+                vector=[0.1, 0.2],
+                payload={"metadata": {"document_id": "doc-1"}},
+            ),
+            PointStruct(
+                id=2,
+                vector=[0.3, 0.4],
+                payload={"metadata": {"document_id": "doc-1"}},
+            ),
+            PointStruct(
+                id=3,
+                vector=[0.5, 0.6],
+                payload={"metadata": {"document_id": "doc-2"}},
+            ),
         ],
     )
 
@@ -211,4 +273,50 @@ def test_delete_points_by_document_id_against_real_qdrant_semantics():
     # Only the other document's chunk survives (AC-02: no answers from doc-1).
     remaining = client.count(collection_name="test_col", exact=True).count
     assert remaining == 1
-    assert [p.payload["document_id"] for p in client.scroll("test_col")[0]] == ["doc-2"]
+    assert [p.payload["metadata"]["document_id"] for p in client.scroll("test_col")[0]] == [
+        "doc-2"
+    ]
+
+
+@patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
+@patch("app.services.vector_store.qdrant_store.QdrantClient")
+def test_similarity_search_with_score_forwards_class_filter(
+    mock_qdrant_client, mock_qdrant_vector_store
+):
+    """AI-65 (AC-01): scored retrieval is filtered to the caller's class."""
+
+    mock_client_instance = mock_qdrant_client.return_value
+    mock_client_instance.collection_exists.return_value = True
+    mock_vector_store_instance = mock_qdrant_vector_store.return_value
+    expected = [(Document(page_content="chunk"), 0.87)]
+    mock_vector_store_instance.similarity_search_with_score.return_value = expected
+
+    store = QdrantStore(embeddings=MagicMock(), url="dummy", collection_name="dummy")
+    result = store.similarity_search_with_score("question", k=5, class_id="class-1")
+
+    assert result == expected
+    kwargs = mock_vector_store_instance.similarity_search_with_score.call_args.kwargs
+    assert kwargs["k"] == 5
+    selector = kwargs["filter"]
+    assert selector.must[0].key == "metadata.class_id"
+    assert selector.must[0].match.value == "class-1"
+
+
+@patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
+@patch("app.services.vector_store.qdrant_store.QdrantClient")
+def test_similarity_search_with_score_without_class_has_no_filter(
+    mock_qdrant_client, mock_qdrant_vector_store
+):
+    """Admin-wide retrieval may omit the class filter; chunks still carry metadata."""
+
+    mock_client_instance = mock_qdrant_client.return_value
+    mock_client_instance.collection_exists.return_value = True
+    mock_vector_store_instance = mock_qdrant_vector_store.return_value
+    mock_vector_store_instance.similarity_search_with_score.return_value = []
+
+    store = QdrantStore(embeddings=MagicMock(), url="dummy", collection_name="dummy")
+    store.similarity_search_with_score("question")
+
+    kwargs = mock_vector_store_instance.similarity_search_with_score.call_args.kwargs
+    assert kwargs["filter"] is None
+    assert kwargs["k"] == settings.retriever_top_k

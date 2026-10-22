@@ -7,16 +7,12 @@ generate semantic descriptions, and seamlessly integrate them back into Markdown
 import base64
 import re
 from io import BytesIO
-from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from PIL import Image
 
-try:
-    from app.generation.prompt_manager import PromptManager
-except ImportError:  # pragma: no cover
-    PromptManager = Any  # type: ignore[assignment, misc]
+from app.core.prompt_manager import PromptManager
 
 
 def encode_image(img: Image.Image) -> str:

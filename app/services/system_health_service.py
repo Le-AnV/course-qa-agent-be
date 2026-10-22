@@ -107,7 +107,7 @@ def _check_llm_config(config: Settings) -> ComponentHealth:
 def _check_llm_live(config: Settings) -> ComponentHealth:
     """Live LLM probe: key present and the configured model is reachable."""
 
-    from app.services.llm_service import (
+    from app.services.llm import (
         LlmConfigurationError,
         LlmConnectionError,
         check_llm_connection,

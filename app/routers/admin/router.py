@@ -33,20 +33,22 @@ from app.schemas.admin import (
     ImportBatchDetail,
     ImportBatchRead,
     ImportRowRead,
+    RetrievalConfigRead,
+    RetrievalConfigUpdate,
     TestEmailRequest,
     UserCreate,
     UserDeactivate,
     UserRead,
 )
 from app.schemas.system_health import SystemHealthRead
-from app.services import course_service, email_service, import_service, user_service
+from app.services import course_service, email_service, import_service, rag_service, user_service
 from app.services.admin_settings_service import build_admin_settings
 from app.services.email_service import (
     EmailConfigurationError,
     EmailDeliveryError,
     send_test_email,
 )
-from app.services.llm_service import (
+from app.services.llm import (
     LlmConfigurationError,
     LlmConnectionError,
     check_llm_connection,
@@ -514,6 +516,32 @@ def test_llm_connection(_=Depends(require_admin)):
         return check_llm_connection(settings)
     except (LlmConfigurationError, LlmConnectionError) as error:
         return ConnectionTestResult(success=False, message=str(error))
+
+
+# --- AI-65 retrieval score threshold (T35: admin-configurable, not hardcoded) ---
+@router.get("/retrieval-config", response_model=RetrievalConfigRead)
+def read_retrieval_config(db: Session = Depends(get_db), _=Depends(require_admin)):
+    """Return the active KB-vs-Internet threshold and its documented default."""
+
+    return RetrievalConfigRead(**rag_service.retrieval_threshold_config(db))
+
+
+@router.patch("/retrieval-config", response_model=RetrievalConfigRead)
+def update_retrieval_config(
+    payload: RetrievalConfigUpdate,
+    db: Session = Depends(get_db),
+    _=Depends(require_admin),
+):
+    """Persist a new threshold; the next question uses it (AI-65 AC-05)."""
+
+    try:
+        rag_service.save_retrieval_threshold(db, payload.threshold)
+    except rag_service.RetrievalThresholdError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+    return RetrievalConfigRead(**rag_service.retrieval_threshold_config(db))
 
 
 @router.post("/email/test", response_model=ConnectionTestResult)

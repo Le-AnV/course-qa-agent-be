@@ -5,14 +5,7 @@ from google.genai import errors
 
 from app.config import Settings
 from app.schemas.admin import ConnectionTestResult
-
-
-class LlmConfigurationError(RuntimeError):
-    """Raised when the Gemini API key has not been configured."""
-
-
-class LlmConnectionError(RuntimeError):
-    """Raised when Gemini rejects the request or model configuration."""
+from app.services.llm.exceptions import LlmConfigurationError, LlmConnectionError
 
 
 def check_llm_connection(config: Settings) -> ConnectionTestResult:
@@ -40,3 +33,4 @@ def check_llm_connection(config: Settings) -> ConnectionTestResult:
         success=True,
         message="Gemini connection successful",
     )
+

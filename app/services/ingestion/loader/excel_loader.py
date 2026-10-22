@@ -1,5 +1,4 @@
-"""Syllabus Excel loader - converts the standardized FPT course syllabus
-Excel format into clean Markdown suitable for RAG chunking.
+"""Excel loader - converts syllabus and general workbook data into Markdown.
 
 The loader uses **section markers in column A** (integer labels 1-12) to
 locate each section dynamically, so it works even when rows shift between
@@ -421,11 +420,64 @@ def _parse_change_history(ws: Worksheet) -> str:
     return "\n".join(parts)
 
 
+def _parse_generic_sheet(ws: Worksheet) -> str:
+    """Convert one ordinary worksheet to row-located Markdown."""
+    rows: list[tuple[int, list[str]]] = []
+    for row_number, values in enumerate(ws.iter_rows(values_only=True), start=1):
+        text_values = [
+            _clean(value).replace("\r", " ").replace("\n", " ").strip() for value in values
+        ]
+        if any(text_values):
+            rows.append((row_number, text_values))
+
+    if len(rows) < 2:
+        return ""
+
+    sheet_name = _clean(ws.title).replace("\r", " ").replace("\n", " ").strip()
+    headers = rows[0][1]
+    sheet_lines = [f"# {sheet_name}"]
+    for row_number, values in rows[1:]:
+        fields = []
+        for index, value in enumerate(values):
+            if not value:
+                continue
+            header = headers[index] if index < len(headers) else ""
+            label = header or f"Column {index + 1}"
+            fields.append(f"{label}: {value}")
+        if fields:
+            sheet_lines.extend(["", f"## {sheet_name}—Row {row_number}", "", *fields])
+
+    return "\n".join(sheet_lines) if len(sheet_lines) > 1 else ""
+
+
+def _has_cover_content(ws: Worksheet) -> bool:
+    cells = [*(f"B{row}" for row in range(11, 16)), "I17", "I18", "I19"]
+    return any(_clean(ws[cell].value) for cell in cells)
+
+
+def _has_syllabus_content(ws: Worksheet) -> bool:
+    has_section_marker = any(_find_section_row(ws, marker) for marker in range(1, 12))
+    has_section_value = any(
+        _clean(ws.cell(row=row, column=column).value)
+        for row in range(1, ws.max_row + 1)
+        for column in range(3, 7)
+    )
+    return has_section_marker and has_section_value
+
+
+def _has_change_history_content(ws: Worksheet) -> bool:
+    return any(
+        _clean(ws.cell(row=row, column=column).value)
+        for row in range(3, ws.max_row + 1)
+        for column in range(2, 7)
+    )
+
+
 # Public API
 
 
 def excel_loader(file_path: str | Path) -> dict[str, Any]:
-    """Load a standardized syllabus Excel file and convert it to Markdown.
+    """Load a syllabus or ordinary Excel workbook and convert it to Markdown.
 
     Handles variations in sheet naming conventions (e.g. ``Syllabus`` vs
     ``L2_PY_PE_Syllabus``) and dynamic row layouts across different syllabi.
@@ -433,17 +485,27 @@ def excel_loader(file_path: str | Path) -> dict[str, Any]:
     Args:
         file_path: Path to the ``.xlsx`` syllabus file.
 
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If the Excel file is empty or contains no readable syllabus text.
+
     Returns:
         Dict with keys ``markdown`` (str), ``metadata`` (dict), and ``images`` (dict).
     """
-    workbook = load_workbook(str(file_path), data_only=True)
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    workbook = load_workbook(str(path), data_only=True)
 
     sections: list[str] = []
+    handled_sheets: set[str] = set()
 
     # Cover
     cover_ws = _find_sheet(workbook, "cover")
-    if cover_ws:
+    if cover_ws and _has_cover_content(cover_ws):
         sections.append(_parse_cover(cover_ws))
+        handled_sheets.add(cover_ws.title)
 
     # Syllabus (match "syllabus" but NOT "schedule")
     syllabus_ws = None
@@ -451,27 +513,45 @@ def excel_loader(file_path: str | Path) -> dict[str, Any]:
         if "syllabus" in name.lower() and "schedule" not in name.lower():
             syllabus_ws = workbook[name]
             break
-    if syllabus_ws:
+    if syllabus_ws and _has_syllabus_content(syllabus_ws):
         sections.append(_parse_syllabus(syllabus_ws))
+        handled_sheets.add(syllabus_ws.title)
 
     # ScheduleDetail
     schedule_ws = _find_sheet(workbook, "schedule")
     if schedule_ws:
-        sections.append(_parse_schedule(schedule_ws))
+        schedule_markdown = _parse_schedule(schedule_ws)
+        if schedule_markdown.strip():
+            sections.append(schedule_markdown)
+            handled_sheets.add(schedule_ws.title)
 
     # Author and Record of Changes
     for name in workbook.sheetnames:
         nl = name.lower()
-        if "author" in nl or "change" in nl or "rec" in nl:
+        if ("author" in nl or "change" in nl or "rec" in nl) and _has_change_history_content(
+            workbook[name]
+        ):
             sections.append(_parse_change_history(workbook[name]))
+            handled_sheets.add(name)
             break
 
-    workbook.close()
+    for worksheet in workbook.worksheets:
+        if worksheet.title not in handled_sheets:
+            generic_markdown = _parse_generic_sheet(worksheet)
+            if generic_markdown.strip():
+                sections.append(generic_markdown)
 
     markdown = "\n\n".join(s for s in sections if s.strip())
+    workbook.close()
+
+    if not markdown.strip():
+        raise ValueError(f"Excel file '{path.name}' is empty or contains no readable text.")
+
+    if not markdown.strip():
+        raise ValueError(f"Excel file '{path.name}' is empty or contains no readable text.")
 
     return {
         "markdown": markdown,
-        "metadata": {"source": str(file_path), "type": "excel"},
+        "metadata": {"source": str(path), "type": "excel"},
         "images": {},
     }
