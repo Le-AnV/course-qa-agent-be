@@ -61,3 +61,17 @@ def test_prompt_manager_loads_default_config_file():
 
     assert "system-prompt" in data
     assert "user-prompt" in data
+
+
+def test_prompt_manager_loads_directory_of_yamls(tmp_path: Path):
+    """Ensure PromptManager merges all yaml files inside a directory."""
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+
+    (prompts_dir / "p1.yaml").write_text("prompt-one:\n  text: 'One'\n", encoding="utf-8")
+    (prompts_dir / "p2.yaml").write_text("prompt-two:\n  text: 'Two'\n", encoding="utf-8")
+
+    manager = PromptManager(prompts_dir)
+    assert manager.get("prompt-one")["text"] == "One"
+    assert manager.get("prompt-two")["text"] == "Two"
+
