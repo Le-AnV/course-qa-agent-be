@@ -10,7 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.core.database import create_all_tables, get_session_local, init_engine
+from app.core.database import get_session_local, init_engine
 from app.core.deps import get_db
 from app.core.seed import seed_database
 from app.routers.admin.router import router as admin_router
@@ -28,10 +28,11 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    # DB tables for E1/AI-31; Postgres/Qdrant checks stay in later epics.
+    # Schema is owned by Alembic (applied by the container entrypoint).
+    # Startup only seeds data — never create/alter tables here, or a new model
+    # silently creates tables without adding columns and drifts from migrations.
     try:
         init_engine(settings.database_url)
-        create_all_tables()
         # Seed initial roles and test users
         SessionLocal = get_session_local(settings.database_url)
         db = SessionLocal()
@@ -42,7 +43,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             db.close()
     except (OSError, SQLAlchemyError) as exc:
         # Never crash boot when the DB is unreachable (e.g. /health in CI).
-        logger.warning("Database unavailable at startup; skipping table creation: %s", exc)
+        logger.warning("Database unavailable at startup; skipping seed: %s", exc)
     yield
 
 
@@ -51,6 +52,13 @@ app = FastAPI(title="Course QA Agent API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
+    # Local dev: any localhost/127.0.0.1 port (Vite/Next on 3000, 3100, ...).
+    allow_origin_regex=settings.cors_origin_regex
+    or (
+        r"^http://(localhost|127\.0\.0\.1)(:\d+)?$"
+        if settings.app_env == "local"
+        else None
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

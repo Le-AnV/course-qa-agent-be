@@ -81,6 +81,19 @@ Volumes keep the monorepo names (`course-qa-agent_postgres_data`,
 `course-qa-agent_qdrant_storage`) so existing data is preserved.
 Stop with `docker compose down` (add `-v` only to wipe data).
 
+### Schema changes & migrations
+
+Schema is owned by Alembic only. The backend container runs
+`alembic upgrade head` on every start (`docker-entrypoint.py`) and exits with a
+clear error if it cannot migrate — startup no longer creates tables.
+
+- After pulling code with new migrations: `docker compose up -d --build` is enough.
+- Running the backend outside Docker: always `uv run alembic upgrade head` first.
+- If a local DB was created by the old `create_all` startup (new tables exist but
+  new columns are missing, or Alembic reports `DuplicateTable`), reset the local
+  volumes once: `docker compose down -v && docker compose up -d --build`
+  (destroys local data; seeding re-creates the demo accounts).
+
 ## Tests
 
 ```bash
