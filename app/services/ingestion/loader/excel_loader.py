@@ -18,6 +18,19 @@ from openpyxl.worksheet.worksheet import Worksheet
 # Helpers
 
 
+EXCEL_ERROR_VALUES = {
+    "#REF!",
+    "#VALUE!",
+    "#N/A",
+    "#DIV/0!",
+    "#NAME?",
+    "#NUM!",
+    "#NULL!",
+    "#SPILL!",
+    "#CALC!",
+}
+
+
 def _clean(value) -> str:
     """Convert a cell value to a clean string."""
     if value is None:
@@ -25,6 +38,8 @@ def _clean(value) -> str:
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d")
     text = str(value).strip()
+    if text.upper() in EXCEL_ERROR_VALUES:
+        return ""
     # Collapse stray tabs left by some Excel exports
     text = text.replace("\t", " ")
     return text
@@ -536,6 +551,8 @@ def excel_loader(file_path: str | Path) -> dict[str, Any]:
             break
 
     for worksheet in workbook.worksheets:
+        if worksheet.sheet_state != "visible":
+            continue
         if worksheet.title not in handled_sheets:
             generic_markdown = _parse_generic_sheet(worksheet)
             if generic_markdown.strip():
@@ -543,9 +560,6 @@ def excel_loader(file_path: str | Path) -> dict[str, Any]:
 
     markdown = "\n\n".join(s for s in sections if s.strip())
     workbook.close()
-
-    if not markdown.strip():
-        raise ValueError(f"Excel file '{path.name}' is empty or contains no readable text.")
 
     if not markdown.strip():
         raise ValueError(f"Excel file '{path.name}' is empty or contains no readable text.")
