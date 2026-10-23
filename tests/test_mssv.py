@@ -101,6 +101,17 @@ def make_xlsx5(rows: list[list[str]]) -> bytes:
     return buf.getvalue()
 
 
+def make_xlsx3(rows: list[list[str]]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["fullname", "email", "type"])
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def test_initials_vietnamese_names():
     assert user_service._initials("Tran Van A") == "TVA"
     assert user_service._initials("Trần Văn A") == "TVA"
@@ -153,13 +164,81 @@ def test_explicit_code_and_duplicates(db_session):
         )
 
 
-def test_no_code_for_staff(db_session):
+def test_staff_gets_staff_code_not_student_code(db_session):
     user, _ = user_service.create_user(db_session, "T", "t@gmail.com", "trainer", None)
     assert user.student_code is None
+    assert user.staff_code is not None
+    assert user.staff_code.startswith("T_")
+    assert user_service.STAFF_CODE_RE.fullmatch(user.staff_code)
     with pytest.raises(user_service.DomainError, match="only for student"):
         user_service.create_user(
             db_session, "T2", "t2@gmail.com", "trainer", None, student_code="T_0001"
         )
+
+
+def test_generate_staff_code_matches_mssv_mechanism(db_session):
+    first = user_service.generate_staff_code(db_session, "Tran Van A")
+    second = user_service.generate_staff_code(db_session, "Tran Van A")
+    assert first.startswith("TVA_")
+    assert second.startswith("TVA_")
+    assert first != second
+    assert user_service.STAFF_CODE_RE.fullmatch(first)
+    assert user_service.STAFF_CODE_RE.fullmatch(second)
+
+
+def test_staff_auto_code_is_unique(db_session):
+    first, _ = user_service.create_user(db_session, "Nguyen Van A", "sa@gmail.com", "trainer", None)
+    second, _ = user_service.create_user(db_session, "Nguyen Van A", "sb@gmail.com", "trainer", None)
+    assert first.staff_code != second.staff_code
+    assert first.staff_code.startswith("NVA_")
+    assert second.staff_code.startswith("NVA_")
+
+
+def test_generate_code_endpoint(api_client):
+    h = admin_headers(api_client)
+    student = api_client.post(
+        "/api/admin/users/generate-code",
+        json={"full_name": "Tran Van A", "role": "student"},
+        headers=h,
+    )
+    assert student.status_code == 200, student.text
+    assert student.json()["code"].startswith("TVA_")
+
+    staff = api_client.post(
+        "/api/admin/users/generate-code",
+        json={"full_name": "Nguyen Van B", "role": "trainer"},
+        headers=h,
+    )
+    assert staff.status_code == 200, staff.text
+    assert staff.json()["code"].startswith("NVB_")
+
+    denied = api_client.post(
+        "/api/admin/users/generate-code",
+        json={"full_name": "Tran Van C", "role": "admin"},
+        headers=h,
+    )
+    assert denied.status_code == 400
+
+
+def test_import_three_column_template_generates_codes(api_client):
+    h = admin_headers(api_client)
+    payload = make_xlsx3(
+        [
+            ["Tran Van A", "auto3s@gmail.com", "student"],
+            ["Nguyen Van B", "auto3t@gmail.com", "trainer"],
+        ]
+    )
+    up = api_client.post("/api/admin/imports", files={"file": ("new.xlsx", payload)}, headers=h)
+    assert up.status_code == 201, up.text
+    body = up.json()
+    assert (body["imported_count"], body["skipped_count"], body["failed_count"]) == (2, 0, 0)
+
+    detail = api_client.get(f"/api/admin/imports/{body['id']}", headers=h).json()
+    by_email = {r["email"]: r for r in detail["rows"]}
+    assert by_email["auto3s@gmail.com"]["student_code"].startswith("TVA_")
+    assert by_email["auto3s@gmail.com"]["staff_code"] is None
+    assert by_email["auto3t@gmail.com"]["student_code"] is None
+    assert by_email["auto3t@gmail.com"]["staff_code"].startswith("NVB_")
 
 
 def test_import_auto_and_explicit_mssv(api_client):
@@ -219,17 +298,20 @@ def test_import_staff_msnv(api_client):
     assert staff_codes["msnv1@gmail.com"] == "FPT01234"
 
 
-def test_template_has_guide_sheet(api_client):
+def test_template_has_two_sheets_and_no_code_columns(api_client):
     from openpyxl import load_workbook
 
     h = admin_headers(api_client)
     tpl = api_client.get("/api/admin/import-template", headers=h)
     assert tpl.status_code == 200
     book = load_workbook(filename=io.BytesIO(tpl.content), read_only=True)
-    assert book.sheetnames[0] == "accounts"
+    assert book.sheetnames == ["accounts", "Hướng dẫn"]
+    accounts = book["accounts"]
+    header = [c for c in next(accounts.iter_rows(values_only=True))]
+    assert header == ["fullname", "email", "type"]
     guide = book["Hướng dẫn"]
-    header = [c for c in next(guide.iter_rows(values_only=True))]
-    assert header[0] == "Cột"
+    guide_header = [c for c in next(guide.iter_rows(values_only=True))]
+    assert guide_header[0] == "Cột"
     texts = " ".join(str(c or "") for row in guide.iter_rows(values_only=True) for c in row)
     assert "mssv" in texts.lower()
     assert "msnv" in texts.lower()
@@ -246,14 +328,15 @@ def test_old_template_rejected(api_client):
     wb.save(buf)
     up = api_client.post("/api/admin/imports", files={"file": ("old.xlsx", buf.getvalue())}, headers=h)
     assert up.status_code == 400
-    assert "fullname, email, type, mssv" in up.json()["detail"]
+    assert "fullname, email, type" in up.json()["detail"]
 
 
 def test_import_service_unit_parse(db_session):
     header, rows = import_service.parse_workbook(import_service.build_template_bytes())
-    assert header == ["fullname", "email", "type", "mssv", "msnv"]
+    assert header == ["fullname", "email", "type"]
     assert len(rows) == 1  # example row only
     assert rows[0]["fullname"] == "Nguyen Van A"
+    assert rows[0]["mssv"] == ""
     assert rows[0]["msnv"] == ""
     assert import_service.validate_row(db_session, rows[0]) is None
 

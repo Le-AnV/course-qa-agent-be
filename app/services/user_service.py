@@ -44,6 +44,7 @@ class DomainError(ValueError):
 
 
 STUDENT_CODE_RE = re.compile(r"^[A-Z]+_[0-9]{4}$")
+STAFF_CODE_RE = STUDENT_CODE_RE
 
 
 def _initials(full_name: str) -> str:
@@ -77,6 +78,25 @@ def generate_student_code(db: Session, full_name: str) -> str:
         if suffix not in taken:
             return f"{prefix}_{suffix}"
     raise DomainError(f"Could not allocate a student code for prefix '{prefix}'.")
+
+
+def generate_staff_code(db: Session, full_name: str) -> str:
+    """Random MSNV as INITIALS_NNNN, mirroring MSSV generation."""
+    prefix = _initials(full_name)
+    like = f"{prefix}_%"
+    existing = [r[0] for r in db.query(User.staff_code).filter(User.staff_code.like(like)).all()]
+    taken = set()
+    for code in existing:
+        m = re.fullmatch(rf"{re.escape(prefix)}_([0-9]{{4}})", code or "")
+        if m:
+            taken.add(m.group(1))
+    if len(taken) >= 10_000:
+        raise DomainError(f"Staff code space exhausted for prefix '{prefix}'.")
+    for _ in range(100):
+        suffix = f"{secrets.randbelow(10_000):04d}"
+        if suffix not in taken:
+            return f"{prefix}_{suffix}"
+    raise DomainError(f"Could not allocate a staff code for prefix '{prefix}'.")
 
 
 def normalize_student_code(raw: str | None) -> str | None:
@@ -165,6 +185,8 @@ def create_user(
         if db.query(User).filter(User.student_code == code).first():
             raise DomainError(f"Student code '{code}' already exists.")
     staff = normalize_staff_code(staff_code)
+    if role != ROLE_STUDENT and staff is None:
+        staff = generate_staff_code(db, username)
     if staff is not None:
         if role == ROLE_STUDENT:
             raise DomainError("Staff code is only for staff accounts.")

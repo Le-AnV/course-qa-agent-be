@@ -38,6 +38,8 @@ from app.schemas.admin import (
     RetrievalConfigRead,
     RetrievalConfigUpdate,
     TestEmailRequest,
+    UserCodeGenerate,
+    UserCodeRead,
     UserCreate,
     UserDeactivate,
     UserRead,
@@ -293,6 +295,25 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), _=Depends(re
     )
     email_service.queue_email(db, user.email, subject, body, user_id=user.id)
     return _user_to_read(db, user)
+
+
+@router.post("/users/generate-code", response_model=UserCodeRead)
+def generate_user_code(
+    payload: UserCodeGenerate, db: Session = Depends(get_db), _=Depends(require_admin)
+):
+    try:
+        role = user_service.normalize_role(payload.role)
+        if role == user_service.ROLE_STUDENT:
+            code = user_service.generate_student_code(db, payload.full_name)
+        elif role in (user_service.ROLE_TRAINER, user_service.ROLE_TA):
+            code = user_service.generate_staff_code(db, payload.full_name)
+        else:
+            raise user_service.DomainError(
+                "Codes can only be generated for student, trainer or teaching assistant accounts."
+            )
+    except user_service.DomainError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return UserCodeRead(code=code)
 
 
 @router.get("/users", response_model=list[UserRead])
