@@ -4,7 +4,17 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Uuid, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -44,3 +54,32 @@ class Document(Base):
 
     clazz: Mapped["Class"] = relationship("Class", back_populates="documents")
     uploader: Mapped["User"] = relationship("User", back_populates="documents")
+    syllabus_units: Mapped[list["SyllabusUnit"]] = relationship(
+        "SyllabusUnit", back_populates="document", cascade="all, delete-orphan"
+    )
+
+
+class SyllabusUnit(Base):
+    """Structured course unit extracted from an indexed syllabus document (AI-133)."""
+
+    __tablename__ = "syllabus_unit"
+    __table_args__ = (
+        UniqueConstraint("class_id", "unit_number", name="uq_syllabus_unit_class_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    class_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("class.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("document.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    unit_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    topic_outline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    document: Mapped["Document"] = relationship("Document", back_populates="syllabus_units")
+

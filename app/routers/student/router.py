@@ -61,6 +61,26 @@ class ClassDocumentRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class SyllabusUnitRead(BaseModel):
+    id: uuid.UUID
+    unit_number: int
+    unit_title: str
+    description: str | None = None
+    content: str
+
+    model_config = {"from_attributes": True}
+
+
+class ClassSyllabusRoadmapRead(BaseModel):
+    class_id: uuid.UUID
+    document_id: uuid.UUID | None = None
+    file_name: str | None = None
+    topic_outline: str | None = None
+    units: list[SyllabusUnitRead] = []
+
+    model_config = {"from_attributes": True}
+
+
 class PrerequisiteRead(BaseModel):
     id: uuid.UUID
     code: str
@@ -276,6 +296,35 @@ def class_documents(
         )
         for r in rows
     ]
+
+
+@router.get("/classes/{class_id}/syllabus", response_model=ClassSyllabusRoadmapRead)
+def class_syllabus_roadmap(
+    class_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Structured syllabus roadmap (units and outline) for class members (AC-02, AC-06)."""
+    section = _require_member(db, user, _coerce_uuid(class_id))
+    from app.services import document_service
+
+    doc, topic_outline, units = document_service.get_class_syllabus_roadmap(db, section.id)
+    return ClassSyllabusRoadmapRead(
+        class_id=section.id,
+        document_id=doc.id if doc else None,
+        file_name=doc.file_name if doc else None,
+        topic_outline=topic_outline,
+        units=[
+            SyllabusUnitRead(
+                id=u.id,
+                unit_number=u.unit_number,
+                unit_title=u.unit_title,
+                description=u.description,
+                content=u.content,
+            )
+            for u in units
+        ],
+    )
 
 
 # --- Enrollment requests: students browse + request, TAs approve ---

@@ -11,6 +11,11 @@ from app.services import document_service
 from app.services.embedding.gemini_embedding import GeminiEmbedding
 from app.services.ingestion.chunker import markdown_chunker, recursive_chunker
 from app.services.ingestion.cleaner import clean_marker_markdown
+from app.services.ingestion.syllabus_parser import (
+    SyllabusFormatError,
+    is_syllabus_document,
+    parse_syllabus_markdown,
+)
 from app.services.vector_store.qdrant_store import QdrantStore
 
 logger = logging.getLogger(__name__)
@@ -24,10 +29,13 @@ def _failure_reason(error: Exception) -> str:
         return "Gemini embedding quota exceeded. Wait for the quota to reset, then retry."
     if isinstance(error, FileNotFoundError):
         return "The stored source file could not be found. Upload the document again."
+    if isinstance(error, SyllabusFormatError):
+        return "Syllabus format is not recognized or contains no course units."
     if isinstance(error, ValueError):
         if message in {
             "No readable text found in document.",
             "Document did not produce any searchable chunks.",
+            "Syllabus format is not recognized or contains no course units.",
         }:
             return message
         return "Document content could not be processed. Check the file and try again."
@@ -60,6 +68,13 @@ def process_document(db: Session, document_id: uuid.UUID | str) -> None:
         if not markdown:
             raise ValueError("No readable text found in document.")
 
+        file_name = getattr(record, "file_name", "") or path.name
+        roadmap = (
+            parse_syllabus_markdown(markdown)
+            if is_syllabus_document(file_name, markdown)
+            else None
+        )
+
         metadata = document_service.build_qdrant_payload(record)
         chunks = markdown_chunker(markdown, metadata=metadata)
         chunks = recursive_chunker(chunks)
@@ -87,6 +102,8 @@ def process_document(db: Session, document_id: uuid.UUID | str) -> None:
                 logger.exception("Could not remove vectors for cancelled document %s", document_id)
             return
         document_service.supersede_older_versions(db, current)
+        if roadmap is not None and getattr(current, "status", None) == document_service.STATUS_INDEXED:
+            document_service.save_syllabus_roadmap(db, current, roadmap)
     except Exception as error:
         db.rollback()
         if vector_write_started:
