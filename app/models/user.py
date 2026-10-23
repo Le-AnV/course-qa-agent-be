@@ -71,6 +71,8 @@ class User(Base):
     # Student ID (MSSV): auto-generated for students as INITIALS_NNNN
     # (e.g. Tran Van A -> TVA_4821, random 4 digits); NULL for staff/admin.
     student_code: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
+    # Employee ID (MSNV) for trainer/TA/admin; NULL for students.
+    staff_code: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
     role_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("role.id", ondelete="RESTRICT"), nullable=False
     )

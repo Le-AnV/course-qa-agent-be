@@ -196,6 +196,30 @@ def test_over_long_values_are_rejected(api_client, db_session):
     assert too_long.status_code == 422
 
 
+def test_schedule_accepts_multiline_up_to_the_column_size(api_client, db_session):
+    admin = admin_headers(api_client)
+    trainer = make_user(api_client, admin, "t1@gmail.com", "Trainer One", "trainer")
+    class_id = make_class(api_client, admin, "CS101-A", trainer)
+    headers = token_for(db_session, "t1@gmail.com", "trainer")
+
+    # 500 characters including newlines: the class_info column limit.
+    schedule = "line\n" * 99 + "line"
+    ok = api_client.patch(
+        f"/api/classes/{class_id}/info",
+        json={"schedule_note": schedule},
+        headers=headers,
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["schedule_note"] == schedule
+
+    too_long = api_client.patch(
+        f"/api/classes/{class_id}/info",
+        json={"schedule_note": schedule + "xx"},
+        headers=headers,
+    )
+    assert too_long.status_code == 422
+
+
 def test_enrolled_students_read_but_never_write(api_client, db_session):
     admin = admin_headers(api_client)
     trainer = make_user(api_client, admin, "t1@gmail.com", "Trainer One", "trainer")

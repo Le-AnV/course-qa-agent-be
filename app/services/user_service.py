@@ -93,6 +93,18 @@ def normalize_student_code(raw: str | None) -> str | None:
     return code
 
 
+def normalize_staff_code(raw: str | None) -> str | None:
+    """Normalize an admin-supplied MSNV, or None when blank."""
+    if raw is None:
+        return None
+    code = raw.strip().upper()
+    if not code:
+        return None
+    if len(code) > 20:
+        raise DomainError("Staff code must be at most 20 characters.")
+    return code
+
+
 def normalize_role(raw: str) -> str:
     key = (raw or "").strip().lower().replace("_", " ").replace("-", " ")
     key = " ".join(key.split())
@@ -131,6 +143,7 @@ def create_user(
     class_code: str | None,
     password: str | None = None,
     student_code: str | None = None,
+    staff_code: str | None = None,
 ) -> tuple[User, str]:
     """Create one account. Returns (user, plaintext password) — the caller
     emails the password immediately and never persists or returns it."""
@@ -151,6 +164,12 @@ def create_user(
             raise DomainError("Student code is only for student accounts.")
         if db.query(User).filter(User.student_code == code).first():
             raise DomainError(f"Student code '{code}' already exists.")
+    staff = normalize_staff_code(staff_code)
+    if staff is not None:
+        if role == ROLE_STUDENT:
+            raise DomainError("Staff code is only for staff accounts.")
+        if db.query(User).filter(User.staff_code == staff).first():
+            raise DomainError(f"Staff code '{staff}' already exists.")
     section = resolve_class(db, class_code)
     # AC-03: creation is allowed without a class so the first trainer can
     # exist before the first class (class.trainer_id is NOT NULL). The login
@@ -165,6 +184,7 @@ def create_user(
         role_id=role_row.id,
         status="ACTIVE",
         student_code=code,
+        staff_code=staff,
     )
     db.add(user)
     db.flush()

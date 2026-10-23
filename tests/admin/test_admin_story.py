@@ -177,9 +177,9 @@ def test_import_template_report_and_queue(client):
     assert "Hướng dẫn" in book.sheetnames
     ws = book["accounts"]
     rows = list(ws.iter_rows(values_only=True))
-    assert [str(c) for c in rows[0]] == ["fullname", "email", "type", "mssv"]
+    assert [str(c) for c in rows[0]] == ["fullname", "email", "type", "mssv", "msnv"]
     assert len(rows) == 2  # header + one example row
-    assert len(rows[0]) == 4  # no password column (AC-05), no class column
+    assert len(rows[0]) == 5  # no password column (AC-05), no class column
 
     payload = make_xlsx(
         [

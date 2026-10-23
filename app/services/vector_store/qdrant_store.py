@@ -1,6 +1,8 @@
 """Qdrant vector store service."""
 
+import copy
 import logging
+import uuid
 
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
@@ -11,6 +13,7 @@ from qdrant_client.http.models import (
     FieldCondition,
     Filter,
     MatchValue,
+    PointStruct,
     VectorParams,
 )
 from tenacity import RetryError, retry, retry_if_exception, stop_after_attempt, wait_exponential
@@ -64,6 +67,77 @@ def delete_points_by_document_id(
     found = client.count(collection_name=collection_name, count_filter=selector, exact=True).count
     client.delete(collection_name=collection_name, points_selector=selector, wait=True)
     return found
+
+
+def clone_document_points(
+    source_document_id: str,
+    target_document_id: str,
+    target_class_id: str,
+    *,
+    url: str | None = None,
+    collection_name: str | None = None,
+    api_key: str | None = None,
+    client: QdrantClient | None = None,
+    batch_size: int = 256,
+) -> int:
+    """Copy every indexed chunk of one document onto a new document id.
+
+    Copying a class template must not re-run embeddings or approval. The
+    source vectors are read as-is and re-upserted with the target ids in the
+    payload, so answers from the new class resolve to its own document.
+    """
+    url = url or settings.qdrant_url
+    collection_name = collection_name or settings.collection_name
+    api_key = api_key if api_key is not None else settings.qdrant_api_key
+    if not url or not collection_name:
+        raise ValueError("qdrant_url and collection_name must be configured.")
+
+    client = client or QdrantClient(url=url, api_key=api_key)
+    if not client.collection_exists(collection_name):
+        return 0
+
+    selector = Filter(
+        must=[
+            FieldCondition(
+                key="metadata.document_id",
+                match=MatchValue(value=source_document_id),
+            )
+        ]
+    )
+
+    cloned: list[PointStruct] = []
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=collection_name,
+            scroll_filter=selector,
+            limit=batch_size,
+            offset=offset,
+            with_payload=True,
+            with_vectors=True,
+        )
+        for point in points:
+            payload = copy.deepcopy(point.payload or {})
+            metadata = payload.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = payload
+            metadata["document_id"] = target_document_id
+            metadata["class_id"] = target_class_id
+            cloned.append(
+                PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=point.vector,
+                    payload=payload,
+                )
+            )
+        if offset is None:
+            break
+
+    if not cloned:
+        return 0
+
+    client.upsert(collection_name=collection_name, points=cloned, wait=True)
+    return len(cloned)
 
 
 class QdrantStore:

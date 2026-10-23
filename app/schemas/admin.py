@@ -42,6 +42,8 @@ class ClassCreate(BaseModel):
     academic_year: str = Field(default="2026", max_length=20)
     # Manual credits entered at class creation; hard-capped 20/semester at enrollment.
     credits: int = Field(default=3, ge=1, le=6)
+    # Roster capacity at creation. None = unlimited.
+    capacity: int | None = Field(default=None, ge=1, le=500)
     # Subjects a student must have passed before joining this class.
     prerequisite_class_ids: list[uuid.UUID] = []
 
@@ -133,6 +135,7 @@ class ClassConfigSourceRead(BaseModel):
     id: uuid.UUID
     code: str
     name: str
+    status: str = "ACTIVE"
 
 
 class ClassInfoRead(BaseModel):
@@ -152,8 +155,41 @@ class ClassInfoUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
     meeting_url: str | None = Field(default=None, max_length=500)
     group_url: str | None = Field(default=None, max_length=500)
-    schedule_note: str | None = Field(default=None, max_length=200)
+    # Matches the class_info column (String(500)): the old 200 cap silently
+    # truncated multi-line schedules into one glued paragraph.
+    schedule_note: str | None = Field(default=None, max_length=500)
     note: str | None = Field(default=None, max_length=2000)
+
+
+class TemplateDocumentRead(BaseModel):
+    """An approved source document the trainer may carry into the target class."""
+
+    id: uuid.UUID
+    file_name: str
+    file_type: str
+    size_bytes: int
+    version: int
+
+
+class TemplateDocumentSkip(BaseModel):
+    file_name: str
+    reason: str
+
+
+class ClassTemplateCopy(BaseModel):
+    """Copy selected config/info fields and approved documents from one class."""
+
+    source_class_id: uuid.UUID
+    document_ids: list[uuid.UUID] = Field(default_factory=list, max_length=200)
+    copy_config: bool = True
+    info_fields: list[str] = Field(default_factory=list, max_length=5)
+
+
+class ClassTemplateCopyRead(BaseModel):
+    config: ClassConfigRead
+    info: ClassInfoRead
+    copied_documents: list[TemplateDocumentRead] = Field(default_factory=list)
+    skipped_documents: list[TemplateDocumentSkip] = Field(default_factory=list)
 
 
 # --- Accounts (AC-03, AC-11, AC-12) ---
@@ -164,6 +200,8 @@ class UserCreate(BaseModel):
     class_code: str | None = Field(default=None, max_length=50)
     # Optional MSSV for students; blank means auto-generate INITIALS_NNNN.
     student_code: str | None = Field(default=None, max_length=20)
+    # Optional MSNV for staff; students must not send one.
+    staff_code: str | None = Field(default=None, max_length=20)
 
 
 class UserRead(BaseModel):
@@ -176,6 +214,7 @@ class UserRead(BaseModel):
     class_id: uuid.UUID | None
     class_code: str | None = None
     student_code: str | None = None
+    staff_code: str | None = None
     is_active: bool
 
     model_config = {"from_attributes": True}
@@ -196,6 +235,7 @@ class ImportRowRead(BaseModel):
     status: str
     message: str
     student_code: str | None = None
+    staff_code: str | None = None
 
     model_config = {"from_attributes": True}
 

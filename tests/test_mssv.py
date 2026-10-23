@@ -90,6 +90,17 @@ def make_xlsx(rows: list[list[str]]) -> bytes:
     return buf.getvalue()
 
 
+def make_xlsx5(rows: list[list[str]]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["fullname", "email", "type", "mssv", "msnv"])
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def test_initials_vietnamese_names():
     assert user_service._initials("Tran Van A") == "TVA"
     assert user_service._initials("Trần Văn A") == "TVA"
@@ -182,6 +193,32 @@ def test_import_auto_and_explicit_mssv(api_client):
     assert codes["mssv2@gmail.com"] == "TVA_0099"
 
 
+def test_import_staff_msnv(api_client):
+    h = admin_headers(api_client)
+    payload = make_xlsx5(
+        [
+            ["Nguyen Van T", "msnv1@gmail.com", "trainer", "", "fpt01234"],
+            ["Tran Van B", "msnv2@gmail.com", "student", "TVA_0123", "FPT99999"],
+            ["Nguyen Van U", "msnv3@gmail.com", "trainer", "", "FPT01234"],
+        ]
+    )
+    up = api_client.post("/api/admin/imports", files={"file": ("staff.xlsx", payload)}, headers=h)
+    assert up.status_code == 201, up.text
+    body = up.json()
+    assert (body["imported_count"], body["skipped_count"], body["failed_count"]) == (1, 0, 2)
+
+    detail = api_client.get(f"/api/admin/imports/{body['id']}", headers=h).json()
+    by_email = {r["email"]: r for r in detail["rows"]}
+    assert by_email["msnv1@gmail.com"]["staff_code"] == "FPT01234"
+    assert "MSNV FPT01234" in by_email["msnv1@gmail.com"]["message"]
+    assert by_email["msnv2@gmail.com"]["status"] == "failed"
+    assert by_email["msnv3@gmail.com"]["status"] == "failed"
+
+    users = api_client.get("/api/admin/users", headers=h).json()
+    staff_codes = {u["email"]: u["staff_code"] for u in users}
+    assert staff_codes["msnv1@gmail.com"] == "FPT01234"
+
+
 def test_template_has_guide_sheet(api_client):
     from openpyxl import load_workbook
 
@@ -195,6 +232,7 @@ def test_template_has_guide_sheet(api_client):
     assert header[0] == "Cột"
     texts = " ".join(str(c or "") for row in guide.iter_rows(values_only=True) for c in row)
     assert "mssv" in texts.lower()
+    assert "msnv" in texts.lower()
     assert "password" in texts.lower()
 
 
@@ -213,7 +251,38 @@ def test_old_template_rejected(api_client):
 
 def test_import_service_unit_parse(db_session):
     header, rows = import_service.parse_workbook(import_service.build_template_bytes())
-    assert header == ["fullname", "email", "type", "mssv"]
+    assert header == ["fullname", "email", "type", "mssv", "msnv"]
     assert len(rows) == 1  # example row only
     assert rows[0]["fullname"] == "Nguyen Van A"
+    assert rows[0]["msnv"] == ""
     assert import_service.validate_row(db_session, rows[0]) is None
+
+def test_staff_code_for_trainer(db_session):
+    trainer, _ = user_service.create_user(
+        db_session, "Nguyen Van T", "t3@gmail.com", "trainer", None, staff_code="FPT01234"
+    )
+    assert trainer.staff_code == "FPT01234"
+    assert trainer.student_code is None
+
+
+def test_staff_code_is_unique_and_normalized(db_session):
+    user_service.create_user(
+        db_session, "Nguyen Van T", "t4@gmail.com", "trainer", None, staff_code=" fpt05678 "
+    )
+    assert (
+        db_session.query(User).filter(User.email == "t4@gmail.com").first().staff_code
+        == "FPT05678"
+    )
+    with pytest.raises(user_service.DomainError, match="already exists"):
+        user_service.create_user(
+            db_session, "Nguyen Van U", "u4@gmail.com", "trainer", None,
+            staff_code="fpt05678",
+        )
+
+
+def test_staff_code_rejected_for_student(db_session):
+    with pytest.raises(user_service.DomainError, match="only for staff"):
+        user_service.create_user(
+            db_session, "Tran Van B", "b3@gmail.com", "student", None,
+            staff_code="FPT09999",
+        )
