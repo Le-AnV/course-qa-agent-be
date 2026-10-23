@@ -19,8 +19,9 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.course import Class
-from app.models.document import Document
+from app.models.document import Document, SyllabusUnit
 from app.models.user import User
+from app.services.ingestion.syllabus_parser import SyllabusRoadmapData
 from app.services.vector_store.qdrant_store import (
     clone_document_points,
     delete_points_by_document_id,
@@ -644,3 +645,56 @@ def class_name(db: Session, class_id: uuid.UUID | str) -> str:
     if clazz is None:
         return str(class_id)
     return clazz.name
+
+
+def save_syllabus_roadmap(
+    db: Session, record: Document, roadmap: SyllabusRoadmapData
+) -> list[SyllabusUnit]:
+    """Replace the class syllabus roadmap cleanly with newly parsed units (AC-01, AC-05)."""
+    db.query(SyllabusUnit).filter(SyllabusUnit.class_id == record.class_id).delete(
+        synchronize_session=False
+    )
+    created: list[SyllabusUnit] = []
+    for unit in roadmap.units:
+        row = SyllabusUnit(
+            id=uuid.uuid4(),
+            class_id=record.class_id,
+            document_id=record.id,
+            unit_number=unit.unit_number,
+            unit_title=unit.unit_title,
+            description=unit.description,
+            content=unit.content,
+            topic_outline=roadmap.topic_outline,
+        )
+        db.add(row)
+        created.append(row)
+    db.commit()
+    return created
+
+
+def get_class_syllabus_roadmap(
+    db: Session, class_id: uuid.UUID | str
+) -> tuple[Document | None, str | None, list[SyllabusUnit]]:
+    """Return the active indexed syllabus document, topic outline, and ordered units."""
+    try:
+        class_uuid = uuid.UUID(str(class_id))
+    except (TypeError, ValueError, AttributeError):
+        return None, None, []
+
+    rows = (
+        db.query(SyllabusUnit, Document)
+        .join(Document, SyllabusUnit.document_id == Document.id)
+        .filter(
+            SyllabusUnit.class_id == class_uuid,
+            Document.status == STATUS_INDEXED,
+        )
+        .order_by(SyllabusUnit.unit_number.asc())
+        .all()
+    )
+    if not rows:
+        return None, None, []
+
+    doc = rows[0][1]
+    units = [r[0] for r in rows]
+    topic_outline = units[0].topic_outline if units else None
+    return doc, topic_outline, units

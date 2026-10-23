@@ -99,3 +99,44 @@ def test_excel_loader_uses_generic_parser_for_non_template_syllabus_sheet(tmp_pa
     assert "# Syllabus" in result["markdown"]
     assert "Nội dung: Dòng 1" in result["markdown"]
     assert "Technical Group:" not in result["markdown"]
+
+
+def test_excel_loader_skips_hidden_sheets_and_filters_error_codes(tmp_path: Path):
+    excel_path = tmp_path / "errors_and_hidden.xlsx"
+    wb = Workbook()
+
+    # Visible sheet with some broken formula cells
+    ws_visible = wb.active
+    ws_visible.title = "Visible"
+    ws_visible.append(["Col1", "Col2"])
+    ws_visible.append(["Valid Data", "#REF!"])
+    ws_visible.append(["#VALUE!", "More Valid Data"])
+
+    # Hidden validation sheet
+    ws_hidden = wb.create_sheet(title="DV-IDENTITY-0")
+    ws_hidden.sheet_state = "hidden"
+    ws_hidden.append(["#REF!", "#VALUE!"])
+    ws_hidden.append(["Secret Internal", "Data"])
+
+    # VeryHidden sheet
+    ws_very_hidden = wb.create_sheet(title="VeryHiddenSheet")
+    ws_very_hidden.sheet_state = "veryHidden"
+    ws_very_hidden.append(["HiddenCol", "HiddenVal"])
+
+    wb.save(str(excel_path))
+
+    result = excel_loader(excel_path)
+    md = result["markdown"]
+
+    # Visible content should be preserved
+    assert "Valid Data" in md
+    assert "More Valid Data" in md
+
+    # Error codes should be filtered out
+    assert "#REF!" not in md
+    assert "#VALUE!" not in md
+
+    # Hidden sheets must not appear
+    assert "DV-IDENTITY-0" not in md
+    assert "VeryHiddenSheet" not in md
+    assert "Secret Internal" not in md

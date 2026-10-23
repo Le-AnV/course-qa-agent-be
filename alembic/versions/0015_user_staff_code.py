@@ -1,7 +1,7 @@
 """Employee ID (MSNV) for trainer/TA/admin accounts.
 
 Revision ID: 0015_user_staff_code
-Revises: 0014_class_prerequisite
+Revises: 0015_syllabus_roadmap
 Create Date: 2026-10-23
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0015_user_staff_code"
-down_revision = "0014_class_prerequisite"
+down_revision = "0015_syllabus_roadmap"
 branch_labels = None
 depends_on = None
 
