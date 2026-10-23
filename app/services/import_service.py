@@ -19,27 +19,28 @@ from app.models.import_job import (
 from app.models.user import User
 from app.services import email_service, user_service
 
-# AC-05/AC-06: exact expected columns — NO password column, ever.
+# AC-05/AC-06: exact expected columns — NO password or code columns, ever.
 # Class assignment is deliberately NOT part of the template: students
 # browse the catalog and request to join; TAs approve (enrollment flow).
 # Accounts are created class-less; import never enrolls anyone.
-# mssv is optional for students: blank means the backend auto-generates
-# INITIALS_NNNN (Tran Van A -> TVA_4821), with a random 4-digit suffix.
-# msnv is optional for trainer/TA accounts. The 4-column template from older
-# releases is still accepted so existing files keep working.
-TEMPLATE_COLUMNS = ["fullname", "email", "type", "mssv", "msnv"]
-LEGACY_COLUMNS = TEMPLATE_COLUMNS[:4]
-EXAMPLE_ROW = ["Nguyen Van A", "student001@gmail.com", "student", "", ""]
+# MSSV/MSNV are generated from full name: Tran Van A -> TVA_4821, with a
+# random 4-digit suffix. Older 4/5-column files are still accepted so
+# existing spreadsheets keep working.
+TEMPLATE_COLUMNS = ["fullname", "email", "type"]
+LEGACY_COLUMNS = [
+    ["fullname", "email", "type", "mssv"],
+    ["fullname", "email", "type", "msnv"],
+    ["fullname", "email", "type", "mssv", "msnv"],
+]
+EXAMPLE_ROW = ["Nguyen Van A", "student001@gmail.com", "student"]
 
 GUIDE_SHEET = "Hướng dẫn"
 GUIDE_ROWS = [
     ["Cột", "Bắt buộc?", "Cách nhập"],
-    ["fullname", "Có", "Họ tên đầy đủ, vd: Tran Van A. Dùng để sinh MSSV khi bỏ trống cột mssv."],
+    ["fullname", "Có", "Họ tên đầy đủ, vd: Tran Van A. Dùng để sinh MSSV/MSNV tự động."],
     ["email", "Có", "Gmail của tài khoản, phải duy nhất, vd: student001@gmail.com. Trùng email có sẵn thì bỏ qua (skipped)."],
     ["type", "Có", "Một trong: student, trainer, teaching_assistant (hoặc ta). Chữ thường, không dấu."],
-    ["mssv", "Không", "Mã số sinh viên dạng CHUCUAINHOA_0001, vd: TVA_4821. Bỏ trống để hệ thống tự sinh (lấy chữ cái đầu họ tên + 4 số ngẫu nhiên). Chỉ áp dụng cho student."],
-    ["msnv", "Optional", "Employee ID for trainer/TA accounts, vd: FPT01234. Students leave this blank; auto-generation only applies to mssv."],
-    ["Ghi chú", "", "Không thêm cột password — mật khẩu được sinh ngẫu nhiên và gửi qua email. Sheet này chỉ để đọc, hệ thống chỉ đọc sheet accounts."],
+    ["Ghi chú", "", "Không thêm cột MSSV/MSNV hay password — hệ thống tự sinh MSSV/MSNV từ họ tên và gửi mật khẩu qua email. Sheet này chỉ để đọc, hệ thống chỉ đọc sheet accounts."],
 ]
 
 
@@ -50,7 +51,7 @@ def build_template_bytes() -> bytes:
     ws.title = "accounts"
     ws.append(TEMPLATE_COLUMNS)
     ws.append(EXAMPLE_ROW)
-    for col, width in (("A", 24), ("B", 28), ("C", 20), ("D", 14), ("E", 14)):
+    for col, width in (("A", 24), ("B", 28), ("C", 20)):
         ws.column_dimensions[col].width = width
     guide = wb.create_sheet(GUIDE_SHEET)
     for row in GUIDE_ROWS:
@@ -75,29 +76,23 @@ def parse_workbook(data: bytes) -> tuple[list[str], list[dict]]:
     header = [(str(c).strip().lower() if c is not None else "") for c in rows[0]]
     while header and header[-1] == "":
         header.pop()
-    if header not in (TEMPLATE_COLUMNS, LEGACY_COLUMNS):
+    if header not in [TEMPLATE_COLUMNS, *LEGACY_COLUMNS]:
         raise ValueError(
             f"Invalid template. Expected header exactly: {', '.join(TEMPLATE_COLUMNS)}. "
             "Download the latest template from the dashboard."
         )
     parsed = []
     for i, r in enumerate(rows[1:], start=2):
-        cells = [(str(c).strip() if c is not None else "") for c in list(r)[:5]]
-        while len(cells) < 5:
+        cells = [(str(c).strip() if c is not None else "") for c in list(r)]
+        while len(cells) < len(header):
             cells.append("")
         # Skip fully blank rows.
         if all(c == "" for c in cells):
             continue
-        parsed.append(
-            {
-                "row_number": i,
-                "fullname": cells[0],
-                "email": cells[1],
-                "type": cells[2],
-                "mssv": cells[3],
-                "msnv": cells[4],
-            }
-        )
+        row = {"row_number": i, "fullname": "", "email": "", "type": "", "mssv": "", "msnv": ""}
+        for index, key in enumerate(header):
+            row[key] = cells[index]
+        parsed.append(row)
     if not parsed:
         raise ValueError("No data rows found — fill in rows under the header.")
     return header, parsed

@@ -204,6 +204,15 @@ class UserCreate(BaseModel):
     staff_code: str | None = Field(default=None, max_length=20)
 
 
+class UserCodeGenerate(BaseModel):
+    full_name: str = Field(min_length=1, max_length=100)
+    role: str = Field(min_length=1)
+
+
+class UserCodeRead(BaseModel):
+    code: str
+
+
 class UserRead(BaseModel):
     id: uuid.UUID
     # Compat name — sourced from ``user.full_name`` (ERD has no username column).

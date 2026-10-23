@@ -125,11 +125,12 @@ Missing `?confirm=true` → `400`. Last admin → `400` (AC-12).
 ### GET /api/admin/import-template
 
 Downloads `account-import-template.xlsx`: sheet `accounts` with header exactly
-`fullname, email, type, mssv` + one example row, plus a `Hướng dẫn` guide sheet.
-No password column (AC-05, AC-06). `mssv` is optional: blank means the backend
-auto-generates `INITIALS_NNNN` (Tran Van A -> `TVA_4821`), where the 4 digits are
-random and unique within the same initials prefix; explicit codes must match
-`^[A-Z]+_[0-9]{4}$` and be unique. Students get a code; staff/admins never do.
+`fullname, email, type` + one example row, plus a `Hướng dẫn` guide sheet.
+No password or code columns (AC-05, AC-06). MSSV/MSNV are generated from the
+full name as `INITIALS_NNNN` (Tran Van A -> `TVA_4821`), where the 4 digits are
+random and unique within the same initials prefix. Students receive a MSSV;
+trainers/TAs receive an MSNV. Legacy 4/5-column files with `mssv`/`msnv` are
+still accepted; explicit codes must match `^[A-Z]+_[0-9]{4}$` and be unique.
 
 ### POST /api/admin/imports — `201 ImportBatchRead` (multipart `file: *.xlsx`)
 
