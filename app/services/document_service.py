@@ -21,7 +21,10 @@ from app.config import settings
 from app.models.course import Class
 from app.models.document import Document
 from app.models.user import User
-from app.services.vector_store.qdrant_store import delete_points_by_document_id
+from app.services.vector_store.qdrant_store import (
+    clone_document_points,
+    delete_points_by_document_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +245,112 @@ def document_path(record: Document) -> Path:
     if not path.is_relative_to(root):
         raise FileNotFoundError("Document file is not available.")
     return path
+
+
+def copyable_documents(db: Session, class_id: uuid.UUID | str) -> list[Document]:
+    """Current approved documents a trainer may carry into another class.
+
+    Only the newest indexed version per file name is offered: replaced,
+    rejected, failed and pending rows have no answerable content.
+    """
+    rows = (
+        db.query(Document)
+        .filter(
+            Document.class_id == uuid.UUID(str(class_id)),
+            Document.status == STATUS_INDEXED,
+        )
+        .order_by(Document.file_name, Document.version.desc())
+        .all()
+    )
+    current: dict[str, Document] = {}
+    for row in rows:
+        current.setdefault(row.file_name.casefold(), row)
+    return sorted(current.values(), key=lambda row: row.file_name.casefold())
+
+
+def clone_documents_to_class(
+    db: Session,
+    source_class_id: uuid.UUID | str,
+    target_class_id: uuid.UUID | str,
+    document_ids: list[uuid.UUID | str],
+    user: User,
+) -> tuple[list[Document], list[tuple[str, str]]]:
+    """Clone approved files and their vectors; never re-approve or re-embed.
+
+    Returns the copied rows and ``(file_name, reason)`` skips. A single
+    document that cannot be cloned is skipped so the rest of the template
+    still lands; its new file/vectors are cleaned up immediately.
+    """
+    source_uuid = uuid.UUID(str(source_class_id))
+    target_uuid = uuid.UUID(str(target_class_id))
+    current = {row.id: row for row in copyable_documents(db, source_uuid)}
+    copied: list[Document] = []
+    skipped: list[tuple[str, str]] = []
+
+    for raw_id in dict.fromkeys(document_ids):
+        try:
+            document_id = uuid.UUID(str(raw_id))
+        except (TypeError, ValueError, AttributeError):
+            skipped.append((str(raw_id), "Unknown document."))
+            continue
+        source = current.get(document_id)
+        if source is None:
+            skipped.append((str(raw_id), "Only approved documents can be copied."))
+            continue
+
+        existing = (
+            db.query(Document)
+            .filter(
+                Document.class_id == target_uuid,
+                func.lower(Document.file_name) == source.file_name.casefold(),
+            )
+            .first()
+        )
+        if existing is not None:
+            skipped.append(
+                (source.file_name, "A document with this name already exists in this class.")
+            )
+            continue
+
+        new_id = uuid.uuid4()
+        target_path: Path | None = None
+        try:
+            content = document_path(source).read_bytes()
+            target_path = store_upload_file(new_id, source.file_name, content)
+            points = clone_document_points(str(source.id), str(new_id), str(target_uuid))
+            if points == 0:
+                raise ValueError("No indexed content is available for this document.")
+            record = Document(
+                id=new_id,
+                class_id=target_uuid,
+                uploaded_by=user.id,
+                file_name=source.file_name,
+                file_type=source.file_type,
+                mime_type=source.mime_type,
+                size_bytes=len(content),
+                storage_path=str(target_path),
+                status=STATUS_INDEXED,
+                version=1,
+            )
+            db.add(record)
+            db.commit()
+            db.refresh(record)
+            copied.append(record)
+        except Exception as exc:  # noqa: BLE001 - one bad file must not abort the template
+            db.rollback()
+            logger.warning("Could not copy document %s: %s", source.id, exc)
+            try:
+                purge_document_vectors(new_id)
+            except Exception:
+                logger.warning("Could not purge cloned vectors of %s", new_id, exc_info=True)
+            if target_path is not None:
+                try:
+                    target_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Could not remove cloned file %s", target_path, exc_info=True)
+            skipped.append((source.file_name, f"Copy failed: {exc}"))
+
+    return copied, skipped
 
 
 def create_document(

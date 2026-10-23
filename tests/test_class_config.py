@@ -8,6 +8,9 @@ Covers the API contract:
 - capacity is a hard gate on enrollment approval
 """
 
+import uuid
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -429,3 +432,265 @@ def test_trainer_cannot_copy_config_from_another_trainers_class(api_client, db_s
     )
     assert ok.status_code == 200, ok.text
     assert ok.json()["capacity"] is None
+
+
+def test_archived_class_still_works_as_a_template_source(api_client, db_session):
+    admin = admin_headers(api_client)
+    trainer_id = make_user(api_client, admin, "t1@gmail.com", "Trainer One", "trainer")
+    source = make_class(api_client, admin, "CS101-OLD", trainer_id)
+    target = make_class(api_client, admin, "CS101-NEW", trainer_id)
+    api_client.patch(
+        f"/api/classes/{source}/config",
+        json={"delivery_mode": "online", "session_length_minutes": 150},
+        headers=admin,
+    )
+    api_client.patch(f"/api/classes/{source}/info", json={"note": "Old term."}, headers=admin)
+    api_client.patch(
+        f"/api/admin/classes/{source}/status", json={"status": "ARCHIVED"}, headers=admin
+    )
+
+    owner = token_for(db_session, "t1@gmail.com", "trainer")
+    sources = api_client.get("/api/classes/config-sources", headers=owner).json()
+    archived = [s for s in sources if s["id"] == source]
+    assert archived and archived[0]["status"] == "ARCHIVED"
+
+    copied = api_client.post(
+        f"/api/classes/{target}/template-copy",
+        json={"source_class_id": source, "document_ids": [], "info_fields": ["note"]},
+        headers=owner,
+    )
+    assert copied.status_code == 200, copied.text
+    body = copied.json()
+    assert body["config"]["delivery_mode"] == "online"
+    assert body["config"]["session_length_minutes"] == 150
+    assert body["info"]["note"] == "Old term."
+
+
+def test_template_copy_only_changes_selected_info_fields(api_client):
+    admin = admin_headers(api_client)
+    trainer_id = make_user(api_client, admin, "t1@gmail.com", "Trainer One", "trainer")
+    source = make_class(api_client, admin, "CS101-OLD", trainer_id)
+    target = make_class(api_client, admin, "CS101-NEW", trainer_id)
+    api_client.patch(
+        f"/api/classes/{source}/info",
+        json={"description": "Source description", "note": "Source note"},
+        headers=admin,
+    )
+    api_client.patch(
+        f"/api/classes/{target}/info",
+        json={"description": "Target description", "note": "Target note"},
+        headers=admin,
+    )
+
+    copied = api_client.post(
+        f"/api/classes/{target}/template-copy",
+        json={
+            "source_class_id": source,
+            "document_ids": [],
+            "info_fields": ["description"],
+        },
+        headers=admin,
+    )
+
+    assert copied.status_code == 200, copied.text
+    info = copied.json()["info"]
+    assert info["description"] == "Source description"
+    assert info["note"] == "Target note"
+
+
+def test_template_copy_does_not_clear_target_info_when_source_field_is_empty(api_client):
+    admin = admin_headers(api_client)
+    trainer_id = make_user(api_client, admin, "t1@gmail.com", "Trainer One", "trainer")
+    source = make_class(api_client, admin, "CS101-OLD", trainer_id)
+    target = make_class(api_client, admin, "CS101-NEW", trainer_id)
+    api_client.patch(
+        f"/api/classes/{target}/info",
+        json={"description": "Keep this", "meeting_url": "https://meet.example.com/keep"},
+        headers=admin,
+    )
+
+    copied = api_client.post(
+        f"/api/classes/{target}/template-copy",
+        json={
+            "source_class_id": source,
+            "document_ids": [],
+            "info_fields": ["description", "meeting_url"],
+        },
+        headers=admin,
+    )
+
+    assert copied.status_code == 200, copied.text
+    info = copied.json()["info"]
+    assert info["description"] == "Keep this"
+    assert info["meeting_url"] == "https://meet.example.com/keep"
+
+
+def test_template_copy_can_skip_teaching_config(api_client):
+    admin = admin_headers(api_client)
+    trainer_id = make_user(api_client, admin, "t1@gmail.com", "Trainer One", "trainer")
+    source = make_class(api_client, admin, "CS101-OLD", trainer_id)
+    target = make_class(api_client, admin, "CS101-NEW", trainer_id)
+    api_client.patch(
+        f"/api/classes/{source}/config",
+        json={"delivery_mode": "online", "session_length_minutes": 150},
+        headers=admin,
+    )
+
+    copied = api_client.post(
+        f"/api/classes/{target}/template-copy",
+        json={
+            "source_class_id": source,
+            "document_ids": [],
+            "copy_config": False,
+        },
+        headers=admin,
+    )
+
+    assert copied.status_code == 200, copied.text
+    config = copied.json()["config"]
+    assert config["delivery_mode"] == "on_campus"
+    assert config["session_length_minutes"] == 90
+
+
+def test_template_copy_rejects_unknown_info_field(api_client):
+    admin = admin_headers(api_client)
+    trainer_id = make_user(api_client, admin, "t1@gmail.com", "Trainer One", "trainer")
+    source = make_class(api_client, admin, "CS101-OLD", trainer_id)
+    target = make_class(api_client, admin, "CS101-NEW", trainer_id)
+
+    copied = api_client.post(
+        f"/api/classes/{target}/template-copy",
+        json={
+            "source_class_id": source,
+            "document_ids": [],
+            "info_fields": ["bogus"],
+        },
+        headers=admin,
+    )
+
+    assert copied.status_code == 400
+    assert "info" in copied.json()["detail"].lower()
+
+
+def _make_document(db_session, class_id, uploader_id, tmp_path, name, status="indexed", version=1):
+    import uuid
+    from pathlib import Path
+
+    from app.models.document import Document
+
+    path = Path(tmp_path) / f"{uuid.uuid4()}{Path(name).suffix}"
+    content = f"content of {name}".encode()
+    path.write_bytes(content)
+    row = Document(
+        class_id=uuid.UUID(class_id),
+        uploaded_by=uuid.UUID(uploader_id),
+        file_name=name,
+        file_type=Path(name).suffix,
+        mime_type="application/pdf",
+        size_bytes=len(content),
+        status=status,
+        version=version,
+        storage_path=str(path),
+    )
+    db_session.add(row)
+    db_session.commit()
+    db_session.refresh(row)
+    return row
+
+
+def test_template_documents_lists_only_current_indexed_and_clones_selected(
+    api_client, db_session, tmp_path, monkeypatch
+):
+    from app.config import settings
+    from app.models.document import Document
+    from app.services import document_service
+
+    monkeypatch.setattr(settings, "document_storage_dir", tmp_path)
+    monkeypatch.setattr(
+        document_service, "clone_document_points", lambda *args, **kwargs: 3
+    )
+
+    admin = admin_headers(api_client)
+    trainer_id = make_user(api_client, admin, "t1@gmail.com", "Trainer One", "trainer")
+    source = make_class(api_client, admin, "CS101-OLD", trainer_id)
+    target = make_class(api_client, admin, "CS101-NEW", trainer_id)
+    owner = token_for(db_session, "t1@gmail.com", "trainer")
+
+    current = _make_document(db_session, source, trainer_id, tmp_path, "lesson.pdf")
+    replaced = _make_document(
+        db_session, source, trainer_id, tmp_path, "old.pdf", status="replaced", version=1
+    )
+    newer = _make_document(
+        db_session, source, trainer_id, tmp_path, "lesson.pdf", status="indexed", version=2
+    )
+    _make_document(db_session, source, trainer_id, tmp_path, "draft.pdf", status="pending")
+
+    listed = api_client.get(
+        f"/api/classes/{target}/template-documents",
+        params={"source_class_id": source},
+        headers=owner,
+    )
+    assert listed.status_code == 200, listed.text
+    assert {d["id"] for d in listed.json()} == {str(newer.id)}
+
+    copied = api_client.post(
+        f"/api/classes/{target}/template-copy",
+        json={"source_class_id": source, "document_ids": [str(newer.id), str(replaced.id)]},
+        headers=owner,
+    )
+    assert copied.status_code == 200, copied.text
+    body = copied.json()
+    assert [d["file_name"] for d in body["copied_documents"]] == ["lesson.pdf"]
+    assert body["copied_documents"][0]["version"] == 1
+    assert len(body["skipped_documents"]) == 1
+
+    rows = db_session.query(Document).filter(Document.class_id == uuid.UUID(target)).all()
+    assert len(rows) == 1
+    clone = rows[0]
+    assert clone.status == "indexed"
+    assert clone.version == 1
+    assert clone.storage_path != newer.storage_path
+    assert Path(clone.storage_path).read_bytes() == Path(newer.storage_path).read_bytes()
+    # The source class is untouched.
+    assert db_session.get(Document, newer.id).class_id == uuid.UUID(source)
+    assert db_session.get(Document, current.id).status == "indexed"
+
+
+def test_template_copy_skips_duplicate_names_and_outsiders_cannot_preview(
+    api_client, db_session, tmp_path, monkeypatch
+):
+    from app.config import settings
+    from app.services import document_service
+
+    monkeypatch.setattr(settings, "document_storage_dir", tmp_path)
+    monkeypatch.setattr(
+        document_service, "clone_document_points", lambda *args, **kwargs: 1
+    )
+
+    admin = admin_headers(api_client)
+    first = make_user(api_client, admin, "t1@gmail.com", "Trainer One", "trainer")
+    make_user(api_client, admin, "t2@gmail.com", "Trainer Two", "trainer")
+    source = make_class(api_client, admin, "CS101-A", first)
+    target = make_class(api_client, admin, "CS101-B", first)
+    owner = token_for(db_session, "t1@gmail.com", "trainer")
+    outsider = token_for(db_session, "t2@gmail.com", "trainer")
+
+    source_doc = _make_document(db_session, source, first, tmp_path, "lesson.pdf")
+    _make_document(db_session, target, first, tmp_path, "lesson.pdf")
+
+    denied = api_client.get(
+        f"/api/classes/{target}/template-documents",
+        params={"source_class_id": source},
+        headers=outsider,
+    )
+    assert denied.status_code == 403
+
+    copied = api_client.post(
+        f"/api/classes/{target}/template-copy",
+        json={"source_class_id": source, "document_ids": [str(source_doc.id)]},
+        headers=owner,
+    )
+    assert copied.status_code == 200, copied.text
+    body = copied.json()
+    assert body["copied_documents"] == []
+    assert body["skipped_documents"][0]["file_name"] == "lesson.pdf"
