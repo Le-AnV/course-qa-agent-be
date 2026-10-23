@@ -12,6 +12,8 @@ from app.services.ingestion.syllabus_parser import (
     sanitize_markdown_content,
 )
 
+FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "syllabus_roadmap_sample.xlsx"
+
 
 def test_is_syllabus_document_detection():
     assert is_syllabus_document("Syllabus_Python.xlsx", "") is True
@@ -59,10 +61,9 @@ Click [here](javascript:alert(1)) or [legit](https://example.com).
 
 
 def test_parse_syllabus_markdown_from_sample_xlsx():
-    sample_path = Path(".vscode/data/new_syllabus/01-ai-fundamentals-and-rag_Syllabus_v1.1.xlsx")
-    assert sample_path.is_file()
+    assert FIXTURE.is_file()
 
-    result = excel_loader(sample_path)
+    result = excel_loader(FIXTURE)
     markdown = result["markdown"]
 
     roadmap = parse_syllabus_markdown(markdown)
@@ -88,10 +89,9 @@ def test_parse_syllabus_markdown_from_sample_xlsx():
 
 
 def test_parse_syllabus_markdown_from_rag_optimization_xlsx():
-    sample_path = Path(".vscode/data/new_syllabus/02-rag-and-optimization-Syllabus-ver1.1.xlsx")
-    assert sample_path.is_file()
+    assert FIXTURE.is_file()
 
-    result = excel_loader(sample_path)
+    result = excel_loader(FIXTURE)
     roadmap = parse_syllabus_markdown(result["markdown"])
 
     assert roadmap.topic_outline is not None

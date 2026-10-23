@@ -18,6 +18,8 @@ from app.models.document import Document
 from app.models.user import Role, User
 from app.services import document_service, ingestion_service
 
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "syllabus_roadmap_sample.xlsx"
+
 
 def _test_engine():
     engine = create_engine(
@@ -31,11 +33,10 @@ def _test_engine():
 
 def test_ingestion_service_extracts_and_saves_syllabus_roadmap(monkeypatch, tmp_path):
     monkeypatch.setattr(ingestion_service.settings, "document_storage_dir", tmp_path)
-    sample_src = Path(".vscode/data/new_syllabus/01-ai-fundamentals-and-rag_Syllabus_v1.1.xlsx")
-    assert sample_src.is_file()
+    assert FIXTURE.is_file()
 
     dest = tmp_path / "01-ai-fundamentals-and-rag_Syllabus_v1.1.xlsx"
-    dest.write_bytes(sample_src.read_bytes())
+    dest.write_bytes(FIXTURE.read_bytes())
 
     class_id = uuid.uuid4()
     doc_id = uuid.uuid4()
