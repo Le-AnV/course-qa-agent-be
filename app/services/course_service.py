@@ -108,6 +108,7 @@ def create_class(
     semester: str = "S1",
     academic_year: str = "2026",
     credits: int = 3,
+    capacity: int | None = None,
     prerequisite_class_ids: list[uuid.UUID] | None = None,
 ) -> Class:
     """Create a standalone class (the class IS the subject — no course binding).
@@ -131,6 +132,8 @@ def create_class(
     trainer = db.query(User).filter(User.id == tid).first()
     if trainer is None:
         raise DomainError("Trainer account does not exist.")
+    if capacity is not None and not 1 <= capacity <= 500:
+        raise DomainError("Capacity must be between 1 and 500.")
     prereq_ids = _validate_prerequisite_ids(db, prerequisite_class_ids, class_id=None)
     section = Class(
         trainer_id=tid,
@@ -142,6 +145,8 @@ def create_class(
     )
     db.add(section)
     db.flush()
+    if capacity is not None:
+        db.add(ClassConfig(class_id=section.id, **{**CONFIG_DEFAULTS, "capacity": capacity}))
     for pid in prereq_ids:
         db.add(ClassPrerequisite(class_id=section.id, prerequisite_class_id=pid))
     db.commit()
@@ -429,6 +434,7 @@ def copy_config(
     Capacity is intentionally not copied - it depends on each class' own roster.
     ``allowed_source_ids`` limits which classes may be read: pass the caller's
     own classes for a trainer, ``None`` for an admin who may read every class.
+    Archived sources stay readable: they are the natural template for a new term.
     """
     target = get_class(db, class_id)
     if target is None:
@@ -438,8 +444,6 @@ def copy_config(
         raise DomainError("The class you are copying from does not exist.")
     if source.id == target.id:
         raise DomainError("Pick a different class to copy the configuration from.")
-    if source.status == STATUS_ARCHIVED:
-        raise DomainError("That class is archived.")
     if allowed_source_ids is not None and source.id not in allowed_source_ids:
         raise DomainError("You can only copy the configuration from a class you teach.")
     source_values = get_config(db, source.id)
@@ -459,7 +463,7 @@ INFO_FIELD_LABELS = {
     "note": "Additional information",
 }
 INFO_TEXT_LIMITS = {"description": 2000, "note": 2000}
-INFO_SHORT_LIMITS = {"schedule_note": 200, "meeting_url": 500, "group_url": 500}
+INFO_SHORT_LIMITS = {"schedule_note": 500, "meeting_url": 500, "group_url": 500}
 INFO_URL_FIELDS = ("meeting_url", "group_url")
 
 

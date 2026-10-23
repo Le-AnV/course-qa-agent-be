@@ -23,10 +23,13 @@ from app.services import email_service, user_service
 # Class assignment is deliberately NOT part of the template: students
 # browse the catalog and request to join; TAs approve (enrollment flow).
 # Accounts are created class-less; import never enrolls anyone.
-# mssv is optional: blank means the backend auto-generates INITIALS_NNNN
-# (Tran Van A -> TVA_4821), with a random 4-digit suffix.
-TEMPLATE_COLUMNS = ["fullname", "email", "type", "mssv"]
-EXAMPLE_ROW = ["Nguyen Van A", "student001@gmail.com", "student", ""]
+# mssv is optional for students: blank means the backend auto-generates
+# INITIALS_NNNN (Tran Van A -> TVA_4821), with a random 4-digit suffix.
+# msnv is optional for trainer/TA accounts. The 4-column template from older
+# releases is still accepted so existing files keep working.
+TEMPLATE_COLUMNS = ["fullname", "email", "type", "mssv", "msnv"]
+LEGACY_COLUMNS = TEMPLATE_COLUMNS[:4]
+EXAMPLE_ROW = ["Nguyen Van A", "student001@gmail.com", "student", "", ""]
 
 GUIDE_SHEET = "Hướng dẫn"
 GUIDE_ROWS = [
@@ -35,6 +38,7 @@ GUIDE_ROWS = [
     ["email", "Có", "Gmail của tài khoản, phải duy nhất, vd: student001@gmail.com. Trùng email có sẵn thì bỏ qua (skipped)."],
     ["type", "Có", "Một trong: student, trainer, teaching_assistant (hoặc ta). Chữ thường, không dấu."],
     ["mssv", "Không", "Mã số sinh viên dạng CHUCUAINHOA_0001, vd: TVA_4821. Bỏ trống để hệ thống tự sinh (lấy chữ cái đầu họ tên + 4 số ngẫu nhiên). Chỉ áp dụng cho student."],
+    ["msnv", "Optional", "Employee ID for trainer/TA accounts, vd: FPT01234. Students leave this blank; auto-generation only applies to mssv."],
     ["Ghi chú", "", "Không thêm cột password — mật khẩu được sinh ngẫu nhiên và gửi qua email. Sheet này chỉ để đọc, hệ thống chỉ đọc sheet accounts."],
 ]
 
@@ -46,7 +50,7 @@ def build_template_bytes() -> bytes:
     ws.title = "accounts"
     ws.append(TEMPLATE_COLUMNS)
     ws.append(EXAMPLE_ROW)
-    for col, width in (("A", 24), ("B", 28), ("C", 20), ("D", 14)):
+    for col, width in (("A", 24), ("B", 28), ("C", 20), ("D", 14), ("E", 14)):
         ws.column_dimensions[col].width = width
     guide = wb.create_sheet(GUIDE_SHEET)
     for row in GUIDE_ROWS:
@@ -69,21 +73,30 @@ def parse_workbook(data: bytes) -> tuple[list[str], list[dict]]:
     if not rows or all(c is None or str(c).strip() == "" for c in rows[0]):
         raise ValueError("The file is empty — first row must be the header.")
     header = [(str(c).strip().lower() if c is not None else "") for c in rows[0]]
-    if header != TEMPLATE_COLUMNS:
+    while header and header[-1] == "":
+        header.pop()
+    if header not in (TEMPLATE_COLUMNS, LEGACY_COLUMNS):
         raise ValueError(
             f"Invalid template. Expected header exactly: {', '.join(TEMPLATE_COLUMNS)}. "
             "Download the latest template from the dashboard."
         )
     parsed = []
     for i, r in enumerate(rows[1:], start=2):
-        cells = [(str(c).strip() if c is not None else "") for c in list(r)[:4]]
-        while len(cells) < 4:
+        cells = [(str(c).strip() if c is not None else "") for c in list(r)[:5]]
+        while len(cells) < 5:
             cells.append("")
         # Skip fully blank rows.
         if all(c == "" for c in cells):
             continue
         parsed.append(
-            {"row_number": i, "fullname": cells[0], "email": cells[1], "type": cells[2], "mssv": cells[3]}
+            {
+                "row_number": i,
+                "fullname": cells[0],
+                "email": cells[1],
+                "type": cells[2],
+                "mssv": cells[3],
+                "msnv": cells[4],
+            }
         )
     if not parsed:
         raise ValueError("No data rows found — fill in rows under the header.")
@@ -123,7 +136,7 @@ def validate_row(db: Session, row: dict) -> str | None:
     except EmailNotValidError:
         return f"Email '{row['email']}' is not a valid email."
     try:
-        user_service.normalize_role(row["type"])
+        role = user_service.normalize_role(row["type"])
     except user_service.DomainError as exc:
         return str(exc)
     if (row.get("mssv") or "").strip():
@@ -133,6 +146,15 @@ def validate_row(db: Session, row: dict) -> str | None:
             return str(exc)
         if db.query(User).filter(User.student_code == code).first():
             return f"Student code '{code}' already exists."
+    if (row.get("msnv") or "").strip():
+        if role == "student":
+            return "MSNV is only for staff accounts."
+        try:
+            staff = user_service.normalize_staff_code(row["msnv"])
+        except user_service.DomainError as exc:
+            return str(exc)
+        if db.query(User).filter(User.staff_code == staff).first():
+            return f"Staff code '{staff}' already exists."
     return None
 
 
@@ -163,6 +185,7 @@ def import_rows(
         message = "Imported. Credentials emailed."
         user_id: uuid.UUID | None = None
         student_code: str | None = None
+        staff_code: str | None = None
 
         if error is not None:
             status, message = ROW_FAILED, error
@@ -186,15 +209,19 @@ def import_rows(
                     role_raw=row["type"],
                     class_code=None,
                     student_code=row.get("mssv") or None,
+                    staff_code=row.get("msnv") or None,
                 )
                 user_id = user.id
                 student_code = user.student_code
+                staff_code = user.staff_code
                 subject, body = email_service.credential_email_body(
                     user.full_name, user.email, plain, None
                 )
                 email_service.queue_email(db, user.email, subject, body, user_id=user.id)
                 if student_code:
                     message = f"Imported (MSSV {student_code}). Credentials emailed."
+                elif staff_code:
+                    message = f"Imported (MSNV {staff_code}). Credentials emailed."
                 imported += 1
             except user_service.DomainError as exc:
                 status, message = ROW_FAILED, str(exc)
@@ -212,6 +239,7 @@ def import_rows(
                 message=message,
                 user_id=user_id,
                 student_code=student_code,
+                staff_code=staff_code,
             )
         )
         db.commit()
@@ -235,7 +263,14 @@ def retry_row(db: Session, row_id: int) -> ImportRow:
     if row.status != ROW_FAILED:
         raise ValueError("Only failed rows can be retried.")
     error = validate_row(
-        db, {"fullname": row.username, "email": row.email, "type": row.role_raw, "mssv": row.student_code or ""}
+        db,
+        {
+            "fullname": row.username,
+            "email": row.email,
+            "type": row.role_raw,
+            "mssv": row.student_code or "",
+            "msnv": row.staff_code or "",
+        },
     )
     if error is not None:
         row.message = error
@@ -269,13 +304,17 @@ def retry_row(db: Session, row_id: int) -> ImportRow:
         user, plain = user_service.create_user(
             db, username=row.username, email=row.email, role_raw=row.role_raw, class_code=None,
             student_code=row.student_code or None,
+            staff_code=row.staff_code or None,
         )
         subject, body = email_service.credential_email_body(user.full_name, user.email, plain, None)
         email_service.queue_email(db, user.email, subject, body, user_id=user.id)
         row.status = ROW_IMPORTED
         row.student_code = user.student_code
+        row.staff_code = user.staff_code
         if user.student_code:
             row.message = f"Imported on retry (MSSV {user.student_code}). Credentials emailed."
+        elif user.staff_code:
+            row.message = f"Imported on retry (MSNV {user.staff_code}). Credentials emailed."
         else:
             row.message = "Imported on retry. Credentials emailed."
         row.user_id = user.id
