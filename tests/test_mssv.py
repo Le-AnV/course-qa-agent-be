@@ -127,6 +127,21 @@ def test_auto_code_matches_format(db_session):
     assert user_service.generate_student_code(db_session, "Tran Van A").startswith("TVA_")
 
 
+def test_generated_codes_fit_column_for_long_names(db_session):
+    long_name = " ".join(["A"] * 16)
+    for generator in (user_service.generate_student_code, user_service.generate_staff_code):
+        code = generator(db_session, long_name)
+        assert len(code) <= 20, code
+        assert user_service.STUDENT_CODE_RE.fullmatch(code), code
+
+
+def test_generated_codes_require_a_name_with_letters(db_session):
+    with pytest.raises(user_service.DomainError, match="full name"):
+        user_service.generate_student_code(db_session, "   ")
+    with pytest.raises(user_service.DomainError, match="full name"):
+        user_service.generate_staff_code(db_session, "   ")
+
+
 def test_auto_codes_are_random_and_unique_per_prefix(db_session):
     names = ["Tran Van A", "Tran Van Anh", "Tran Thi B", "Tran Van Binh"]
     for i, name in enumerate(names):

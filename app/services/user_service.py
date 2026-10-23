@@ -45,6 +45,7 @@ class DomainError(ValueError):
 
 STUDENT_CODE_RE = re.compile(r"^[A-Z]+_[0-9]{4}$")
 STAFF_CODE_RE = STUDENT_CODE_RE
+MAX_CODE_PREFIX_LENGTH = 15
 
 
 def _initials(full_name: str) -> str:
@@ -53,7 +54,7 @@ def _initials(full_name: str) -> str:
         c for c in unicodedata.normalize("NFD", full_name) if not unicodedata.combining(c)
     )
     letters = [t[0].upper() for t in ascii_name.split() if t and t[0].isalpha()]
-    return "".join(letters) or "S"
+    return "".join(letters)
 
 
 def generate_student_code(db: Session, full_name: str) -> str:
@@ -62,7 +63,9 @@ def generate_student_code(db: Session, full_name: str) -> str:
     The 4-digit part is random, not sequential; collisions with existing
     codes of the same prefix are retried (unguessable, no ordering leak).
     """
-    prefix = _initials(full_name)
+    prefix = _initials(full_name)[:MAX_CODE_PREFIX_LENGTH]
+    if not prefix:
+        raise DomainError("A full name with at least one letter is required to generate a code.")
     like = f"{prefix}_%"
     existing = [r[0] for r in db.query(User.student_code).filter(User.student_code.like(like)).all()]
     taken = set()
@@ -82,7 +85,9 @@ def generate_student_code(db: Session, full_name: str) -> str:
 
 def generate_staff_code(db: Session, full_name: str) -> str:
     """Random MSNV as INITIALS_NNNN, mirroring MSSV generation."""
-    prefix = _initials(full_name)
+    prefix = _initials(full_name)[:MAX_CODE_PREFIX_LENGTH]
+    if not prefix:
+        raise DomainError("A full name with at least one letter is required to generate a code.")
     like = f"{prefix}_%"
     existing = [r[0] for r in db.query(User.staff_code).filter(User.staff_code.like(like)).all()]
     taken = set()
