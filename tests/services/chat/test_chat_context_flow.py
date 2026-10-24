@@ -203,3 +203,107 @@ def test_first_turn_creates_a_session_and_returns_its_id(db_session: Session, mo
     assert session.class_id == class_id
     assert session.title == "What is the database policy?"
     assert done[1]["assistant_message_id"] is not None
+
+
+def _internet_decision(question: str) -> rag_service.RetrievalDecision:
+    return rag_service.RetrievalDecision(
+        question=question,
+        class_id="class-a",
+        threshold=0.8,
+        top_score=0.55,
+        source=rag_service.SOURCE_INTERNET,
+    )
+
+
+def test_internet_without_results_still_persists_the_turn(db_session: Session, monkeypatch) -> None:
+    user_id = uuid.uuid4()
+    class_id = uuid.uuid4()
+
+    monkeypatch.setattr(
+        chat_retrieval_service,
+        "retrieve_for_chat",
+        lambda db, *, question, class_id: _internet_decision(question),
+    )
+    monkeypatch.setattr(rag_service, "search_internet", lambda question: [])
+
+    events = asyncio.run(
+        _collect(
+            stream_chat(
+                db=db_session,
+                message="What is the refund policy?",
+                class_id=class_id,
+                user_id=user_id,
+                timeout_seconds=1,
+            )
+        )
+    )
+
+    done = events[-1]
+    assert done[0] == "done"
+    assert done[1]["session_id"] is not None
+    session = db_session.get(ChatSession, uuid.UUID(done[1]["session_id"]))
+    assert session is not None
+    assert session.title == "What is the refund policy?"
+
+    rows = db_session.scalars(
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session.id)
+        .order_by(ChatMessage.created_at.asc())
+    ).all()
+    assert [row.role for row in rows] == ["USER", "ASSISTANT"]
+    assert rows[1].content == rag_service.NO_SOURCE_MESSAGE
+
+
+def test_internet_answer_persists_streamed_text_and_citations(
+    db_session: Session, monkeypatch
+) -> None:
+    user_id = uuid.uuid4()
+    class_id = uuid.uuid4()
+
+    class FakeModel:
+        async def astream(self, messages):
+            yield SimpleNamespace(content="Refunds take five business days [1].")
+
+    web_results = [
+        rag_service.WebResult(
+            title="Refund policy",
+            url="https://example.com/refund",
+            content="Refunds take five business days.",
+        )
+    ]
+
+    monkeypatch.setattr(
+        chat_retrieval_service,
+        "retrieve_for_chat",
+        lambda db, *, question, class_id: _internet_decision(question),
+    )
+    monkeypatch.setattr(rag_service, "search_internet", lambda question: web_results)
+
+    events = asyncio.run(
+        _collect(
+            stream_chat(
+                db=db_session,
+                message="How long do refunds take?",
+                class_id=class_id,
+                user_id=user_id,
+                model=FakeModel(),
+                timeout_seconds=1,
+            )
+        )
+    )
+
+    done = events[-1]
+    assert done[0] == "done"
+    assert done[1]["session_id"] is not None
+    session = db_session.get(ChatSession, uuid.UUID(done[1]["session_id"]))
+    assert session is not None
+
+    rows = db_session.scalars(
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session.id)
+        .order_by(ChatMessage.created_at.asc())
+    ).all()
+    assert [row.role for row in rows] == ["USER", "ASSISTANT"]
+    assert rows[1].content == "Refunds take five business days [1]."
+    assert rows[1].citations[0]["kind"] == rag_service.SOURCE_INTERNET
+    assert rows[1].citations[0]["url"] == "https://example.com/refund"

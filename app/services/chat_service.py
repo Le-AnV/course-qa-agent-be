@@ -233,15 +233,14 @@ async def stream_chat(
                         yield _sse("citation", asdict(source))
 
             elif decision.source == rag_service.SOURCE_INTERNET:
-                llm = model or get_llm_model()
                 yield _sse("progress", {"stage": "searching"})
                 web_results = await asyncio.to_thread(rag_service.search_internet, message)
                 if not web_results:
-                    yield _sse(
-                        "token",
-                        {"text": rag_service.NO_SOURCE_MESSAGE},
-                    )
+                    text = rag_service.NO_SOURCE_MESSAGE
+                    answer_parts.append(text)
+                    yield _sse("token", {"text": text})
                 else:
+                    llm = model or get_llm_model()
                     sources = rag_service.internet_citations(web_results)
                     context = "\n\n".join(
                         f"Source ({source.title} — {source.url}):\n{result.content}"
@@ -256,9 +255,11 @@ async def stream_chat(
                     stage = "grounded answer generation"
                     stage_started = time.monotonic()
                     logger.info("Starting Internet grounded answer generation for class %s.", class_id)
+                    answer_parts = []
                     async for chunk in llm.astream(messages):
                         text = _chunk_text(chunk.content)
                         if text:
+                            answer_parts.append(text)
                             yield _sse("token", {"text": text})
                     logger.info(
                         "Internet answer generation completed for class %s in %.2fs.",
