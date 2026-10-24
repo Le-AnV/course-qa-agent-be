@@ -358,9 +358,33 @@ class RetrievalConfigRead(BaseModel):
     default_threshold: float = Field(ge=0, le=1)
     is_default: bool
     updated_at: datetime | None = None
+    unrelated_threshold: float = Field(default=0.45, ge=0, le=1)
+    default_unrelated_threshold: float = Field(default=0.45, ge=0, le=1)
 
 
 class RetrievalConfigUpdate(BaseModel):
     """New threshold; applies to the next question (AC-05)."""
 
     threshold: float = Field(ge=0, le=1)
+    unrelated_threshold: float | None = Field(default=None, ge=0, le=1)
+
+
+class RetrievalTestRequest(BaseModel):
+    """Test a sample query to preview its retrieval score and target zone."""
+
+    question: str = Field(min_length=1, max_length=500)
+    class_id: uuid.UUID | None = None
+
+
+class RetrievalTestResponse(BaseModel):
+    """Dry-run retrieval test response for the Admin Sandbox."""
+
+    question: str
+    top_score: float | None = None
+    class_id: uuid.UUID | None = None
+    class_name: str | None = None
+    matched_document: str | None = None
+    matched_snippet: str | None = None
+    source: str = "unrelated"
+
+

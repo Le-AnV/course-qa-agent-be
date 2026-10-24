@@ -10,7 +10,7 @@ from typing import Any
 from app.config import settings
 from app.services.rag_service import ScoredChunk
 
-RERANK_CANDIDATES = 20
+RERANK_CANDIDATES = 10
 RERANK_TOP_K = 5
 MAX_SEQUENCE_LENGTH = 512
 

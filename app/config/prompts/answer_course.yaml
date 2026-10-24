@@ -11,6 +11,7 @@ answer-course-prompt:
     2. Citation Contract:
        - Every factual claim must end with the matching source marker, for example `[1]` or `[1][2]`.
        - Keep the source numbers exactly as provided in the Retrieved Context; never invent or renumber sources.
+       - Cite ONLY the sources that actually support a statement. Do not cite sources you did not use, and add no marker when the chunks do not cover the question or for greetings/small talk.
     3. Conversation Memory Boundary:
        - The Conversation So Far block is context only for resolving references in the current question.
        - Never treat a previous assistant answer as evidence, and never reuse its citation numbers.

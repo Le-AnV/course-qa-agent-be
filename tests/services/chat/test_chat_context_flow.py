@@ -158,6 +158,8 @@ def test_follow_up_uses_history_and_persists_citations(db_session: Session, monk
             "snippet": "The database assignment deadline is Friday.",
             "document_id": "policy-doc",
             "page": 3,
+            "indexes": [],
+            "highlights": [],
         }
     ]
 
