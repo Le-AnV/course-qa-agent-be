@@ -6,9 +6,21 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ChatRole = Literal["USER", "ASSISTANT", "SYSTEM"]
+
+
+class ChatCitation(BaseModel):
+    """Citation snapshot stored with an assistant answer (AI-63 AC-03)."""
+
+    index: int
+    kind: str
+    title: str
+    url: str | None = None
+    snippet: str = ""
+    document_id: str | None = None
+    page: int | None = None
 
 
 class ChatMessageBase(BaseModel):
@@ -19,6 +31,17 @@ class ChatMessageBase(BaseModel):
     used_web_search: bool = Field(
         default=False, description="Whether web search was utilized for generating the answer"
     )
+    citations: list[ChatCitation] = Field(
+        default_factory=list,
+        description="Sources cited by this message, preserved across history reloads",
+    )
+
+    @field_validator("citations", mode="before")
+    @classmethod
+    def normalize_citations(cls, value):
+        """Treat a legacy NULL column as an empty citation list."""
+
+        return value or []
 
 
 class MessageCreateRequest(ChatMessageBase):
@@ -41,6 +64,22 @@ class SessionCreateRequest(BaseModel):
 
     class_id: uuid.UUID = Field(description="UUID of the class the session belongs to")
     title: str | None = Field(default=None, max_length=255, description="Optional conversation title")
+
+
+class SessionRenameRequest(BaseModel):
+    """Request payload to rename an owned chat session."""
+
+    title: str = Field(min_length=1, max_length=255, description="New conversation title")
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        """Reject blank titles and store the trimmed value."""
+
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Title must not be empty.")
+        return cleaned
 
 
 class ChatSessionResponse(BaseModel):

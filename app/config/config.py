@@ -47,6 +47,8 @@ class Settings(BaseSettings):
         separators: List of string separators used for recursive character splitting.
         headers_to_split_on: List of tuples specifying markdown headers to split on.
         retriever_top_k: Default number of relevant chunks retrieved per query.
+        chat_context_exchanges: Number of previous Q&A turns used for follow-up questions.
+        chat_context_max_chars: Maximum characters of conversation history sent to the LLM.
         prompt_file: File path or directory pointing to prompt templates.
         log_level: Logging verbosity level (DEBUG, INFO, WARNING, ERROR).
     """
@@ -164,6 +166,20 @@ class Settings(BaseSettings):
         validation_alias="HEADERS_TO_SPLIT_ON",
     )
     retriever_top_k: int = Field(default=3, validation_alias="RETRIEVER_TOP_K")
+
+    # AI-63 conversation memory: keep the last N complete Q&A exchanges.
+    chat_context_exchanges: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        validation_alias="CHAT_CONTEXT_EXCHANGES",
+    )
+    chat_context_max_chars: int = Field(
+        default=6000,
+        ge=500,
+        le=30000,
+        validation_alias="CHAT_CONTEXT_MAX_CHARS",
+    )
 
     # Prompt configuration
     prompt_file: Path = Field(

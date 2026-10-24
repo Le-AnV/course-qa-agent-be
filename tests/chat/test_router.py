@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Generator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -152,8 +153,8 @@ def test_chat_streams_sse_for_an_enrolled_student(
 ) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_stream_chat(*, db, message, class_id):
-        captured.update(db=db, message=message, class_id=class_id)
+    async def fake_stream_chat(*, db, message, class_id, **kwargs):
+        captured.update(db=db, message=message, class_id=class_id, **kwargs)
         yield _event("token", {"text": "Neural networks"})
         yield _event(
             "citation",
@@ -194,7 +195,112 @@ def test_chat_streams_sse_for_an_enrolled_student(
         "db": db_session,
         "message": "Explain neural networks.",
         "class_id": class_id,
+        "user_id": db_session.info["student_id"],
+        "session_id": None,
+        "history": [],
     }
+
+
+def test_chat_loads_context_for_an_owned_session(
+    client: TestClient,
+    student_headers: dict[str, str],
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    from app.models.chat import ChatMessage, ChatSession
+
+    session = ChatSession(
+        user_id=db_session.info["student_id"],
+        class_id=db_session.info["class_a_id"],
+        title="Policy questions",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+    created = datetime.now(UTC)
+    db_session.add_all(
+        [
+            ChatMessage(
+                session_id=session.id,
+                role="USER",
+                content="What is the policy?",
+                created_at=created,
+            ),
+            ChatMessage(
+                session_id=session.id,
+                role="ASSISTANT",
+                content="The policy is...",
+                created_at=created + timedelta(milliseconds=1),
+            ),
+        ]
+    )
+    db_session.commit()
+
+    captured: dict[str, object] = {}
+
+    async def fake_stream_chat(*, db, message, class_id, user_id, session_id, history):
+        captured.update(
+            db=db,
+            message=message,
+            class_id=class_id,
+            user_id=user_id,
+            session_id=session_id,
+            history=history,
+        )
+        yield _event("done", {"source": "none", "used_web_search": False, "threshold": 0.8, "top_score": None})
+
+    monkeypatch.setattr(chat_router.chat_service, "stream_chat", fake_stream_chat)
+
+    response = client.post(
+        "/api/chat",
+        headers=student_headers,
+        json={
+            "message": "So when is the deadline?",
+            "class_id": str(db_session.info["class_a_id"]),
+            "session_id": str(session.id),
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["session_id"] == session.id
+    assert [exchange.user for exchange in captured["history"]] == ["What is the policy?"]
+
+
+def test_chat_rejects_another_users_session(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    from app.models.chat import ChatSession
+
+    trainer_headers = _trainer_headers(db_session)
+    session = ChatSession(
+        user_id=db_session.info["student_id"],
+        class_id=db_session.info["class_a_id"],
+        title="Private",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.refresh(session)
+
+    async def fake_stream_chat(**_kwargs):
+        raise AssertionError("The stream must not start for another user's session.")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(chat_router.chat_service, "stream_chat", fake_stream_chat)
+
+    response = client.post(
+        "/api/chat",
+        headers=trainer_headers,
+        json={
+            "message": "So when is the deadline?",
+            "class_id": str(db_session.info["class_a_id"]),
+            "session_id": str(session.id),
+        },
+    )
+
+    assert response.status_code == 403
+    assert "not own this chat session" in response.json()["detail"]
 
 
 def test_student_opens_a_cited_class_document(
@@ -259,7 +365,7 @@ def test_chat_rejects_an_archived_class_for_an_enrolled_student(
     )
     _archive_class(db_session, class_id)
 
-    async def fake_stream_chat(*, db, message, class_id):
+    async def fake_stream_chat(*, db, message, class_id, **kwargs):
         yield _event(
             "done",
             {
@@ -291,7 +397,7 @@ def test_chat_rejects_an_archived_class_for_its_trainer(
     class_id = db_session.info["class_b_id"]
     _archive_class(db_session, class_id)
 
-    async def fake_stream_chat(*, db, message, class_id):
+    async def fake_stream_chat(*, db, message, class_id, **kwargs):
         yield _event(
             "done",
             {
@@ -336,7 +442,7 @@ def test_admin_can_still_chat_in_an_archived_class(
     class_id = db_session.info["class_b_id"]
     _archive_class(db_session, class_id)
 
-    async def fake_stream_chat(*, db, message, class_id):
+    async def fake_stream_chat(*, db, message, class_id, **kwargs):
         yield _event(
             "done",
             {

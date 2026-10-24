@@ -280,3 +280,119 @@ def test_save_chat_turn_service_auto_creates_session_and_truncates_title(
     assert user_msg.role == "USER"
     assert assistant_msg.role == "ASSISTANT"
     assert assistant_msg.used_web_search is False
+
+
+def test_message_citations_survive_history_reload(
+    client: TestClient, db_session: Session
+) -> None:
+    """AI-63 AC-03: reopening an old answer must keep its original citations."""
+
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+    create_res = client.post(
+        "/api/history/sessions",
+        headers=headers,
+        json={"class_id": class_id, "title": "Cited answer"},
+    )
+    session_id = create_res.json()["id"]
+
+    citation = {
+        "index": 1,
+        "kind": "curriculum",
+        "title": "syllabus.pdf",
+        "url": None,
+        "snippet": "The deadline is Friday.",
+        "document_id": "doc-1",
+        "page": 2,
+    }
+    append_res = client.post(
+        f"/api/history/sessions/{session_id}/messages",
+        headers=headers,
+        json={
+            "role": "ASSISTANT",
+            "content": "The deadline is Friday [1].",
+            "used_web_search": False,
+            "citations": [citation],
+        },
+    )
+    assert append_res.status_code == 201
+
+    detail_res = client.get(f"/api/history/{session_id}", headers=headers)
+    assert detail_res.status_code == 200
+    assert detail_res.json()["messages"][0]["citations"] == [citation]
+
+
+def test_rename_session_updates_title_without_bumping_activity(
+    client: TestClient, db_session: Session
+) -> None:
+    """An owned session can be renamed; the sidebar activity order is preserved."""
+
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+    create_res = client.post(
+        "/api/history/sessions",
+        headers=headers,
+        json={"class_id": class_id, "title": "Original title"},
+    )
+    session_id = create_res.json()["id"]
+    before = db_session.get(ChatSession, uuid.UUID(session_id)).updated_at
+
+    rename_res = client.patch(
+        f"/api/history/{session_id}",
+        headers=headers,
+        json={"title": "  My renamed conversation  "},
+    )
+
+    assert rename_res.status_code == 200
+    assert rename_res.json()["title"] == "My renamed conversation"
+    db_session.expire_all()
+    refreshed = db_session.get(ChatSession, uuid.UUID(session_id))
+    assert refreshed.title == "My renamed conversation"
+    assert refreshed.updated_at == before
+
+
+def test_rename_session_rejects_another_users_session(
+    client: TestClient, db_session: Session
+) -> None:
+    """Row-level security also applies to rename requests."""
+
+    student_headers = _login(client, "student@academic.edu.vn", "Student@123")
+    trainer_headers = _login(client, "teacher@academic.edu.vn", "Teacher@123")
+    class_id = str(_get_test_class_id(db_session))
+    create_res = client.post(
+        "/api/history/sessions",
+        headers=student_headers,
+        json={"class_id": class_id, "title": "Private session"},
+    )
+    session_id = create_res.json()["id"]
+
+    res = client.patch(
+        f"/api/history/{session_id}",
+        headers=trainer_headers,
+        json={"title": "Hijacked"},
+    )
+
+    assert res.status_code == 403
+
+
+def test_rename_session_rejects_blank_title(
+    client: TestClient, db_session: Session
+) -> None:
+    """A rename must contain at least one non-whitespace character."""
+
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+    create_res = client.post(
+        "/api/history/sessions",
+        headers=headers,
+        json={"class_id": class_id, "title": "Keep me"},
+    )
+    session_id = create_res.json()["id"]
+
+    res = client.patch(
+        f"/api/history/{session_id}",
+        headers=headers,
+        json={"title": "   "},
+    )
+
+    assert res.status_code == 422
