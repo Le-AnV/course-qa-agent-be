@@ -33,7 +33,7 @@ def test_low_cosine_score_can_still_answer_when_reranked_evidence_is_sufficient(
         return list(chunks)
 
     monkeypatch.setattr(rag_service, "retrieve_class_chunks", retrieve)
-    monkeypatch.setattr(rag_service, "get_retrieval_threshold", lambda db: 0.8)
+    monkeypatch.setattr(rag_service, "get_retrieval_threshold", lambda db: 0.75)
     monkeypatch.setattr(chat_retrieval_service, "rerank_chunks", rerank)
 
     decision = chat_retrieval_service.retrieve_for_chat(
@@ -60,3 +60,31 @@ def test_retrieval_returns_no_source_when_no_live_class_chunks(monkeypatch) -> N
     assert decision.source == chat_retrieval_service.SOURCE_NONE
     assert decision.chunks == ()
     assert decision.top_score is None
+
+
+def test_fail_fast_skips_rerank_when_top_candidate_below_unrelated_threshold(
+    monkeypatch,
+) -> None:
+    """When the best vector candidate is below unrelated_threshold, skip Cross-Encoder."""
+    low_candidate = _chunk("Unrelated text", score=0.42, name="doc-1")
+    rerank_called = False
+
+    def fake_rerank(*args, **kwargs):
+        nonlocal rerank_called
+        rerank_called = True
+        return [low_candidate]
+
+    monkeypatch.setattr(rag_service, "retrieve_class_chunks", lambda *a, **k: [low_candidate])
+    monkeypatch.setattr(rag_service, "get_retrieval_threshold", lambda db: 0.75)
+    monkeypatch.setattr(rag_service, "get_unrelated_threshold", lambda db: 0.65)
+    monkeypatch.setattr(chat_retrieval_service, "rerank_chunks", fake_rerank)
+
+    decision = chat_retrieval_service.retrieve_for_chat(
+        object(), question="What should I have for dinner?", class_id="class-a"
+    )
+
+    assert not rerank_called, "Cross-Encoder reranker should NOT be called for off-topic query"
+    assert decision.source == rag_service.SOURCE_UNRELATED
+    assert decision.chunks == ()
+    assert decision.top_score == 0.42
+

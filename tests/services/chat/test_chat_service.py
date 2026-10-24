@@ -96,6 +96,8 @@ def test_stream_chat_emits_tokens_citations_and_done(monkeypatch) -> None:
         "snippet": "A neural network contains connected layers.",
         "document_id": "doc-1",
         "page": 2,
+        "indexes": [1],
+        "highlights": ["A neural network contains connected layers."],
     }
     assert events[6][1] == {
         "source": "curriculum",

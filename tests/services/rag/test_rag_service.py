@@ -287,7 +287,7 @@ def test_score_below_threshold_hands_question_to_internet_agent(db_session):
     """AC-03: low KB confidence -> T19 agent, never a refusal/ticket."""
 
     clazz, document = _seed_class_and_document(db_session)
-    store = FakeStore([_chunk(score=0.42, document_id=str(document.id))])
+    store = FakeStore([_chunk(score=0.55, document_id=str(document.id))])
     agent = FakeInternetAgent(
         [
             rag_service.WebResult(
@@ -315,7 +315,7 @@ def test_score_below_threshold_hands_question_to_internet_agent(db_session):
     assert agent.questions == ["What data structures does Python have?"]
     assert answer.source == rag_service.SOURCE_INTERNET
     assert answer.used_web_search is True
-    assert answer.top_score == 0.42
+    assert answer.top_score == 0.55
     assert answer.citations[0].kind == rag_service.SOURCE_INTERNET
     assert answer.citations[0].url.startswith("https://docs.python.org/")
 
@@ -380,7 +380,7 @@ def test_internet_agent_outage_returns_no_source_message(db_session):
     """AC-03 + AC-04: no source at all -> a normal message, never an invented answer."""
 
     clazz, document = _seed_class_and_document(db_session)
-    store = FakeStore([_chunk(score=0.1, document_id=str(document.id))])
+    store = FakeStore([_chunk(score=0.55, document_id=str(document.id))])
 
     def generate(system_prompt: str, user_prompt: str) -> str:
         raise AssertionError("LLM must not be called without a source (AC-04)")
@@ -397,6 +397,29 @@ def test_internet_agent_outage_returns_no_source_message(db_session):
     assert answer.answer == rag_service.NO_SOURCE_MESSAGE
     assert answer.used_web_search is True
     assert answer.citations == ()
+
+
+def test_score_below_unrelated_threshold_does_not_call_internet(db_session):
+    """Below unrelated threshold (Tier 3) -> out of scope; reuse no source message without calling Internet."""
+
+    clazz, document = _seed_class_and_document(db_session)
+    store = FakeStore([_chunk(score=0.2, document_id=str(document.id))])
+    agent = FakeInternetAgent([])
+
+    answer = rag_service.answer_question(
+        db_session,
+        question="Unrelated question?",
+        class_id=clazz.id,
+        store=store,
+        internet_search=agent,
+        generate=lambda s, u: "invented",
+    )
+
+    assert store.calls
+    assert not agent.questions, "Internet search must not be called when question is unrelated"
+    assert answer.source == rag_service.SOURCE_UNRELATED
+    assert answer.answer == rag_service.NO_SOURCE_MESSAGE
+    assert answer.used_web_search is False
 
 
 def test_generation_failure_returns_only_cited_sources(db_session):
@@ -499,6 +522,8 @@ def test_admin_reads_default_retrieval_threshold(client, admin_headers):
         "default_threshold": 0.8,
         "is_default": True,
         "updated_at": None,
+        "unrelated_threshold": 0.45,
+        "default_unrelated_threshold": 0.45,
     }
 
 

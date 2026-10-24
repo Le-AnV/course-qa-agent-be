@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import logging
 import math
+import re
+import threading
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Protocol
 
+import httpx
 from langchain_core.documents import Document
 from sqlalchemy.orm import Session
 
@@ -39,8 +42,12 @@ SOURCE_INTERNET = "internet"
 
 RETRIEVAL_THRESHOLD_KEY = "retrieval_threshold"
 DEFAULT_RETRIEVAL_THRESHOLD = float(settings.retrieval_threshold)
+UNRELATED_THRESHOLD_KEY = "unrelated_threshold"
+DEFAULT_UNRELATED_THRESHOLD = 0.45
 MIN_RETRIEVAL_THRESHOLD = 0.0
 MAX_RETRIEVAL_THRESHOLD = 1.0
+
+SOURCE_UNRELATED = "unrelated"
 
 # AC-03 returns a normal answer, never a ticket; AC-04 forbids inventing one
 # when no source exists, so this is the only truthful answer left.
@@ -126,6 +133,9 @@ class Source:
     snippet: str = ""
     document_id: str | None = None
     page: int | None = None
+    # Answer markers ([n]) this page backs, and the exact passages used.
+    indexes: tuple[int, ...] = ()
+    highlights: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -138,6 +148,7 @@ class RetrievalDecision:
     top_score: float | None
     source: str
     chunks: tuple[ScoredChunk, ...] = ()
+    unrelated_threshold: float = DEFAULT_UNRELATED_THRESHOLD
 
 
 @dataclass(frozen=True)
@@ -162,6 +173,9 @@ def get_retrieval_threshold(db: Session) -> float:
     the documented default applies until an admin saves a valid number.
     """
 
+    if not hasattr(db, "query"):
+        return DEFAULT_RETRIEVAL_THRESHOLD
+
     row = db.query(SystemConfig).filter(SystemConfig.key == RETRIEVAL_THRESHOLD_KEY).first()
     if row is None:
         return DEFAULT_RETRIEVAL_THRESHOLD
@@ -176,37 +190,84 @@ def get_retrieval_threshold(db: Session) -> float:
     return value
 
 
+def get_unrelated_threshold(db: Session) -> float:
+    """Return the active lower threshold below which questions are deemed out of scope."""
+
+    if not hasattr(db, "query"):
+        return DEFAULT_UNRELATED_THRESHOLD
+
+    row = db.query(SystemConfig).filter(SystemConfig.key == UNRELATED_THRESHOLD_KEY).first()
+    if row is None:
+        return DEFAULT_UNRELATED_THRESHOLD
+    try:
+        value = float(row.value)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid %s=%r; using default.", UNRELATED_THRESHOLD_KEY, row.value)
+        return DEFAULT_UNRELATED_THRESHOLD
+    if not math.isfinite(value) or not MIN_RETRIEVAL_THRESHOLD <= value <= MAX_RETRIEVAL_THRESHOLD:
+        logger.warning("Ignoring out-of-range %s=%r; using default.", UNRELATED_THRESHOLD_KEY, row.value)
+        return DEFAULT_UNRELATED_THRESHOLD
+    return value
+
+
 def retrieval_threshold_config(db: Session) -> dict[str, Any]:
-    """Serialize the active threshold for the Admin settings API."""
+    """Serialize both thresholds for the Admin settings API."""
 
     row = db.query(SystemConfig).filter(SystemConfig.key == RETRIEVAL_THRESHOLD_KEY).first()
     threshold = get_retrieval_threshold(db)
+    unrelated_threshold = get_unrelated_threshold(db)
     return {
         "threshold": threshold,
+        "unrelated_threshold": unrelated_threshold,
         "default_threshold": DEFAULT_RETRIEVAL_THRESHOLD,
-        "is_default": threshold == DEFAULT_RETRIEVAL_THRESHOLD,
+        "default_unrelated_threshold": DEFAULT_UNRELATED_THRESHOLD,
+        "is_default": (
+            threshold == DEFAULT_RETRIEVAL_THRESHOLD
+            and unrelated_threshold == DEFAULT_UNRELATED_THRESHOLD
+        ),
         "updated_at": getattr(row, "updated_at", None) if row is not None else None,
     }
 
 
-def save_retrieval_threshold(db: Session, threshold: float) -> float:
-    """Persist a new threshold; the next question reads it immediately (AC-05)."""
+def save_retrieval_threshold(
+    db: Session,
+    threshold: float,
+    unrelated_threshold: float | None = None,
+) -> float:
+    """Persist new thresholds; the next question reads them immediately."""
 
     try:
-        value = float(threshold)
+        high = float(threshold)
     except (TypeError, ValueError) as error:
         raise RetrievalThresholdError("Threshold must be a number between 0 and 1.") from error
-    if not math.isfinite(value) or not MIN_RETRIEVAL_THRESHOLD <= value <= MAX_RETRIEVAL_THRESHOLD:
+    if not math.isfinite(high) or not MIN_RETRIEVAL_THRESHOLD <= high <= MAX_RETRIEVAL_THRESHOLD:
         raise RetrievalThresholdError("Threshold must be a number between 0 and 1.")
 
-    row = db.query(SystemConfig).filter(SystemConfig.key == RETRIEVAL_THRESHOLD_KEY).first()
-    if row is None:
-        db.add(SystemConfig(key=RETRIEVAL_THRESHOLD_KEY, value=str(value)))
+    if unrelated_threshold is not None:
+        try:
+            low = float(unrelated_threshold)
+        except (TypeError, ValueError) as error:
+            raise RetrievalThresholdError("Unrelated threshold must be a number between 0 and 1.") from error
+        if not math.isfinite(low) or not MIN_RETRIEVAL_THRESHOLD <= low <= MAX_RETRIEVAL_THRESHOLD:
+            raise RetrievalThresholdError("Unrelated threshold must be a number between 0 and 1.")
+        if low > high:
+            raise RetrievalThresholdError("Lower threshold cannot be greater than upper threshold.")
+
+        row_low = db.query(SystemConfig).filter(SystemConfig.key == UNRELATED_THRESHOLD_KEY).first()
+        if row_low is None:
+            db.add(SystemConfig(key=UNRELATED_THRESHOLD_KEY, value=str(low)))
+        else:
+            row_low.value = str(low)
+
+    row_high = db.query(SystemConfig).filter(SystemConfig.key == RETRIEVAL_THRESHOLD_KEY).first()
+    if row_high is None:
+        db.add(SystemConfig(key=RETRIEVAL_THRESHOLD_KEY, value=str(high)))
     else:
-        row.value = str(value)
+        row_high.value = str(high)
+
     db.commit()
-    logger.info("Retrieval threshold updated to %.3f (AI-65 AC-05).", value)
-    return value
+    logger.info("Retrieval thresholds updated: high=%.3f, low=%s.", high, unrelated_threshold)
+    return high
 
 
 # --- AC-01/AC-02: retrieval runs first -------------------------------------
@@ -267,15 +328,10 @@ def decide_source(
     store: VectorStore | None = None,
     top_k: int | None = None,
 ) -> RetrievalDecision:
-    """Run retrieval, then route to the curriculum or the Internet agent.
+    """Run retrieval, then route between Curriculum, Internet, or Unrelated."""
 
-    ``>=`` is deliberate: a score exactly on the threshold still belongs to
-    the knowledge base (AC-02). Retrieval failures are treated as "no useful
-    curriculum source" so the request continues to the Internet agent instead
-    of being refused (AC-03).
-    """
-
-    threshold = get_retrieval_threshold(db)
+    threshold_high = get_retrieval_threshold(db)
+    threshold_low = get_unrelated_threshold(db)
     try:
         chunks = retrieve_class_chunks(
             db,
@@ -292,31 +348,89 @@ def decide_source(
         chunks = []
 
     top_score = chunks[0].score if chunks else None
-    use_curriculum = top_score is not None and top_score >= threshold
+    if top_score is None:
+        source = SOURCE_INTERNET
+    elif top_score >= threshold_high:
+        source = SOURCE_CURRICULUM
+    elif top_score >= threshold_low:
+        source = SOURCE_INTERNET
+    else:
+        source = SOURCE_UNRELATED
+
     return RetrievalDecision(
         question=question,
         class_id=str(class_id),
-        threshold=threshold,
+        threshold=threshold_high,
+        unrelated_threshold=threshold_low,
         top_score=top_score,
-        source=SOURCE_CURRICULUM if use_curriculum else SOURCE_INTERNET,
-        chunks=tuple(chunks) if use_curriculum else (),
+        source=source,
+        chunks=tuple(chunks) if source == SOURCE_CURRICULUM else (),
     )
 
 
 # --- AC-03: Internet agent hand-off ---------------------------------------
 
 
+_tavily_client_lock = threading.Lock()
+_tavily_client: httpx.Client | None = None
+
+
+def _get_tavily_client() -> httpx.Client:
+    global _tavily_client
+    with _tavily_client_lock:
+        if _tavily_client is None or _tavily_client.is_closed:
+            _tavily_client = httpx.Client(
+                timeout=httpx.Timeout(10.0, connect=5.0),
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+            )
+        return _tavily_client
+
+
 def search_internet(question: str) -> list[WebResult]:
-    """T19 Internet source agent placeholder (AI-67 owns the provider).
+    """T19 Internet source agent powered by Tavily Search API (AI-67).
 
-    TECHSTACK §7.4 leaves the search provider to the mentor, so the stub
-    returns no results instead of inventing them. The dispatcher then answers
-    with :data:`NO_SOURCE_MESSAGE` — the request still succeeds, but the LLM
-    is never asked to answer from its own knowledge (AC-04).
+    Queries Tavily REST API when TAVILY_API_KEY is configured. Generates
+    W3C scroll-to-text-fragment deep-links for each web result.
     """
+    api_key = settings.tavily_api_key
+    if not api_key:
+        logger.info("TAVILY_API_KEY is not configured; returning no web results.")
+        return []
 
-    logger.info("Internet search agent stub returned no sources (AI-67 pending): %r", question)
-    return []
+    try:
+        from app.services.citation_service import build_universal_jump_url
+
+        client = _get_tavily_client()
+        response = client.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": api_key,
+                "query": question,
+                "search_depth": "basic",
+                "max_results": 3,
+                "include_answer": False,
+                "include_raw_content": False,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        raw_results = data.get("results", [])
+
+        web_results: list[WebResult] = []
+        for item in raw_results:
+            title = str(item.get("title") or "Web Source")
+            raw_url = str(item.get("url") or "")
+            content = str(item.get("content") or "")
+            if not raw_url:
+                continue
+            jump_url = build_universal_jump_url(raw_url, content)
+            web_results.append(WebResult(title=title, url=jump_url, content=content))
+
+        logger.info("Tavily search returned %d results for %r", len(web_results), question)
+        return web_results
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Tavily search failed: %s", exc)
+        return []
 
 
 # --- AC-02/AC-04: grounded answer generation ------------------------------
@@ -354,6 +468,9 @@ def answer_question(
         store=store,
         top_k=top_k,
     )
+
+    if decision.source == SOURCE_UNRELATED:
+        return _no_source_answer(decision)
 
     if decision.source == SOURCE_CURRICULUM:
         sources = curriculum_citations(decision.chunks)
@@ -425,6 +542,52 @@ def curriculum_citations(chunks: Sequence[ScoredChunk]) -> list[Source]:
     ]
 
 
+def cited_markers(answer: str) -> set[int]:
+    """Return the ``[n]`` / ``[n, m]`` source markers the answer actually uses."""
+
+    markers: set[int] = set()
+    for group in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", answer):
+        markers.update(int(part) for part in group.split(","))
+    return markers
+
+
+def cited_page_citations(
+    chunks: Sequence[ScoredChunk],
+    answer: str,
+) -> list[Source]:
+    """Citations for only the pages whose passages the answer referenced.
+
+    Chunks from the same document page collapse into a single citation that
+    carries every passage used (``highlights``) so the UI can mark them on
+    that page. An answer without markers (greeting, "not covered") yields no
+    citations at all.
+    """
+
+    used = cited_markers(answer)
+    grouped: dict[tuple[str, int | None], list[tuple[int, ScoredChunk]]] = {}
+    for index, chunk in enumerate(chunks, start=1):
+        if index not in used:
+            continue
+        grouped.setdefault((chunk.document_id, chunk.page), []).append((index, chunk))
+
+    sources: list[Source] = []
+    for position, ((document_id, page), members) in enumerate(grouped.items(), start=1):
+        first = members[0][1]
+        sources.append(
+            Source(
+                index=position,
+                kind=SOURCE_CURRICULUM,
+                title=first.title,
+                snippet=first.content[:CITATION_SNIPPET_LENGTH],
+                document_id=document_id or None,
+                page=page,
+                indexes=tuple(index for index, _ in members),
+                highlights=tuple(chunk.content for _, chunk in members),
+            )
+        )
+    return sources
+
+
 def internet_citations(results: Sequence[WebResult]) -> list[Source]:
     """Build E5 citations from the Internet agent results (separate label)."""
 
@@ -481,10 +644,27 @@ def _generate(
     generator = generate or generate_with_gemini
     try:
         system_prompt, user_prompt = _format_prompt(prompt_name, context, question)
-        return generator(system_prompt, user_prompt).strip()
+        raw_text = generator(system_prompt, user_prompt).strip()
+        # Clean heading hashes (#, ##, ###) into clean bold text
+        cleaned_lines = []
+        for line in raw_text.splitlines():
+            heading_match = re.match(r"^#{1,6}\s+(.+)$", line)
+            if heading_match:
+                cleaned_lines.append(f"**{heading_match.group(1)}**")
+            else:
+                cleaned_lines.append(line)
+        cleaned_text = "\n".join(cleaned_lines)
+
+        # Strip inline URLs attached to citation markers: [1](http...) or [1] (http...) -> [1]
+        cleaned_text = re.sub(r"\[(\d+)\]\s*\([^)]+\)", r"[\1]", cleaned_text)
+        # Strip redundant outer parentheses around citations: ([1]) -> [1]
+        cleaned_text = re.sub(r"\(\s*(\[\d+\])\s*\)", r"\1", cleaned_text)
+
+        return cleaned_text
     except Exception:  # the request still returns cited sources
         logger.exception("Answer generation failed; returning source-only answer.")
         return ""
+
 
 
 def _format_prompt(prompt_name: str, context: str, question: str) -> tuple[str, str]:
@@ -508,4 +688,14 @@ def generate_with_gemini(system_prompt: str, user_prompt: str) -> str:
         [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
     )
     content = response.content
+    if isinstance(content, list):
+        text_parts = []
+        for part in content:
+            if isinstance(part, dict) and "text" in part:
+                text_parts.append(part["text"])
+            elif isinstance(part, str):
+                text_parts.append(part)
+            elif hasattr(part, "text"):
+                text_parts.append(getattr(part, "text", ""))
+        return "\n".join(text_parts).strip()
     return content if isinstance(content, str) else str(content)

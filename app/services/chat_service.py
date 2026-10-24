@@ -57,6 +57,7 @@ def _chunk_text(content: Any) -> str:
     return ""
 
 
+
 def _course_context(
     chunks: Sequence[rag_service.ScoredChunk],
 ) -> str:
@@ -150,9 +151,11 @@ async def stream_chat(
                     stage = "grounded answer generation"
                     stage_started = time.monotonic()
                     logger.info("Starting grounded answer generation for class %s.", class_id)
+                    answer_parts: list[str] = []
                     async for chunk in llm.astream(messages):
                         text = _chunk_text(chunk.content)
                         if text:
+                            answer_parts.append(text)
                             yield _sse("token", {"text": text})
                     logger.info(
                         "Grounded answer generation completed for class %s in %.2fs.",
@@ -160,6 +163,46 @@ async def stream_chat(
                         time.monotonic() - stage_started,
                     )
 
+                    # Only pages the answer actually cites, one citation per
+                    # page; nothing is shown when the answer used no source.
+                    for source in rag_service.cited_page_citations(
+                        decision.chunks, "".join(answer_parts)
+                    ):
+                        yield _sse("citation", asdict(source))
+
+            elif decision.source == rag_service.SOURCE_INTERNET:
+                llm = model or get_llm_model()
+                yield _sse("progress", {"stage": "searching"})
+                web_results = await asyncio.to_thread(rag_service.search_internet, message)
+                if not web_results:
+                    yield _sse(
+                        "token",
+                        {"text": rag_service.NO_SOURCE_MESSAGE},
+                    )
+                else:
+                    sources = rag_service.internet_citations(web_results)
+                    context = "\n\n".join(
+                        f"Source ({source.title} — {source.url}):\n{result.content}"
+                        for source, result in zip(sources, web_results, strict=True)
+                    )
+                    messages = _format_messages(
+                        "answer-internet-prompt",
+                        context=context,
+                        question=message,
+                    )
+                    yield _sse("progress", {"stage": "drafting"})
+                    stage = "grounded answer generation"
+                    stage_started = time.monotonic()
+                    logger.info("Starting Internet grounded answer generation for class %s.", class_id)
+                    async for chunk in llm.astream(messages):
+                        text = _chunk_text(chunk.content)
+                        if text:
+                            yield _sse("token", {"text": text})
+                    logger.info(
+                        "Internet answer generation completed for class %s in %.2fs.",
+                        class_id,
+                        time.monotonic() - stage_started,
+                    )
                     for source in sources:
                         yield _sse("citation", asdict(source))
 
@@ -173,7 +216,7 @@ async def stream_chat(
                 "done",
                 {
                     "source": decision.source,
-                    "used_web_search": False,
+                    "used_web_search": decision.source == rag_service.SOURCE_INTERNET,
                     "threshold": decision.threshold,
                     "top_score": decision.top_score,
                 },

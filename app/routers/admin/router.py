@@ -37,6 +37,8 @@ from app.schemas.admin import (
     ImportRowRead,
     RetrievalConfigRead,
     RetrievalConfigUpdate,
+    RetrievalTestRequest,
+    RetrievalTestResponse,
     TestEmailRequest,
     UserCodeGenerate,
     UserCodeRead,
@@ -45,7 +47,14 @@ from app.schemas.admin import (
     UserRead,
 )
 from app.schemas.system_health import SystemHealthRead
-from app.services import course_service, email_service, import_service, rag_service, user_service
+from app.services import (
+    chat_retrieval_service,
+    course_service,
+    email_service,
+    import_service,
+    rag_service,
+    user_service,
+)
 from app.services.admin_settings_service import build_admin_settings
 from app.services.email_service import (
     EmailConfigurationError,
@@ -584,13 +593,54 @@ def update_retrieval_config(
     """Persist a new threshold; the next question uses it (AI-65 AC-05)."""
 
     try:
-        rag_service.save_retrieval_threshold(db, payload.threshold)
+        rag_service.save_retrieval_threshold(db, payload.threshold, payload.unrelated_threshold)
     except rag_service.RetrievalThresholdError as error:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(error),
         ) from error
     return RetrievalConfigRead(**rag_service.retrieval_threshold_config(db))
+
+
+@router.post("/retrieval-config/test", response_model=RetrievalTestResponse)
+def test_retrieval_query(
+    payload: RetrievalTestRequest,
+    db: Session = Depends(get_db),
+    _=Depends(require_admin),
+):
+    """Test a sample query against class documents and return the raw top score and matched evidence."""
+    target_class = None
+    if payload.class_id:
+        target_class = db.query(Class).filter(Class.id == payload.class_id).first()
+    if target_class is None:
+        target_class = db.query(Class).first()
+
+    if target_class is None:
+        return RetrievalTestResponse(
+            question=payload.question,
+            top_score=None,
+            class_id=None,
+            class_name="No classes found",
+            matched_document=None,
+            matched_snippet=None,
+            source="none",
+        )
+
+    decision = chat_retrieval_service.retrieve_for_chat(
+        db,
+        question=payload.question,
+        class_id=target_class.id,
+    )
+    top_chunk = decision.chunks[0] if decision.chunks else None
+    return RetrievalTestResponse(
+        question=payload.question,
+        top_score=round(decision.top_score, 4) if decision.top_score is not None else None,
+        class_id=target_class.id,
+        class_name=target_class.name or target_class.code,
+        matched_document=top_chunk.title if top_chunk else None,
+        matched_snippet=top_chunk.content[:240] if top_chunk else None,
+        source=decision.source,
+    )
 
 
 @router.post("/email/test", response_model=ConnectionTestResult)
