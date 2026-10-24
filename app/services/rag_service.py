@@ -398,7 +398,13 @@ def search_internet(question: str) -> list[WebResult]:
         return []
 
     try:
-        from app.services.citation_service import build_universal_jump_url
+        jump_builder = None
+        try:
+            from app.services.citation_service import build_universal_jump_url
+
+            jump_builder = build_universal_jump_url
+        except ImportError:
+            pass
 
         client = _get_tavily_client()
         response = client.post(
@@ -423,7 +429,7 @@ def search_internet(question: str) -> list[WebResult]:
             content = str(item.get("content") or "")
             if not raw_url:
                 continue
-            jump_url = build_universal_jump_url(raw_url, content)
+            jump_url = jump_builder(raw_url, content) if jump_builder is not None else raw_url
             web_results.append(WebResult(title=title, url=jump_url, content=content))
 
         logger.info("Tavily search returned %d results for %r", len(web_results), question)
