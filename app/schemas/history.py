@@ -6,9 +6,21 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ChatRole = Literal["USER", "ASSISTANT", "SYSTEM"]
+
+
+class ChatCitation(BaseModel):
+    """Citation snapshot stored with an assistant answer (AI-63 AC-03)."""
+
+    index: int
+    kind: str
+    title: str
+    url: str | None = None
+    snippet: str = ""
+    document_id: str | None = None
+    page: int | None = None
 
 
 class ChatMessageBase(BaseModel):
@@ -19,6 +31,17 @@ class ChatMessageBase(BaseModel):
     used_web_search: bool = Field(
         default=False, description="Whether web search was utilized for generating the answer"
     )
+    citations: list[ChatCitation] = Field(
+        default_factory=list,
+        description="Sources cited by this message, preserved across history reloads",
+    )
+
+    @field_validator("citations", mode="before")
+    @classmethod
+    def normalize_citations(cls, value):
+        """Treat a legacy NULL column as an empty citation list."""
+
+        return value or []
 
 
 class MessageCreateRequest(ChatMessageBase):

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -159,12 +160,30 @@ def create_session(
     return session
 
 
+def _citation_dicts(citations: Sequence[Any] | None) -> list[dict[str, Any]]:
+    """Convert Pydantic models or mappings into JSON-serializable citation dicts."""
+
+    if not citations:
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for citation in citations:
+        if hasattr(citation, "model_dump"):
+            normalized.append(citation.model_dump())
+        elif isinstance(citation, dict):
+            normalized.append(dict(citation))
+        else:
+            normalized.append(dict(citation))
+    return normalized
+
+
 def append_message(
     db: Session,
     session_id: uuid.UUID,
     role: str,
     content: str,
     used_web_search: bool = False,
+    citations: Sequence[Any] | None = None,
 ) -> ChatMessage:
     """Append a single message to an existing session and update session's updated_at timestamp."""
     message = ChatMessage(
@@ -172,6 +191,7 @@ def append_message(
         role=role,
         content=content,
         used_web_search=used_web_search,
+        citations=_citation_dicts(citations),
     )
     db.add(message)
 
@@ -193,6 +213,7 @@ def save_chat_turn(
     assistant_content: str,
     session_id: uuid.UUID | None = None,
     used_web_search: bool = False,
+    citations: Sequence[Any] | None = None,
     query_embedding: list[float] | None = None,
     qdrant_client: Any | None = None,
 ) -> tuple[ChatSession, ChatMessage, ChatMessage]:
@@ -200,7 +221,8 @@ def save_chat_turn(
 
     1. If session_id is None, initializes a new session with title = first 50 chars of user query (AC-03).
     2. Persists USER message and ASSISTANT message (with used_web_search flag) (AC-02).
-    3. If used_web_search is True and query_embedding is provided, syncs to Qdrant content_gap_queries (AC-03).
+    3. Stores the assistant citations so history reloads keep the original answer traceable (AI-63 AC-03).
+    4. If used_web_search is True and query_embedding is provided, syncs to Qdrant content_gap_queries (AC-03).
        NOTE: Strictly does NOT invoke Gemini Embedding API — reuses existing query_embedding.
     """
     if session_id is None:
@@ -227,18 +249,24 @@ def save_chat_turn(
                 detail="Access forbidden: you do not own this chat session.",
             )
 
-    # 2. Insert both USER and ASSISTANT messages
+    # 2. Insert both USER and ASSISTANT messages. Explicit, separated
+    # timestamps keep the pair ordered even when a database stores both rows
+    # in one statement with microsecond-level clock resolution.
+    turn_started = datetime.now(UTC)
     user_msg = ChatMessage(
         session_id=session.id,
         role="USER",
         content=user_content,
         used_web_search=False,
+        created_at=turn_started,
     )
     assistant_msg = ChatMessage(
         session_id=session.id,
         role="ASSISTANT",
         content=assistant_content,
         used_web_search=used_web_search,
+        citations=_citation_dicts(citations),
+        created_at=turn_started + timedelta(milliseconds=1),
     )
 
     db.add(user_msg)

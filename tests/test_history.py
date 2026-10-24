@@ -280,3 +280,43 @@ def test_save_chat_turn_service_auto_creates_session_and_truncates_title(
     assert user_msg.role == "USER"
     assert assistant_msg.role == "ASSISTANT"
     assert assistant_msg.used_web_search is False
+
+
+def test_message_citations_survive_history_reload(
+    client: TestClient, db_session: Session
+) -> None:
+    """AI-63 AC-03: reopening an old answer must keep its original citations."""
+
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+    create_res = client.post(
+        "/api/history/sessions",
+        headers=headers,
+        json={"class_id": class_id, "title": "Cited answer"},
+    )
+    session_id = create_res.json()["id"]
+
+    citation = {
+        "index": 1,
+        "kind": "curriculum",
+        "title": "syllabus.pdf",
+        "url": None,
+        "snippet": "The deadline is Friday.",
+        "document_id": "doc-1",
+        "page": 2,
+    }
+    append_res = client.post(
+        f"/api/history/sessions/{session_id}/messages",
+        headers=headers,
+        json={
+            "role": "ASSISTANT",
+            "content": "The deadline is Friday [1].",
+            "used_web_search": False,
+            "citations": [citation],
+        },
+    )
+    assert append_res.status_code == 201
+
+    detail_res = client.get(f"/api/history/{session_id}", headers=headers)
+    assert detail_res.status_code == 200
+    assert detail_res.json()["messages"][0]["citations"] == [citation]
