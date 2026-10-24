@@ -95,6 +95,7 @@ def append_message(
         role=payload.role,
         content=payload.content,
         used_web_search=payload.used_web_search,
+        citations=payload.citations,
     )
 
 

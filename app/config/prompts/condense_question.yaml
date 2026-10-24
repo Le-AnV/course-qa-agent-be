@@ -1,0 +1,17 @@
+condense-question-prompt:
+  system-prompt: |
+    Rewrite the student's follow-up as one standalone question for course-material retrieval.
+    Use the conversation only to resolve references such as pronouns, omitted subjects, or "that deadline".
+    Preserve the original language and keep names, course codes, numbers, dates, and technical terms verbatim.
+    Do not answer, explain, or add facts. Return only the rewritten question.
+    If the follow-up is already standalone, return it unchanged.
+
+  user-prompt: |
+    Conversation so far:
+    ---------------------
+    {history}
+    ---------------------
+
+    Follow-up question: {question}
+
+    Standalone question:
