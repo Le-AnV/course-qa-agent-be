@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.config.config import settings
@@ -175,6 +175,41 @@ def _citation_dicts(citations: Sequence[Any] | None) -> list[dict[str, Any]]:
         else:
             normalized.append(dict(citation))
     return normalized
+
+
+def rename_session(
+    db: Session,
+    session_id: uuid.UUID,
+    user_id: uuid.UUID,
+    title: str,
+) -> ChatSession:
+    """Rename an owned chat session without changing its recent-activity order.
+
+    ``updated_at`` drives the sidebar ordering, so a rename writes the title
+    only; the column is explicitly set to itself to bypass the model onupdate.
+    """
+
+    session = db.scalar(select(ChatSession).where(ChatSession.id == session_id))
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat session not found.",
+        )
+
+    if session.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: you do not own this chat session.",
+        )
+
+    db.execute(
+        update(ChatSession)
+        .where(ChatSession.id == session.id)
+        .values(title=title.strip(), updated_at=ChatSession.updated_at)
+    )
+    db.commit()
+    db.refresh(session)
+    return session
 
 
 def append_message(

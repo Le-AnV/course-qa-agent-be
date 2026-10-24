@@ -16,6 +16,7 @@ from app.schemas.history import (
     DeleteSessionResponse,
     MessageCreateRequest,
     SessionCreateRequest,
+    SessionRenameRequest,
 )
 from app.services import history_service
 
@@ -96,6 +97,22 @@ def append_message(
         content=payload.content,
         used_web_search=payload.used_web_search,
         citations=payload.citations,
+    )
+
+
+@router.patch("/{session_id}", response_model=ChatSessionResponse)
+def rename_session(
+    session_id: uuid.UUID,
+    payload: SessionRenameRequest,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Rename one chat session owned by the authenticated user."""
+    return history_service.rename_session(
+        db=db,
+        session_id=session_id,
+        user_id=current_user.id,
+        title=payload.title,
     )
 
 

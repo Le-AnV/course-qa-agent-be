@@ -10,6 +10,7 @@
 **Key notes:**
 - Tables: `conversations`, `messages` in PostgreSQL (see `models/chat.py`).
 - Context window: follow-ups use prior messages (pairs with AI-63).
+- A new session is titled from the first 50 characters of its first question; `PATCH /api/history/{session_id}` lets the owner rename it without changing the sidebar activity order.
 - When `used_web_search = true`, the **query embedding is also written to Qdrant `content_gap_queries`** (0 extra API calls — reuse of the T18 embed, TECHSTACK §3.3).
 - Deleting a history also deletes its points from `content_gap_queries` (by `message_id`).
 
