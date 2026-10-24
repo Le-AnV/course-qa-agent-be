@@ -13,7 +13,7 @@ from app.models.course import Class, ClassTrainer, Enrollment
 from app.models.document import Document
 from app.models.user import User
 from app.schemas.chat import ChatRequest
-from app.services import chat_service, document_service
+from app.services import chat_context_service, chat_service, document_service
 from app.services.course_service import STATUS_ARCHIVED
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -99,11 +99,24 @@ async def chat(
     """Answer one question using sources scoped to the requested class."""
 
     _require_class_access(db=db, user=current_user, class_id=payload.class_id)
+
+    history = []
+    if payload.session_id is not None:
+        history = chat_context_service.load_recent_exchanges(
+            db=db,
+            session_id=payload.session_id,
+            user_id=current_user.id,
+            class_id=payload.class_id,
+        )
+
     return StreamingResponse(
         chat_service.stream_chat(
             db=db,
             message=payload.message,
             class_id=payload.class_id,
+            user_id=current_user.id,
+            session_id=payload.session_id,
+            history=history,
         ),
         media_type="text/event-stream",
         headers={

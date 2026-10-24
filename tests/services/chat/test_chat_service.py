@@ -102,6 +102,9 @@ def test_stream_chat_emits_tokens_citations_and_done(monkeypatch) -> None:
         "used_web_search": False,
         "threshold": 0.8,
         "top_score": 0.91,
+        "session_id": None,
+        "user_message_id": None,
+        "assistant_message_id": None,
     }
     rendered_prompt = "\n".join(str(message.content) for message in captured_messages)
     assert "A neural network contains connected layers." in rendered_prompt

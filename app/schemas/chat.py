@@ -8,10 +8,11 @@ from pydantic import BaseModel, field_validator
 
 
 class ChatRequest(BaseModel):
-    """One question scoped to a specific class."""
+    """One question scoped to a specific class and optional conversation."""
 
     message: str
     class_id: uuid.UUID
+    session_id: uuid.UUID | None = None
 
     @field_validator("message")
     @classmethod

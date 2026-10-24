@@ -26,3 +26,24 @@ def test_chat_request_rejects_blank_message(message: str) -> None:
 def test_chat_request_rejects_invalid_class_id() -> None:
     with pytest.raises(ValidationError):
         ChatRequest(message="What is unit 1 about?", class_id="not-a-uuid")
+
+
+def test_chat_request_accepts_an_optional_session_id() -> None:
+    session_id = uuid.uuid4()
+
+    payload = ChatRequest(
+        message="So when is the deadline?",
+        class_id=uuid.uuid4(),
+        session_id=session_id,
+    )
+
+    assert payload.session_id == session_id
+
+
+def test_chat_request_rejects_an_invalid_session_id() -> None:
+    with pytest.raises(ValidationError):
+        ChatRequest(
+            message="So when is the deadline?",
+            class_id=uuid.uuid4(),
+            session_id="not-a-session",
+        )
