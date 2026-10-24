@@ -66,6 +66,22 @@ class SessionCreateRequest(BaseModel):
     title: str | None = Field(default=None, max_length=255, description="Optional conversation title")
 
 
+class SessionRenameRequest(BaseModel):
+    """Request payload to rename an owned chat session."""
+
+    title: str = Field(min_length=1, max_length=255, description="New conversation title")
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        """Reject blank titles and store the trimmed value."""
+
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Title must not be empty.")
+        return cleaned
+
+
 class ChatSessionResponse(BaseModel):
     """Response schema for chat session summary in sidebar/list (AC-04, AC-06)."""
 
