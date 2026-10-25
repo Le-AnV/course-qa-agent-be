@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db
@@ -13,7 +15,7 @@ from app.models.course import Class, ClassTrainer, Enrollment
 from app.models.document import Document
 from app.models.user import User
 from app.schemas.chat import ChatRequest
-from app.services import chat_context_service, chat_service, document_service
+from app.services import chat_context_service, chat_service, document_service, pdf_highlight_service
 from app.services.course_service import STATUS_ARCHIVED
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -88,6 +90,71 @@ def open_source(
         filename=record.file_name,
         content_disposition_type="inline",
     )
+
+
+class HighlightRequest(BaseModel):
+    """Passages to mark on one page of a cited PDF."""
+
+    page: int = Field(ge=1)
+    passages: list[str] = Field(default_factory=list, max_length=20)
+
+
+@router.post("/sources/{document_id}/highlight")
+def highlight_source(
+    document_id: uuid.UUID,
+    payload: HighlightRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Return the cited PDF with the passages used for the answer highlighted."""
+
+    record = db.query(Document).filter(Document.id == document_id).first()
+    if record is None or record.status != document_service.STATUS_INDEXED:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    _require_class_access(db=db, user=current_user, class_id=record.class_id)
+    if record.mime_type != "application/pdf":
+        raise HTTPException(status_code=415, detail="Highlighting is only available for PDF files.")
+    try:
+        path = document_service.document_path(record)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Document file is not available.") from None
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Document file is not available.")
+
+    content = pdf_highlight_service.highlight_pdf(path, payload.page, payload.passages)
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{record.file_name}"'},
+    )
+
+
+@router.post("/sources/{document_id}/rects")
+def highlight_source_rects(
+    document_id: uuid.UUID,
+    payload: HighlightRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return lightweight bounding boxes for cited passages without transferring full PDF."""
+
+    record = db.query(Document).filter(Document.id == document_id).first()
+    if record is None or record.status != document_service.STATUS_INDEXED:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    _require_class_access(db=db, user=current_user, class_id=record.class_id)
+    if record.mime_type != "application/pdf":
+        raise HTTPException(status_code=415, detail="Highlighting is only available for PDF files.")
+    try:
+        path = document_service.document_path(record)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Document file is not available.") from None
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Document file is not available.")
+
+    rects = pdf_highlight_service.get_highlight_rects(path, payload.page, payload.passages)
+    return {"document_id": str(document_id), "page": payload.page, "rects": rects}
 
 
 @router.post("")

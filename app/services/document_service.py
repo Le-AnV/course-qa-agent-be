@@ -238,6 +238,12 @@ def document_path(record: Document) -> Path:
 
     root = settings.document_storage_dir.resolve()
     stored = Path(record.storage_path)
+
+    # Cross-environment fallback: resolve by filename under storage root
+    direct_match = (root / stored.name).resolve()
+    if direct_match.is_relative_to(root) and direct_match.is_file():
+        return direct_match
+
     if stored.is_absolute():
         path = stored.resolve()
     else:

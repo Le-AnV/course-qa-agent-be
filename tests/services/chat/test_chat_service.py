@@ -190,9 +190,9 @@ def test_stream_chat_converts_model_failure_to_sse_error(monkeypatch) -> None:
     )
 
     assert events == [
-        ("progress", {"stage": "searching"}),
-        ("progress", {"stage": "reading"}),
-        ("progress", {"stage": "drafting"}),
+        ("progress", {"stage": "searching", "message": "Searching class materials"}),
+        ("progress", {"stage": "reading", "message": "Found 1 section in lesson.pdf"}),
+        ("progress", {"stage": "drafting", "message": "Synthesizing answer"}),
         (
             "error",
             {"message": "The answer could not be generated. Please try again."},
@@ -221,9 +221,9 @@ def test_stream_chat_times_out_without_hanging(monkeypatch, caplog) -> None:
     )
 
     assert events == [
-        ("progress", {"stage": "searching"}),
-        ("progress", {"stage": "reading"}),
-        ("progress", {"stage": "drafting"}),
+        ("progress", {"stage": "searching", "message": "Searching class materials"}),
+        ("progress", {"stage": "reading", "message": "Found 1 section in lesson.pdf"}),
+        ("progress", {"stage": "drafting", "message": "Synthesizing answer"}),
         (
             "error",
             {"message": "The answer timed out. Please try again."},
@@ -274,7 +274,7 @@ def test_stream_chat_does_not_search_web_or_call_model_without_evidence(monkeypa
     )
 
     assert [event for event, _ in events] == ["progress", "token", "done"]
-    assert events[0][1] == {"stage": "searching"}
+    assert events[0][1] == {"stage": "searching", "message": "Searching class materials"}
     assert events[1][1] == {"text": chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE}
     assert events[2][1]["source"] == chat_retrieval_service.SOURCE_NONE
     assert events[2][1]["used_web_search"] is False

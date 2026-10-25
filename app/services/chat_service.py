@@ -15,7 +15,13 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy.orm import Session
 
 from app.core.prompt_manager import get_prompt_manager
-from app.services import chat_context_service, chat_retrieval_service, history_service, rag_service
+from app.services import (
+    chat_context_service,
+    chat_retrieval_service,
+    history_service,
+    quick_response_service,
+    rag_service,
+)
 from app.services.chat_context_service import ConversationExchange
 from app.services.llm.provider import get_llm_model
 
@@ -57,6 +63,55 @@ def _chunk_text(content: Any) -> str:
 
     return ""
 
+
+ENABLE_QUOTA_FALLBACK: bool = True
+FALLBACK_MODEL_NAME: str = "models/gemini-2.5-flash"
+PRIMARY_MODEL_FIRST_CHUNK_TIMEOUT: float = 12.0
+
+
+async def _stream_with_fallback(
+    llm: Any,
+    messages: list[Any],
+    *,
+    allow_fallback: bool = True,
+    first_chunk_timeout: float = PRIMARY_MODEL_FIRST_CHUNK_TIMEOUT,
+) -> AsyncIterator[str]:
+    """Stream chunks from LLM, falling back if 429 quota or connection hang occurs."""
+    if not (ENABLE_QUOTA_FALLBACK and allow_fallback):
+        async for chunk in llm.astream(messages):
+            text = _chunk_text(chunk.content)
+            if text:
+                yield text
+        return
+
+    stream_iter = llm.astream(messages).__aiter__()
+    try:
+        first_chunk = await asyncio.wait_for(
+            stream_iter.__anext__(),
+            timeout=first_chunk_timeout,
+        )
+        text = _chunk_text(first_chunk.content)
+        if text:
+            yield text
+        async for chunk in stream_iter:
+            text = _chunk_text(chunk.content)
+            if text:
+                yield text
+        return
+    except StopAsyncIteration:
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Primary LLM (%s) failed or timed out (%s). Falling back to %s.",
+            getattr(llm, "model", "primary"),
+            exc,
+            FALLBACK_MODEL_NAME,
+        )
+        fallback = get_llm_model(model=FALLBACK_MODEL_NAME)
+        async for chunk in fallback.astream(messages):
+            text = _chunk_text(chunk.content)
+            if text:
+                yield text
 
 
 def _course_context(
@@ -158,7 +213,47 @@ async def stream_chat(
 
     try:
         async with asyncio.timeout(timeout_seconds):
-            yield _sse("progress", {"stage": "searching"})
+            quick_answer = quick_response_service.get_quick_response(message)
+            if quick_answer:
+                chunks = quick_response_service.split_into_stream_chunks(quick_answer)
+                for chunk in chunks:
+                    yield _sse("token", {"text": chunk})
+                    await asyncio.sleep(0.02)
+
+                saved_turn = await _persist_turn(
+                    db=db,
+                    user_id=user_id,
+                    session_id=session_id,
+                    class_id=class_id,
+                    message=message,
+                    answer=quick_answer,
+                    citations=[],
+                )
+                saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
+
+                yield _sse(
+                    "done",
+                    {
+                        "source": "conversation",
+                        "used_web_search": False,
+                        "threshold": 0.0,
+                        "top_score": None,
+                        "session_id": (
+                            str(saved_session.id)
+                            if saved_session is not None
+                            else (str(session_id) if session_id is not None else None)
+                        ),
+                        "user_message_id": (
+                            str(user_msg.id) if user_msg is not None else None
+                        ),
+                        "assistant_message_id": (
+                            str(assistant_msg.id) if assistant_msg is not None else None
+                        ),
+                    },
+                )
+                return
+
+            yield _sse("progress", {"stage": "searching", "message": "Searching class materials"})
 
             standalone_question = message
             if context_history:
@@ -191,7 +286,20 @@ async def stream_chat(
                 len(decision.chunks),
             )
             if decision.chunks:
-                yield _sse("progress", {"stage": "reading"})
+                doc_titles = list(dict.fromkeys(c.title for c in decision.chunks if c.title))
+                count = len(decision.chunks)
+                unit = "section" if count == 1 else "sections"
+                if doc_titles:
+                    primary = doc_titles[0]
+                    if len(primary) > 24:
+                        primary = primary[:21] + "..."
+                    if len(doc_titles) == 1:
+                        read_msg = f"Found {count} {unit} in {primary}"
+                    else:
+                        read_msg = f"Found {count} {unit} in {primary} & {len(doc_titles) - 1} more"
+                else:
+                    read_msg = f"Found {count} relevant {unit}"
+                yield _sse("progress", {"stage": "reading", "message": read_msg})
 
             if decision.source == rag_service.SOURCE_CURRICULUM:
                 llm = model or get_llm_model()
@@ -209,13 +317,12 @@ async def stream_chat(
                         history=chat_context_service.format_history_context(context_history),
                     )
 
-                    yield _sse("progress", {"stage": "drafting"})
+                    yield _sse("progress", {"stage": "drafting", "message": "Synthesizing answer"})
                     stage = "grounded answer generation"
                     stage_started = time.monotonic()
                     logger.info("Starting grounded answer generation for class %s.", class_id)
                     answer_parts: list[str] = []
-                    async for chunk in llm.astream(messages):
-                        text = _chunk_text(chunk.content)
+                    async for text in _stream_with_fallback(llm, messages, allow_fallback=(model is None)):
                         if text:
                             answer_parts.append(text)
                             yield _sse("token", {"text": text})
@@ -233,7 +340,7 @@ async def stream_chat(
                         yield _sse("citation", asdict(source))
 
             elif decision.source == rag_service.SOURCE_INTERNET:
-                yield _sse("progress", {"stage": "searching"})
+                yield _sse("progress", {"stage": "searching", "message": "Searching the web"})
                 web_results = await asyncio.to_thread(rag_service.search_internet, message)
                 if not web_results:
                     text = rag_service.NO_SOURCE_MESSAGE
@@ -242,6 +349,7 @@ async def stream_chat(
                 else:
                     llm = model or get_llm_model()
                     sources = rag_service.internet_citations(web_results)
+                    yield _sse("progress", {"stage": "reading", "message": f"Reviewing {len(web_results)} web sources"})
                     context = "\n\n".join(
                         f"Source ({source.title} — {source.url}):\n{result.content}"
                         for source, result in zip(sources, web_results, strict=True)
@@ -251,13 +359,12 @@ async def stream_chat(
                         context=context,
                         question=message,
                     )
-                    yield _sse("progress", {"stage": "drafting"})
+                    yield _sse("progress", {"stage": "drafting", "message": "Synthesizing answer"})
                     stage = "grounded answer generation"
                     stage_started = time.monotonic()
                     logger.info("Starting Internet grounded answer generation for class %s.", class_id)
                     answer_parts = []
-                    async for chunk in llm.astream(messages):
-                        text = _chunk_text(chunk.content)
+                    async for text in _stream_with_fallback(llm, messages, allow_fallback=(model is None)):
                         if text:
                             answer_parts.append(text)
                             yield _sse("token", {"text": text})

@@ -14,6 +14,7 @@ retrieval runs (AC-03).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -237,12 +238,18 @@ async def condense_question(
             question=question,
         )
         llm = model or get_llm_model()
-        response = await llm.ainvoke(
-            [
-                SystemMessage(content=str(prompt["system-prompt"])),
-                HumanMessage(content=str(prompt["user-prompt"])),
-            ]
-        )
+        messages = [
+            SystemMessage(content=str(prompt["system-prompt"])),
+            HumanMessage(content=str(prompt["user-prompt"])),
+        ]
+        if model is not None:
+            response = await llm.ainvoke(messages)
+        else:
+            try:
+                response = await asyncio.wait_for(llm.ainvoke(messages), timeout=4.0)
+            except Exception:  # noqa: BLE001
+                fallback = get_llm_model(model="models/gemini-2.5-flash")
+                response = await asyncio.wait_for(fallback.ainvoke(messages), timeout=4.0)
         rewritten = _message_text(getattr(response, "content", response))
     except Exception:
         logger.warning(
