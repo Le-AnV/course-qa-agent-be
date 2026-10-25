@@ -89,10 +89,10 @@ class Settings(BaseSettings):
         validation_alias="RERANKER_MODEL",
     )
 
-    llm_model: ClassVar[str] = "models/gemini-3.8-flash"
+    llm_model: ClassVar[str] = "models/gemini-3.5-flash-lite"
     llm_temperature: float = Field(default=1.0, validation_alias="LLM_TEMPERATURE")
 
-    vlm_model: str = Field(default="models/gemini-2.5-flash", validation_alias="VLM_MODEL")
+    vlm_model: str = Field(default="models/gemini-3.5-flash", validation_alias="VLM_MODEL")
     vlm_temperature: float = Field(default=1.0, validation_alias="VLM_TEMPERATURE")
 
     google_api_key: SecretStr | None = Field(

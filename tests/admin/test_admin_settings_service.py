@@ -18,7 +18,7 @@ def test_build_admin_settings_returns_confirmed_values_without_secrets():
 
     assert payload == {
         "llm": {
-            "model": "models/gemini-3.8-flash",
+            "model": "models/gemini-3.5-flash-lite",
             "api_key_configured": True,
         },
         "email": {

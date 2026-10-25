@@ -51,7 +51,7 @@ def test_llm_connection_lists_models_without_generating_content(monkeypatch):
     def create_client(*, api_key):
         """Return a fake client after checking the SDK receives the key value."""
         assert api_key == "gemini-secret"
-        client = FakeGeminiClient(["models/gemini-3.8-flash"])
+        client = FakeGeminiClient(["models/gemini-3.5-flash-lite"])
         clients.append(client)
         return client
 

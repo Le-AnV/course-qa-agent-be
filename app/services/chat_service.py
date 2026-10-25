@@ -65,7 +65,7 @@ def _chunk_text(content: Any) -> str:
 
 
 ENABLE_QUOTA_FALLBACK: bool = True
-FALLBACK_MODEL_NAME: str = "models/gemini-2.5-flash"
+FALLBACK_MODEL_NAME: str = "models/gemini-flash-lite-latest"
 PRIMARY_MODEL_FIRST_CHUNK_TIMEOUT: float = 12.0
 
 
