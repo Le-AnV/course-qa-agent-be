@@ -25,7 +25,7 @@ from app.core.database import Base, get_session_local, reset_engine
 from app.core.deps import get_db
 from app.core.seed import seed_database
 from app.main import app
-from app.models.chat import ChatSession
+from app.models.chat import ChatMessage, ChatSession
 from app.models.course import Class
 from app.models.user import User
 from app.services import history_service
@@ -253,6 +253,179 @@ def test_delete_session_cascades(client: TestClient, db_session: Session) -> Non
     # Verify session is gone
     get_res = client.get(f"/api/history/{session_id}", headers=headers)
     assert get_res.status_code == 404
+
+
+def test_delete_session_does_not_affect_other_sessions(
+    client: TestClient, db_session: Session
+) -> None:
+    """AC-01: Deleting one session leaves other sessions and their messages intact."""
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+
+    create_1 = client.post(
+        "/api/history/sessions",
+        headers=headers,
+        json={"class_id": class_id, "title": "Session to delete"},
+    )
+    assert create_1.status_code == 201
+    session_1_id = create_1.json()["id"]
+
+    create_2 = client.post(
+        "/api/history/sessions",
+        headers=headers,
+        json={"class_id": class_id, "title": "Session to keep"},
+    )
+    assert create_2.status_code == 201
+    session_2_id = create_2.json()["id"]
+
+    for session_id, label in ((session_1_id, "Session 1"), (session_2_id, "Session 2")):
+        for role in ("USER", "ASSISTANT"):
+            msg_res = client.post(
+                f"/api/history/sessions/{session_id}/messages",
+                headers=headers,
+                json={"role": role, "content": f"{label} {role.lower()} message"},
+            )
+            assert msg_res.status_code == 201
+
+    delete_res = client.delete(f"/api/history/{session_1_id}", headers=headers)
+    assert delete_res.status_code == 200
+
+    deleted_detail = client.get(f"/api/history/{session_1_id}", headers=headers)
+    assert deleted_detail.status_code == 404
+
+    kept_detail = client.get(f"/api/history/{session_2_id}", headers=headers)
+    assert kept_detail.status_code == 200
+    kept_messages = kept_detail.json()["messages"]
+    assert len(kept_messages) == 2
+    assert {message["content"] for message in kept_messages} == {
+        "Session 2 user message",
+        "Session 2 assistant message",
+    }
+
+    list_res = client.get(f"/api/history?class_id={class_id}", headers=headers)
+    assert list_res.status_code == 200
+    items = list_res.json()["items"]
+    assert len(items) == 1
+    assert items[0]["id"] == session_2_id
+
+
+def test_delete_session_rejects_another_user(
+    client: TestClient, db_session: Session
+) -> None:
+    """AC-02: A non-owner receives 403 and the session remains intact."""
+    student_headers = _login(client, "student@academic.edu.vn", "Student@123")
+    trainer_headers = _login(client, "teacher@academic.edu.vn", "Teacher@123")
+    class_id = str(_get_test_class_id(db_session))
+
+    create_res = client.post(
+        "/api/history/sessions",
+        headers=student_headers,
+        json={"class_id": class_id, "title": "Owner only"},
+    )
+    assert create_res.status_code == 201
+    session_id = create_res.json()["id"]
+
+    msg_res = client.post(
+        f"/api/history/sessions/{session_id}/messages",
+        headers=student_headers,
+        json={"role": "USER", "content": "Private question"},
+    )
+    assert msg_res.status_code == 201
+
+    forbidden = client.delete(f"/api/history/{session_id}", headers=trainer_headers)
+    assert forbidden.status_code == 403
+    assert (
+        forbidden.json()["detail"]
+        == "Access forbidden: you do not own this chat session."
+    )
+
+    detail_res = client.get(f"/api/history/{session_id}", headers=student_headers)
+    assert detail_res.status_code == 200
+    assert len(detail_res.json()["messages"]) == 1
+
+    db_session.expire_all()
+    assert db_session.get(ChatSession, uuid.UUID(session_id)) is not None
+
+
+def test_delete_nonexistent_session_returns_404(client: TestClient) -> None:
+    """AC-03: Deleting a random UUID returns 404 Not Found."""
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    fake_id = uuid.uuid4()
+
+    res = client.delete(f"/api/history/{fake_id}", headers=headers)
+    assert res.status_code == 404
+
+
+def test_delete_session_purges_content_gap_vectors(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-03: Web-search vectors are purged and all messages cascade-delete."""
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+
+    create_res = client.post(
+        "/api/history/sessions",
+        headers=headers,
+        json={"class_id": class_id, "title": "Qdrant cleanup"},
+    )
+    assert create_res.status_code == 201
+    session_id = create_res.json()["id"]
+    session_uuid = uuid.UUID(session_id)
+
+    normal_msg = client.post(
+        f"/api/history/sessions/{session_id}/messages",
+        headers=headers,
+        json={"role": "USER", "content": "Normal question", "used_web_search": False},
+    )
+    assert normal_msg.status_code == 201
+
+    web_msg = client.post(
+        f"/api/history/sessions/{session_id}/messages",
+        headers=headers,
+        json={
+            "role": "ASSISTANT",
+            "content": "Answer with web fallback",
+            "used_web_search": True,
+        },
+    )
+    assert web_msg.status_code == 201
+    assert web_msg.json()["used_web_search"] is True
+    web_msg_id = web_msg.json()["id"]
+
+    assert (
+        db_session.query(ChatMessage)
+        .filter(ChatMessage.session_id == session_uuid)
+        .count()
+        == 2
+    )
+
+    captured_message_ids: list[str] = []
+
+    def fake_delete_content_gap_queries(
+        message_ids: list[str], qdrant_client: object | None = None
+    ) -> None:
+        captured_message_ids.extend(message_ids)
+
+    monkeypatch.setattr(
+        history_service,
+        "delete_content_gap_queries",
+        fake_delete_content_gap_queries,
+    )
+
+    delete_res = client.delete(f"/api/history/{session_id}", headers=headers)
+    assert delete_res.status_code == 200
+    assert captured_message_ids == [web_msg_id]
+
+    db_session.expire_all()
+    assert db_session.get(ChatSession, session_uuid) is None
+    remaining_messages = (
+        db_session.query(ChatMessage)
+        .filter(ChatMessage.session_id == session_uuid)
+        .count()
+    )
+    assert remaining_messages == 0
 
 
 def test_save_chat_turn_service_auto_creates_session_and_truncates_title(
