@@ -39,7 +39,6 @@ from app.schemas.admin import (
     RetrievalConfigUpdate,
     RetrievalTestRequest,
     RetrievalTestResponse,
-    TestEmailRequest,
     UserCodeGenerate,
     UserCodeRead,
     UserCreate,
@@ -56,11 +55,6 @@ from app.services import (
     user_service,
 )
 from app.services.admin_settings_service import build_admin_settings
-from app.services.email_service import (
-    EmailConfigurationError,
-    EmailDeliveryError,
-    send_test_email,
-)
 from app.services.llm import (
     LlmConfigurationError,
     LlmConnectionError,
@@ -531,28 +525,6 @@ def retry_email(email_id: int, db: Session = Depends(get_db), _=Depends(require_
     return {"id": entry.id, "status": entry.status}
 
 
-@router.post("/email-config/test")
-def queue_test_email(
-    payload: TestEmailRequest, db: Session = Depends(get_db), _=Depends(require_admin)
-):
-    # Renamed (was send_test_email): queues via the AI-31 outbox instead of
-    # sending STARTTLS directly, so it no longer shadows the AI-105 import.
-    entry = email_service.queue_email(
-        db,
-        str(payload.to_email),
-        "Course QA test email",
-        "Email sender is configured correctly.",
-    )
-    result = email_service.process_queue(db)
-    db.refresh(entry)
-    if entry.status != "sent":
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=entry.last_error or "Send failed.",
-        )
-    return {"sent_to": entry.to_email, **result}
-
-
 @router.get("/roles")
 def list_roles(_=Depends(require_admin)):
     return {"roles": import_service.valid_role_names()}
@@ -641,16 +613,6 @@ def test_retrieval_query(
         matched_snippet=top_chunk.content[:240] if top_chunk else None,
         source=decision.source,
     )
-
-
-@router.post("/email/test", response_model=ConnectionTestResult)
-def test_email_sender(admin=Depends(require_admin)):
-    """Send a test message to the authenticated Admin's email address."""
-
-    try:
-        return send_test_email(admin.email, settings)
-    except (EmailConfigurationError, EmailDeliveryError) as error:
-        return ConnectionTestResult(success=False, message=str(error))
 
 
 # --- AI-109 health check & system monitoring (admin dashboard) ---

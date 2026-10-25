@@ -15,7 +15,6 @@ from sqlalchemy.orm import Session
 from app.config import Settings, settings
 from app.models.email_outbox import EMAIL_FAILED, EMAIL_PENDING, EMAIL_SENT, EmailOutbox
 from app.models.system_config import SystemConfig
-from app.schemas.admin import ConnectionTestResult
 
 CONFIG_KEYS = (
     "smtp_host",
@@ -349,19 +348,3 @@ def send_email(
     message["Subject"] = subject
     message.set_content(body)
     _send_message(message, config, "Email could not be sent")
-
-
-def send_test_email(recipient: str, config: Settings) -> ConnectionTestResult:
-    """Send one test email without returning or logging SMTP credentials."""
-
-    message = EmailMessage()
-    message["From"] = str(config.smtp_sender_email or "")
-    message["To"] = recipient
-    message["Subject"] = "Course Q&A Agent test email"
-    message.set_content("Your Course Q&A Agent email configuration is working.")
-    _send_message(message, config, "Test email could not be sent")
-
-    return ConnectionTestResult(
-        success=True,
-        message="Test email sent successfully",
-    )

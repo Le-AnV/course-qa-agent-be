@@ -171,10 +171,7 @@ App password is **masked** — never returned, never logged.
 ### PATCH /api/admin/email-config — `200` (same shape)
 
 Write-only `smtp_app_password` (blank = keep). DB-backed config overrides env.
-
-### POST /api/admin/email-config/test — `200 { sent_to, processed, sent, failed }`
-
-Body: `{ "to_email": "you@gmail.com" }`. Misconfigured sender → `502`.
+`email_dry_run` is server-side only (env + DB); it is not editable through the API.
 
 ### GET /api/admin/email-queue/stats — `200 { pending, sent, failed }`
 

@@ -9,7 +9,6 @@ from app.config import Settings, settings
 from app.core.database import Base, get_session_local, reset_engine
 from app.core.deps import get_db
 from app.main import app
-from app.services.email_service import EmailDeliveryError
 from app.services.llm import LlmConnectionError
 
 TEST_DB_URL = "sqlite://"
@@ -91,7 +90,6 @@ def test_admin_settings_requires_admin_role(api_client, db_session):
     endpoints = [
         ("GET", "/api/admin/settings"),
         ("POST", "/api/admin/llm/test-connection"),
-        ("POST", "/api/admin/email/test"),
         ("GET", "/api/admin/system/health"),
     ]
     student = student_headers(api_client, db_session)
@@ -144,30 +142,7 @@ def test_admin_can_check_llm_connection(api_client, monkeypatch):
     }
 
 
-def test_admin_can_send_test_email_to_their_login_address(api_client, monkeypatch):
-    """Send the SMTP test message to the currently authenticated Admin."""
-
-    recipients = []
-
-    def record_test_email(recipient, config):
-        """Record the recipient and return a successful test result."""
-
-        recipients.append(recipient)
-        return {"success": True, "message": "Test email sent successfully"}
-
-    monkeypatch.setattr("app.routers.admin.router.send_test_email", record_test_email)
-
-    response = api_client.post("/api/admin/email/test", headers=admin_headers(api_client))
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "success": True,
-        "message": "Test email sent successfully",
-    }
-    assert recipients == [settings.bootstrap_admin_email.lower()]
-
-
-def test_admin_connection_endpoints_return_safe_failure_results(api_client, monkeypatch):
+def test_admin_llm_connection_returns_safe_failure_result(api_client, monkeypatch):
     """Convert provider failures to clear results without leaking internals."""
 
     def fail_llm_connection(config):
@@ -175,25 +150,14 @@ def test_admin_connection_endpoints_return_safe_failure_results(api_client, monk
 
         raise LlmConnectionError("Gemini connection failed")
 
-    def fail_email_delivery(recipient, config):
-        """Simulate a failed SMTP send without exposing provider details."""
-
-        raise EmailDeliveryError("Test email could not be sent")
-
     monkeypatch.setattr("app.routers.admin.router.check_llm_connection", fail_llm_connection)
-    monkeypatch.setattr("app.routers.admin.router.send_test_email", fail_email_delivery)
-    headers = admin_headers(api_client)
 
-    llm_response = api_client.post("/api/admin/llm/test-connection", headers=headers)
-    email_response = api_client.post("/api/admin/email/test", headers=headers)
+    response = api_client.post(
+        "/api/admin/llm/test-connection", headers=admin_headers(api_client)
+    )
 
-    assert llm_response.json() == {
+    assert response.json() == {
         "success": False,
         "message": "Gemini connection failed",
     }
-    assert email_response.json() == {
-        "success": False,
-        "message": "Test email could not be sent",
-    }
-    assert llm_response.status_code == 200
-    assert email_response.status_code == 200
+    assert response.status_code == 200
