@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.core.prompt_manager import get_prompt_manager
 from app.models.system_config import SystemConfig
-from app.services import document_service
+from app.services import citation_service, document_service
 
 logger = logging.getLogger(__name__)
 
@@ -568,8 +568,9 @@ def cited_page_citations(
     that page. An answer without markers (greeting, "not covered") yields no
     citations at all.
     """
+    _, verified_markers = citation_service.verify_citations(answer, chunks)
+    used = set(verified_markers) if verified_markers else cited_markers(answer)
 
-    used = cited_markers(answer)
     grouped: dict[tuple[str, int | None], list[tuple[int, ScoredChunk]]] = {}
     for index, chunk in enumerate(chunks, start=1):
         if index not in used:
@@ -579,12 +580,13 @@ def cited_page_citations(
     sources: list[Source] = []
     for position, ((document_id, page), members) in enumerate(grouped.items(), start=1):
         first = members[0][1]
+        best_sentence = citation_service.extract_best_sentence(first.content, answer)
         sources.append(
             Source(
                 index=position,
                 kind=SOURCE_CURRICULUM,
                 title=first.title,
-                snippet=first.content[:CITATION_SNIPPET_LENGTH],
+                snippet=(best_sentence or first.content)[:CITATION_SNIPPET_LENGTH],
                 document_id=document_id or None,
                 page=page,
                 indexes=tuple(index for index, _ in members),
