@@ -6,7 +6,11 @@ import pytest
 from pydantic import SecretStr
 
 from app.config.config import settings
-from app.services.embedding.gemini_embedding import GeminiEmbedding
+from app.services.embedding.gemini_embedding import (
+    BATCH_PACING_SECONDS,
+    DOCUMENT_BATCH_SIZE,
+    GeminiEmbedding,
+)
 
 # ---------------------------------------------------------
 # REAL API INTEGRATION TESTS
@@ -129,22 +133,27 @@ def test_embed_documents_max_retries_exceeded(mock_google_embeddings, mock_sleep
 
 @patch("time.sleep", return_value=None)
 @patch("app.services.embedding.gemini_embedding.GoogleGenerativeAIEmbeddings")
-def test_embed_documents_does_not_retry_exhausted_quota(mock_google_embeddings, mock_sleep):
-    """A minute quota cannot recover on the normal short retry schedule."""
+def test_embed_documents_retries_minute_quota_and_succeeds(mock_google_embeddings, mock_sleep):
+    """A per-minute 429 is transient: wait for the provider hint, then retry."""
     mock_instance = mock_google_embeddings.return_value
-    mock_instance.embed_documents.side_effect = Exception(
-        "429 RESOURCE_EXHAUSTED: embedding quota exceeded"
-    )
+    mock_instance.embed_documents.side_effect = [
+        Exception(
+            "429 RESOURCE_EXHAUSTED: embed_content requests per minute limit exceeded. Please retry in 48.1s."
+        ),
+        [[0.5]],
+    ]
     embedder = GeminiEmbedding(api_key="dummy_key", model="dummy_model")
 
-    with pytest.raises(Exception, match="RESOURCE_EXHAUSTED"):
-        embedder.embed_documents(["lesson"])
+    result = embedder.embed_documents(["lesson"])
 
-    assert mock_instance.embed_documents.call_count == 1
+    assert result == [[0.5]]
+    assert mock_instance.embed_documents.call_count == 2
+    assert mock_sleep.call_args_list[0].args[0] >= 48
 
 
+@patch("time.sleep", return_value=None)
 @patch("app.services.embedding.gemini_embedding.GoogleGenerativeAIEmbeddings")
-def test_embed_documents_empty_list(mock_google_embeddings):
+def test_embed_documents_empty_list(mock_google_embeddings, mock_sleep):
     """Test behavior when passing an empty list of documents."""
     mock_instance = mock_google_embeddings.return_value
     mock_instance.embed_documents.return_value = []
@@ -153,4 +162,20 @@ def test_embed_documents_empty_list(mock_google_embeddings):
     result = embedder.embed_documents([])
 
     assert result == []
-    mock_instance.embed_documents.assert_called_once_with([])
+    mock_instance.embed_documents.assert_called_once_with([], batch_size=DOCUMENT_BATCH_SIZE)
+
+
+@patch("time.sleep", return_value=None)
+@patch("app.services.embedding.gemini_embedding.GoogleGenerativeAIEmbeddings")
+def test_embed_documents_paces_batches_under_the_minute_limit(mock_google_embeddings, mock_sleep):
+    """Large uploads must stay under the free-tier requests-per-minute window."""
+    mock_instance = mock_google_embeddings.return_value
+    mock_instance.embed_documents.side_effect = lambda texts, batch_size: [[0.1]] * len(texts)
+
+    embedder = GeminiEmbedding(api_key="dummy_key", model="dummy_model")
+    vectors = embedder.embed_documents([f"chunk-{index}" for index in range(100)])
+
+    assert len(vectors) == 100
+    batch_sizes = [len(call.args[0]) for call in mock_instance.embed_documents.call_args_list]
+    assert batch_sizes == [45, 45, 10]
+    assert [call.args[0] for call in mock_sleep.call_args_list] == [BATCH_PACING_SECONDS] * 2

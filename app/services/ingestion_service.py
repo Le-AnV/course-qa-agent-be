@@ -26,7 +26,9 @@ def _failure_reason(error: Exception) -> str:
     message = str(error)
     upper_message = message.upper()
     if "RESOURCE_EXHAUSTED" in upper_message or "QUOTA" in upper_message:
-        return "Gemini embedding quota exceeded. Wait for the quota to reset, then retry."
+        if "PER DAY" in upper_message or "PERDAY" in upper_message:
+            return "Gemini embedding quota is exhausted for today. Retry tomorrow."
+        return "Gemini embedding rate limit was hit repeatedly. Wait a minute, then retry the document."
     if isinstance(error, FileNotFoundError):
         return "The stored source file could not be found. Upload the document again."
     if isinstance(error, SyllabusFormatError):

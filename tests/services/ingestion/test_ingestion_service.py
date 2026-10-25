@@ -123,11 +123,21 @@ def test_process_document_marks_failed_and_removes_partial_vectors(monkeypatch, 
     db.commit.assert_called_once()
 
 
-def test_failure_reason_explains_embedding_quota():
-    error = RuntimeError("429 RESOURCE_EXHAUSTED: embedding quota exceeded")
+def test_failure_reason_explains_embedding_rate_limit():
+    error = RuntimeError(
+        "429 RESOURCE_EXHAUSTED: Embed content requests per minute limit exceeded. Please retry in 48s."
+    )
 
     assert ingestion_service._failure_reason(error) == (
-        "Gemini embedding quota exceeded. Wait for the quota to reset, then retry."
+        "Gemini embedding rate limit was hit repeatedly. Wait a minute, then retry the document."
+    )
+
+
+def test_failure_reason_explains_daily_embedding_quota():
+    error = RuntimeError("429 RESOURCE_EXHAUSTED: quota limit exceeded per day for model")
+
+    assert ingestion_service._failure_reason(error) == (
+        "Gemini embedding quota is exhausted for today. Retry tomorrow."
     )
 
 
