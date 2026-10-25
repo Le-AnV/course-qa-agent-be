@@ -119,6 +119,49 @@ def test_initials_vietnamese_names():
     assert user_service._initials("  An   ") == "A"
 
 
+def test_initials_transliterate_d_with_stroke():
+    assert user_service._initials("Phạm Đức Đạt") == "PDD"
+    assert user_service._initials("Đỗ Văn An") == "DVA"
+    assert user_service._initials("đinh thị đào") == "DTD"
+
+
+def test_generated_code_with_d_with_stroke_is_creatable(db_session):
+    name = "Phạm Đức Đạt"
+    code = user_service.generate_student_code(db_session, name)
+    assert user_service.STUDENT_CODE_RE.fullmatch(code), code
+    assert code.startswith("PDD_")
+
+    user, _ = user_service.create_user(
+        db_session, name, "dat@gmail.com", "student", None, student_code=code
+    )
+    assert user.student_code == code
+
+
+def test_generate_code_endpoint_returns_creatable_code_for_d_with_stroke(api_client):
+    h = admin_headers(api_client)
+    generated = api_client.post(
+        "/api/admin/users/generate-code",
+        json={"full_name": "Phạm Đức Đạt", "role": "student"},
+        headers=h,
+    )
+    assert generated.status_code == 200, generated.text
+    code = generated.json()["code"]
+    assert user_service.STUDENT_CODE_RE.fullmatch(code), code
+
+    created = api_client.post(
+        "/api/admin/users",
+        json={
+            "username": "Phạm Đức Đạt",
+            "email": "dat.api@gmail.com",
+            "role": "student",
+            "student_code": code,
+        },
+        headers=h,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["student_code"] == code
+
+
 def test_auto_code_matches_format(db_session):
     code = user_service.generate_student_code(db_session, "Tran Van A")
     assert user_service.STUDENT_CODE_RE.fullmatch(code), code
@@ -140,6 +183,8 @@ def test_generated_codes_require_a_name_with_letters(db_session):
         user_service.generate_student_code(db_session, "   ")
     with pytest.raises(user_service.DomainError, match="full name"):
         user_service.generate_staff_code(db_session, "   ")
+    with pytest.raises(user_service.DomainError, match="Latin"):
+        user_service.generate_student_code(db_session, "王小明")
 
 
 def test_auto_codes_are_random_and_unique_per_prefix(db_session):

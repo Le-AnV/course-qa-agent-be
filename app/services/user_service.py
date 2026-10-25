@@ -49,12 +49,19 @@ MAX_CODE_PREFIX_LENGTH = 15
 
 
 def _initials(full_name: str) -> str:
-    """First letters of each name token, ASCII uppercased (Tran Van A -> TVA)."""
+    """First letters of each name token, ASCII uppercased (Tran Van A -> TVA).
+
+    NFD strips the combining marks of Vietnamese vowels (ắ -> a) but leaves
+    ``Đ``/``đ`` intact, which would produce a prefix the code validator
+    rejects. Transliterate those explicitly, then keep only A-Z so generated
+    codes always satisfy :data:`STUDENT_CODE_RE`.
+    """
     ascii_name = "".join(
         c for c in unicodedata.normalize("NFD", full_name) if not unicodedata.combining(c)
     )
+    ascii_name = ascii_name.replace("Đ", "D").replace("đ", "d")
     letters = [t[0].upper() for t in ascii_name.split() if t and t[0].isalpha()]
-    return "".join(letters)
+    return "".join(c for c in letters if "A" <= c <= "Z")
 
 
 def generate_student_code(db: Session, full_name: str) -> str:
@@ -65,7 +72,9 @@ def generate_student_code(db: Session, full_name: str) -> str:
     """
     prefix = _initials(full_name)[:MAX_CODE_PREFIX_LENGTH]
     if not prefix:
-        raise DomainError("A full name with at least one letter is required to generate a code.")
+        raise DomainError(
+            "A full name with at least one Latin letter (A-Z) is required to generate a code."
+        )
     like = f"{prefix}_%"
     existing = [r[0] for r in db.query(User.student_code).filter(User.student_code.like(like)).all()]
     taken = set()
@@ -87,7 +96,9 @@ def generate_staff_code(db: Session, full_name: str) -> str:
     """Random MSNV as INITIALS_NNNN, mirroring MSSV generation."""
     prefix = _initials(full_name)[:MAX_CODE_PREFIX_LENGTH]
     if not prefix:
-        raise DomainError("A full name with at least one letter is required to generate a code.")
+        raise DomainError(
+            "A full name with at least one Latin letter (A-Z) is required to generate a code."
+        )
     like = f"{prefix}_%"
     existing = [r[0] for r in db.query(User.staff_code).filter(User.staff_code.like(like)).all()]
     taken = set()
