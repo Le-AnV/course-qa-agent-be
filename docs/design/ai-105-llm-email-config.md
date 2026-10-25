@@ -50,7 +50,6 @@ an authenticated non-Admin receives `403`.
 |---|---|---|
 | `GET /api/admin/settings` | Return the active model, SMTP host/port/security, sender address, rate, and booleans indicating whether credentials are configured. | Never returns the Gemini key or SMTP App Password. |
 | `POST /api/admin/llm/test-connection` | Check whether the configured Gemini key can access the fixed model. It lists accessible models and does not generate an answer. | Returns only a success flag and safe message. |
-| `POST /api/admin/email/test` | Send a plain-text test message to the authenticated Admin's email address. | No secret in request or response. |
 
 Connection-test response shape:
 
@@ -87,8 +86,8 @@ configuration path.
 3. Restart the backend after changing `.env` values.
 4. Sign in as an Admin and open `/admin/settings`.
 5. Confirm the UI reports whether each credential is configured, then run
-   **Test connection** and **Send test email**. The test message goes to the
-   signed-in Admin's email address.
+   **Test connection**. Email delivery is exercised by queuing real mail and
+   using **Send pending emails** on `/admin/email`.
 
 Automated checks (run from the backend repository root):
 
