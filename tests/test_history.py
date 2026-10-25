@@ -456,7 +456,7 @@ def test_save_chat_turn_continues_existing_session_without_creating_new(
     session_id = session.id
 
     # Second turn (continue existing session)
-    continued_session, user_msg2, assistant_msg2 = history_service.save_chat_turn(
+    continued_session, _, _ = history_service.save_chat_turn(
         db=db_session,
         user_id=student.id,
         class_id=class_id,
