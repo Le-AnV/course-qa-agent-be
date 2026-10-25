@@ -396,3 +396,200 @@ def test_rename_session_rejects_blank_title(
     )
 
     assert res.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# AI-97 — Reopen an Old Conversation & Continue (AC-01, AC-02, AC-03)
+# ---------------------------------------------------------------------------
+
+
+def test_save_chat_turn_creates_new_session_when_session_id_none(
+    db_session: Session,
+) -> None:
+    """AC-03: When session_id is None, save_chat_turn creates a new session and 2 messages."""
+    student = db_session.query(User).filter(User.email == "student@academic.edu.vn").first()
+    assert student is not None
+    class_id = _get_test_class_id(db_session)
+
+    session, user_msg, assistant_msg = history_service.save_chat_turn(
+        db=db_session,
+        user_id=student.id,
+        class_id=class_id,
+        user_content="What are the prerequisite units?",
+        assistant_content="The prerequisites are Unit 1 and Unit 2.",
+        session_id=None,
+    )
+
+    assert session is not None
+    assert session.user_id == student.id
+    assert session.class_id == class_id
+    assert session.title.startswith("What are the prerequisite")
+    assert user_msg.role == "USER"
+    assert user_msg.content == "What are the prerequisite units?"
+    assert assistant_msg.role == "ASSISTANT"
+    assert assistant_msg.content == "The prerequisites are Unit 1 and Unit 2."
+
+    # Verify messages in DB
+    detail = history_service.get_session_messages(db_session, session.id, student.id)
+    assert len(detail.messages) == 2
+    assert detail.messages[0].id == user_msg.id
+    assert detail.messages[1].id == assistant_msg.id
+
+
+def test_save_chat_turn_continues_existing_session_without_creating_new(
+    db_session: Session,
+) -> None:
+    """AC-01, AC-02: Calling save_chat_turn twice with the same session_id appends messages to 1 session."""
+    student = db_session.query(User).filter(User.email == "student@academic.edu.vn").first()
+    assert student is not None
+    class_id = _get_test_class_id(db_session)
+
+    # First turn (create new session)
+    session, _, _ = history_service.save_chat_turn(
+        db=db_session,
+        user_id=student.id,
+        class_id=class_id,
+        user_content="First question",
+        assistant_content="First answer",
+        session_id=None,
+    )
+    session_id = session.id
+
+    # Second turn (continue existing session)
+    continued_session, user_msg2, assistant_msg2 = history_service.save_chat_turn(
+        db=db_session,
+        user_id=student.id,
+        class_id=class_id,
+        user_content="Second question follow-up",
+        assistant_content="Second answer with context",
+        session_id=session_id,
+    )
+
+    assert continued_session.id == session_id
+
+    # Verify exactly 4 messages in that single session in chronological order
+    detail = history_service.get_session_messages(db_session, session_id, student.id)
+    assert len(detail.messages) == 4
+    assert detail.messages[0].content == "First question"
+    assert detail.messages[1].content == "First answer"
+    assert detail.messages[2].content == "Second question follow-up"
+    assert detail.messages[3].content == "Second answer with context"
+
+
+def test_save_chat_turn_rejects_another_users_session(
+    db_session: Session,
+) -> None:
+    """AC-03 / Security: Reopening and continuing another user's session raises 403 Forbidden."""
+    student = db_session.query(User).filter(User.email == "student@academic.edu.vn").first()
+    trainer = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    assert student is not None and trainer is not None
+    class_id = _get_test_class_id(db_session)
+
+    # Student creates session
+    student_session, _, _ = history_service.save_chat_turn(
+        db=db_session,
+        user_id=student.id,
+        class_id=class_id,
+        user_content="Student private question",
+        assistant_content="Student answer",
+        session_id=None,
+    )
+
+    # Trainer attempts to continue student's session -> must raise 403
+    with pytest.raises(Exception) as exc_info:
+        history_service.save_chat_turn(
+            db=db_session,
+            user_id=trainer.id,
+            class_id=class_id,
+            user_content="Trainer hijacking",
+            assistant_content="Trainer answer",
+            session_id=student_session.id,
+        )
+    assert "403" in str(exc_info.value) or "forbidden" in str(exc_info.value).lower()
+
+
+def test_reopen_session_loads_recent_exchanges_in_order(
+    db_session: Session,
+) -> None:
+    """AC-01: Reopening an old session loads its conversation exchanges chronologically."""
+    from app.services import chat_context_service
+
+    student = db_session.query(User).filter(User.email == "student@academic.edu.vn").first()
+    assert student is not None
+    class_id = _get_test_class_id(db_session)
+
+    session, _, _ = history_service.save_chat_turn(
+        db=db_session,
+        user_id=student.id,
+        class_id=class_id,
+        user_content="Explain Dijkstra algorithm",
+        assistant_content="Dijkstra finds the shortest path.",
+        session_id=None,
+    )
+
+    history_service.save_chat_turn(
+        db=db_session,
+        user_id=student.id,
+        class_id=class_id,
+        user_content="What is its time complexity?",
+        assistant_content="With binary heap, it is O((V+E) log V).",
+        session_id=session.id,
+    )
+
+    exchanges = chat_context_service.load_recent_exchanges(
+        db=db_session,
+        session_id=session.id,
+        user_id=student.id,
+        class_id=class_id,
+    )
+
+    assert len(exchanges) == 2
+    assert exchanges[0].user == "Explain Dijkstra algorithm"
+    assert exchanges[0].assistant == "Dijkstra finds the shortest path."
+    assert exchanges[1].user == "What is its time complexity?"
+    assert exchanges[1].assistant == "With binary heap, it is O((V+E) log V)."
+
+
+def test_new_chat_does_not_leak_context_from_old_session(
+    db_session: Session,
+) -> None:
+    """AC-03: Switching to a new chat (session_id=None) starts fresh without old exchanges."""
+    from app.services import chat_context_service
+
+    student = db_session.query(User).filter(User.email == "student@academic.edu.vn").first()
+    assert student is not None
+    class_id = _get_test_class_id(db_session)
+
+    # Old session with exchanges
+    old_session, _, _ = history_service.save_chat_turn(
+        db=db_session,
+        user_id=student.id,
+        class_id=class_id,
+        user_content="Old session question about python",
+        assistant_content="Python is dynamically typed.",
+        session_id=None,
+    )
+
+    # New session started later
+    new_session, _, _ = history_service.save_chat_turn(
+        db=db_session,
+        user_id=student.id,
+        class_id=class_id,
+        user_content="Brand new session question about docker",
+        assistant_content="Docker packages applications into containers.",
+        session_id=None,
+    )
+
+    assert new_session.id != old_session.id
+
+    new_exchanges = chat_context_service.load_recent_exchanges(
+        db=db_session,
+        session_id=new_session.id,
+        user_id=student.id,
+        class_id=class_id,
+    )
+
+    assert len(new_exchanges) == 1
+    assert "docker" in new_exchanges[0].user.lower()
+    assert "python" not in new_exchanges[0].user.lower()
+
