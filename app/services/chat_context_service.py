@@ -248,7 +248,7 @@ async def condense_question(
             try:
                 response = await asyncio.wait_for(llm.ainvoke(messages), timeout=4.0)
             except Exception:  # noqa: BLE001
-                fallback = get_llm_model(model="models/gemini-2.5-flash")
+                fallback = get_llm_model(model="models/gemini-flash-lite-latest")
                 response = await asyncio.wait_for(fallback.ainvoke(messages), timeout=4.0)
         rewritten = _message_text(getattr(response, "content", response))
     except Exception:

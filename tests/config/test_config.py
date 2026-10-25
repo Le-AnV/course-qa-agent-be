@@ -74,7 +74,7 @@ def test_settings_uses_confirmed_ai105_defaults():
     """Keep the agreed model, SMTP transport, and send-rate values fixed."""
     settings = Settings(_env_file=None)
 
-    assert settings.llm_model == "models/gemini-3.8-flash"
+    assert settings.llm_model == "models/gemini-3.5-flash-lite"
     assert settings.smtp_host == "smtp.gmail.com"
     assert settings.smtp_port == 587
     assert settings.smtp_security == "STARTTLS"
@@ -88,5 +88,5 @@ def test_environment_cannot_override_fixed_ai105_configuration(monkeypatch):
 
     settings = Settings(_env_file=None)
 
-    assert settings.llm_model == "models/gemini-3.8-flash"
+    assert settings.llm_model == "models/gemini-3.5-flash-lite"
     assert settings.smtp_port == 587
