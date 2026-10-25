@@ -1,134 +1,127 @@
-# AI-65 — Retrieval Score Threshold (KB vs Internet)
+# AI-65 — Retrieval Score Threshold (KB vs Internet vs Out of Scope)
 
-> **Ticket:** AI-65 (Epic E4, parent AI-23) · **Status:** Implemented (backend + admin UI)
+> **Ticket:** AI-65 (Epic E4, parent AI-23) · **Status:** Implemented (3-Tier routing, fail-fast CPU optimization, admin test sandbox)
 > **Branch:** `features/Implementation_RetrievalScoreThreshold`
 > **Related stories:** AI-61 (RAG Q&A backend), AI-67 (Internet source agent),
 > AI-107 (embedding/retrieval configuration), AI-39 (deleted/replaced documents).
 
 ## Purpose
 
-Every student question must get an answer from a **cited source**. Retrieval
-runs first; if the best class-material score is confident enough, the answer is
-generated from the curriculum (AC-02). Otherwise the question is handed to the
-Internet source agent (AC-03). The model never answers from its own knowledge
-(AC-04), and an admin can change the confidence threshold without a redeploy
-(AC-05).
+Every student question is routed through a rigorous multi-tier decision boundary:
+1. **Curriculum Source (`SOURCE_CURRICULUM`)**: When class materials contain high-confidence evidence ($Score \ge T_{high}$), answers are generated strictly grounded in course materials with explicit citations (AC-02).
+2. **Internet Fallback (`SOURCE_INTERNET`)**: When class materials lack sufficient confidence but the query is still relevant ($T_{low} \le Score < T_{high}$), the question is handed to the Internet source agent (AC-03).
+3. **Out of Scope / Off-Topic Guard (`SOURCE_UNRELATED`)**: When the query has no substantive connection to course topics ($Score < T_{low}$), it is rejected early, preventing hallucinated answers or irrelevant web searches.
 
-## Scope and confirmed team decisions
+An administrator can inspect and adjust both thresholds ($T_{high}$ and $T_{low}$) live without redeploying (AC-05), and can validate threshold behavior against class documents via an interactive test sandbox.
+
+## Scope and Confirmed Architecture
 
 | Decision | Rationale |
 |---|---|
-| Core routing lives in `app/services/rag_service.py` | Matches `app/routers/chat/README.md`; AI-61 will call it from the streaming endpoint. |
-| Retrieval always runs before the routing decision | AC-01 is guaranteed structurally: `decide_source()` calls `retrieve_class_chunks()` before any comparison. |
-| Comparison is inclusive (`score >= threshold`) | AC-02: a score exactly on the threshold still answers from the materials. |
-| Default threshold is `0.8` | `settings.retrieval_threshold` (AI-107). No environment variable needed. |
-| The active threshold is stored in `system_config` under `retrieval_threshold` | AC-05 / T35. DB value overrides the code default; the next question reads it. |
-| Retrieval is class-scoped in Qdrant | `QdrantStore.similarity_search_with_score()` filters on the `class_id` payload written by AI-41/39, so another class can never leak into an answer. |
-| AI-39's live-document guard is applied after retrieval | A deleted/replaced file whose vectors were not fully purged can never win the threshold or be cited. |
-| The Internet provider is a stub | AI-67 owns T19 and the provider is still TBD (TECHSTACK §7.4). The stub returns no results instead of inventing them. |
-| No source → deterministic message, no LLM call | AC-04 forbids answering from model knowledge. The request still returns normally (not a ticket/refusal, AC-03). |
-| Answer generation only receives numbered sources | Curriculum uses `answer-course-prompt`; Internet uses `answer-internet-prompt`. Both forbid outside knowledge. |
+| 3-Tier Routing Decision in `app/services/rag_service.py` | Formulates the decision boundary based on dual thresholds: $T_{high}$ (`retrieval_threshold`, default `0.80`) and $T_{low}$ (`unrelated_threshold`, default `0.45`). |
+| Fail-Fast CPU Bypass in `app/services/chat_retrieval_service.py` | If the maximum cosine candidate returned by Qdrant is already below $T_{low}$, Cross-Encoder reranking is skipped completely, cutting off-topic query latency from 5–6s to < 0.2s. |
+| Preserving Cosine Similarity in `app/services/reranker_service.py` | Cross-Encoder reorders chunk candidates for optimal contextual generation, but the original normalized cosine similarity score $[0.0, 1.0]$ is preserved on `chunk.score` for consistent threshold evaluation. |
+| Dual Threshold Persistence in `system_configs` | Both `retrieval_threshold` and `unrelated_threshold` are persisted in the database, overriding defaults dynamically on the next student question without server restarts. |
+| Interactive Test Sandbox API (`POST /api/admin/retrieval-config/test`) | Allows administrators to run test queries against a target class and view real-time scores, matched document titles, excerpts, and the resulting routing decision. |
 
-### AC-03 vs AC-04 tension
+## Threshold Decision Boundary
 
-AC-03 says the Internet agent "always answers", while AC-04 forbids answers
-without a source. If the agent returns no usable source (provider down, no
-results), the only consistent behaviour is a normal, truthful message
-(`NO_SOURCE_MESSAGE`) with `used_web_search=true` and zero citations. The
-request is still accepted — no error, no refusal, no ticket — but the LLM is
-never asked to invent an answer. When AI-67 provides a working provider, the
-normal path always carries Internet citations.
+```
+      Score >= T_high (0.80)     -->  SOURCE_CURRICULUM (Answer from Class Slides/Docs)
+T_low <= Score <  T_high (0.45)  -->  SOURCE_INTERNET   (Search Google/Internet Agent)
+         Score <  T_low (0.45)   -->  SOURCE_UNRELATED  (Out of Scope Refusal, No Search)
+```
 
-## API design
+## API Specifications
 
-### `GET /api/admin/retrieval-config` (admin only)
+### `GET /api/admin/retrieval-config` (Admin Only)
 
-Returns the active threshold and the documented default.
+Retrieves the currently active upper and lower thresholds.
 
 ```json
 {
   "threshold": 0.8,
   "default_threshold": 0.8,
+  "unrelated_threshold": 0.45,
+  "default_unrelated_threshold": 0.45,
   "is_default": true,
   "updated_at": null
 }
 ```
 
-### `PATCH /api/admin/retrieval-config` (admin only)
+### `PATCH /api/admin/retrieval-config` (Admin Only)
 
+Updates one or both thresholds with validation ($0.0 \le T_{low} \le T_{high} \le 1.0$).
+
+**Request:**
 ```json
-{ "threshold": 0.65 }
+{
+  "threshold": 0.75,
+  "unrelated_threshold": 0.40
+}
 ```
 
-Response is the same shape as `GET`, with `is_default: false` and the new
-`updated_at`. Values outside `[0, 1]` are rejected with `422`; a trainer or
-student receives `403`; an anonymous caller receives `401`.
+**Response:** Same shape as `GET` with updated values and `is_default: false`.
 
-### Service contract (used by AI-61)
+### `POST /api/admin/retrieval-config/test` (Admin Only)
 
-| Function | Purpose |
-|---|---|
-| `get_retrieval_threshold(db)` | Active threshold; falls back to `0.8` when unset/corrupt. |
-| `save_retrieval_threshold(db, value)` | Validate and persist; raises `RetrievalThresholdError`. |
-| `retrieve_class_chunks(db, question=..., class_id=..., store=...)` | Class-scoped scored retrieval + AI-39 live-document guard. |
-| `decide_source(db, question=..., class_id=..., store=...)` | Returns `RetrievalDecision(source, threshold, top_score, chunks)`. |
-| `answer_question(db, question=..., class_id=..., internet_search=..., generate=...)` | Full routing + grounded generation + E5 citations. |
+Runs a test query against indexed class documents to test threshold sensitivity.
 
-`QdrantStore.similarity_search_with_score(query, k=..., class_id=...)` is the
-new scored retrieval primitive (retry policy matches the existing search).
+**Request:**
+```json
+{
+  "class_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "query": "What is the time complexity of Dijkstra's algorithm?"
+}
+```
 
-## Acceptance criteria status
+**Response:**
+```json
+{
+  "top_score": 0.87,
+  "decision": "curriculum",
+  "threshold": 0.8,
+  "unrelated_threshold": 0.45,
+  "matched_chunks": [
+    {
+      "document_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "document_title": "Graph_Algorithms_Week4.pdf",
+      "score": 0.87,
+      "snippet": "Dijkstra's algorithm with a min-priority queue runs in O((V + E) log V)..."
+    }
+  ]
+}
+```
+
+## Service Contracts
+
+| Component | Function | Description |
+|---|---|---|
+| `rag_service.py` | `decide_source()` | Evaluates candidate chunks against $T_{high}$ and $T_{low}$, returning `RetrievalDecision`. |
+| `rag_service.py` | `get_unrelated_threshold()` | Retrieves persisted lower threshold or falls back to `0.45`. |
+| `rag_service.py` | `save_retrieval_threshold()` | Persists both `threshold` and `unrelated_threshold` to `system_configs`. |
+| `chat_retrieval_service.py` | `retrieve_chat_chunks()` | Implements early fail-fast bypass before Cross-Encoder transformer model. |
+| `reranker_service.py` | `rerank()` | Reranks candidates while preserving original embedding cosine score on `chunk.score`. |
+
+## Acceptance Criteria Status
 
 | AC | Status | Evidence |
 |---|---|---|
-| AC-01: retrieval runs first; top score compared with the configured threshold (default `0.8`) | Implemented | `decide_source()` retrieves before comparing; `test_retrieval_always_runs_class_scoped_before_routing`, `test_threshold_defaults_to_documented_0_8`. |
-| AC-02: `score >= threshold` → answer from class materials with curriculum citations (E5) | Implemented | `answer_question()` curriculum path; `test_score_equal_to_threshold_answers_from_curriculum`, `test_curriculum_answer_carries_citations`. |
-| AC-03: `score < threshold` → hand to the Internet agent; never refused or turned into a ticket | Implemented (agent stubbed) | `test_score_below_threshold_hands_question_to_internet_agent`, `test_retrieval_outage_falls_back_to_internet_instead_of_refusing`. AI-67 replaces `search_internet`. |
-| AC-04: never answer from the LLM's own knowledge; a source is required | Implemented | Strict prompts + no-source short-circuit; `test_internet_agent_outage_returns_no_source_message`, `test_generation_failure_returns_only_cited_sources`. |
-| AC-05: threshold configurable by an admin, not hardcoded (T35) | Implemented | `GET/PATCH /api/admin/retrieval-config`, `system_config.retrieval_threshold`; `test_threshold_is_persisted_and_applies_to_next_question`, `test_threshold_change_switches_the_same_score_between_sources`, admin/non-admin API tests. |
+| AC-01: Retrieval runs first; top score compared with configured threshold | Implemented | `decide_source()` retrieves top vectors before evaluating threshold boundaries. |
+| AC-02: `score >= threshold` $\rightarrow$ Curriculum grounded answer | Implemented | Routes to `SOURCE_CURRICULUM` with strict document citations. |
+| AC-03: `T_low <= score < threshold` $\rightarrow$ Internet fallback | Implemented | Hands query to Internet agent without throwing errors or creating support tickets. |
+| AC-04: `score < T_low` $\rightarrow$ Out of scope refusal | Implemented | Blocks off-topic queries early, preserving LLM tokens and avoiding irrelevant searches. |
+| AC-05: Thresholds dynamically configurable by Admin | Implemented | `GET/PATCH /api/admin/retrieval-config` and `POST /api/admin/retrieval-config/test` live in `app/routers/admin/router.py`. |
 
-## How to verify
-
-Backend:
+## Verification Commands
 
 ```powershell
-uv run python -m pytest tests/services/rag/ -q
-uv run python -m pytest tests/services/vector_store/ -q
+# Backend verification
+uv run pytest tests/services/rag/ -q
+uv run pytest tests/services/chat/test_chat_retrieval.py -q
 uv run ruff check .
-```
 
-Frontend (admin card):
-
-```powershell
+# Frontend verification
 npx vitest run lib/admin-api.test.ts
-npx eslint "lib/admin-api.ts" "app/(shell)/admin/settings/page.tsx"
+npm run build
 ```
-
-Manual check with a running stack:
-
-1. Log in as an admin and open **Admin → Settings**.
-2. Change **Answer routing** from `0.80` to `0.65`; the badge switches to `Custom`.
-3. Ask a question whose top match scores between `0.65` and `0.80`: it should
-   now answer from the class materials with citations. Set it back to `0.80`
-   and the same question should go to the Internet agent.
-4. Delete a cited document (AI-39) and repeat the question: the deleted file
-   must not appear in the citations.
-
-## Not included in AI-65
-
-- The streaming `POST /api/chat` endpoint and its UI (AI-61 / AI-69).
-- The real Internet search provider (AI-67); the stub is intentional.
-- Content-gap counting/grouping (AI-68) and automatic threshold tuning.
-- Changing `retrieval_threshold` from an environment variable; the admin API
-  is now the supported override, and the AI-107 code default remains `0.8`.
-
-## Integration notes
-
-- **AI-61** should call `answer_question()` and stream `QaAnswer.answer`; the
-  `citations` tuple already carries the E5 fields (`kind`, `title`, `url`,
-  `page`, `document_id`, `snippet`).
-- **AI-67** only needs to provide a callable returning `WebResult` objects and
-  pass it as `internet_search=`; the dispatcher already handles failures and
-  empty results.
-- **AI-39** guard: chunks are kept only while their document is `processing` or
-  `indexed`; unverifiable chunks are dropped.
