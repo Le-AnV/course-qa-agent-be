@@ -32,7 +32,9 @@ OpenAI Decisions checks the question against the class name and description
   ▼
 Resolve follow-up question using bounded conversation history (when applicable)
   ▼
-Retrieve up to 10 candidate passages from Qdrant
+Append the class name as retrieval-only context to the standalone question
+  ▼
+Retrieve up to 20 candidate passages from Qdrant
   ├─ filter by class_id
   └─ keep passages belonging to indexed, live documents
   ▼
@@ -56,13 +58,14 @@ The request timeout is 8 seconds (3 seconds to connect). Only an `out_of_scope` 
 
 ## Retrieval and reranking
 
-1. `retrieve_class_chunks()` performs scored vector search with the requested `class_id` filter.
-2. The retrieval service applies the document lifecycle guard so deleted or replaced documents cannot be used as evidence.
-3. If the best vector score is below the lower threshold, the service skips Cross Encoder inference and returns the no-evidence route.
-4. Otherwise, the Cross Encoder evaluates each question/passage pair and orders the candidates by its output logits; the three highest-ranked passages are retained by default (`RERANK_TOP_K` can override this value).
-5. The retained passages keep their original vector similarity scores. The highest retained vector score is compared with the configured high and low thresholds to select the source route.
+1. The retrieval-only query consists of the student's standalone question plus the class name. The original question remains unchanged for answer generation.
+2. `retrieve_class_chunks()` performs scored vector search with the requested `class_id` filter and returns up to 20 candidates.
+3. The retrieval service applies the document lifecycle guard so deleted or replaced documents cannot be used as evidence.
+4. If the best vector score is below the lower threshold, the service skips Cross Encoder inference and returns the no-evidence route.
+5. Otherwise, the Cross Encoder evaluates each retrieval-only query/passage pair and orders the candidates by its output logits; the three highest-ranked passages are retained by default (`RERANK_TOP_K` can override this value).
+6. The retained passages keep their original vector similarity scores. The highest retained vector score is compared with the configured high and low thresholds to select the source route.
 
-The current constants are 10 retrieval candidates, three retained passages by default (`RERANK_TOP_K`), and a maximum model sequence length of 512 tokens. The model is configured by `RERANKER_MODEL`, defaulting to `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`. It is loaded lazily once per backend process, runs on CUDA when available and otherwise on CPU, and is set to evaluation mode. Docker stores the Hugging Face cache in the `reranker_cache` volume mounted at `/app/model-cache`. Cross Encoder logits rank passages; they are not the threshold score.
+The current constants are 20 retrieval candidates, three retained passages by default (`RERANK_TOP_K`), and a maximum model sequence length of 512 tokens. The model is configured by `RERANKER_MODEL`, defaulting to `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`. It is loaded lazily once per backend process, runs on CUDA when available and otherwise on CPU, and is set to evaluation mode. Docker stores the Hugging Face cache in the `reranker_cache` volume mounted at `/app/model-cache`. Cross Encoder logits rank passages; they are not the threshold score.
 
 ## API
 
@@ -110,6 +113,7 @@ When there are no valid citations, the service skips answer generation. Retrieva
 ## Current limitations
 
 - The scope gate uses class name and description; it does not inspect retrieved passages or decide whether those passages fully answer the question. Missing or failed Decisions calls continue to RAG.
+- Adding the class name to the retrieval query and expanding the candidate pool improves context and recall for short questions, but does not guarantee that a relevant passage reaches the candidate set or passes the source threshold. For example, “Spyder là gì?” should be tested against the indexed Python material and cite its matching page when the passage is selected.
 - AI-65 routing uses vector cosine scores, not Cross Encoder logits. With the default thresholds, a score from 0.45 up to (but not including) 0.80 routes to Internet search. Thus, a class may contain related documents while a query still routes to the web if its retrieved score is below the high threshold.
 - If class passages are selected but do not answer the question, the answer prompt is responsible for abstaining. There is no separate deterministic evidence evaluator in this flow.
 - Internet search requires a configured Tavily key; if no web results are available, the service returns a fixed no-source message.
@@ -140,6 +144,6 @@ uv run python -m pytest tests/chat/ tests/services/chat/ tests/services/rag/ -q
 uv run ruff check .
 ```
 
-For a manual check, start the backend with PostgreSQL and Qdrant available, sign in as a class member, and submit a question whose answer is present in an indexed class document. Confirm the response is streamed, citations point to that class's documents, opening a citation serves the source file, and a question with no matching evidence receives the no-evidence message without an LLM-generated answer.
+For a manual check, start the backend with PostgreSQL and Qdrant available, sign in as a class member, and submit a short question whose answer is present in an indexed class document, such as “Spyder là gì?” in the Python class. Confirm the response cites the matching PDF page. Also submit a question whose answer has no matching evidence, and verify the configured source-routing behavior; citations must stay within the requested class and opening one must serve the source file.
 
 For the scope gate, configure `OPENAI_API_KEY` and test a clearly in-scope question and a clearly out-of-scope question. Confirm the latter receives the fixed scope response and does not emit `Searching class materials` or `Searching the web`. Also verify that a missing key or unavailable Decisions API allows the existing RAG flow to continue. Follow-up suggestions are emitted only after a grounded answer from class documents.
