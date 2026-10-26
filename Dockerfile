@@ -8,7 +8,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 # Dependency layers first — re-used until pyproject/uv.lock change
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 
 # --- Runtime: minimal image, only the venv + application code -------------
 FROM python:3.12-slim-bookworm

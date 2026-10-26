@@ -14,7 +14,6 @@ retrieval runs (AC-03).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import uuid
@@ -30,7 +29,7 @@ from sqlalchemy.orm import Session
 from app.config.config import settings
 from app.core.prompt_manager import get_prompt_manager
 from app.models.chat import ChatMessage, ChatSession
-from app.services.llm.provider import get_llm_model
+from app.services.llm import gateway
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +215,7 @@ async def condense_question(
     question: str,
     *,
     model: Any | None = None,
+    db: Session | None = None,
     max_chars: int | None = None,
 ) -> str:
     """Rewrite a follow-up using recent turns (AC-02).
@@ -237,20 +237,15 @@ async def condense_question(
             history=history_text,
             question=question,
         )
-        llm = model or get_llm_model()
         messages = [
             SystemMessage(content=str(prompt["system-prompt"])),
             HumanMessage(content=str(prompt["user-prompt"])),
         ]
         if model is not None:
-            response = await llm.ainvoke(messages)
+            response = await model.ainvoke(messages)
+            rewritten = _message_text(getattr(response, "content", response))
         else:
-            try:
-                response = await asyncio.wait_for(llm.ainvoke(messages), timeout=4.0)
-            except Exception:  # noqa: BLE001
-                fallback = get_llm_model(model="models/gemini-flash-lite-latest")
-                response = await asyncio.wait_for(fallback.ainvoke(messages), timeout=4.0)
-        rewritten = _message_text(getattr(response, "content", response))
+            rewritten = await gateway.ainvoke_chat(db, messages, timeout=4.0)
     except Exception:
         logger.warning(
             "Follow-up question condensation failed; using the original question.",

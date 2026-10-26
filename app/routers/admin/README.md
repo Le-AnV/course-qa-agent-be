@@ -15,6 +15,10 @@ secret values.
   also requires rebuilding/redeploying the backend image.
 - The agreed bulk email rate is 20 messages per minute. This API reports the rate;
   enforcing it belongs to the AI-31 email outbox queue integration.
+- The scope gate (OpenAI Decisions) uses its own OpenAI key pool stored in the
+  `openai_api_key` table. `OPENAI_API_KEY` in the backend `.env` is only a fallback
+  when the pool has no healthy key. The pool always rotates on `401`/`403`
+  (key marked invalid) and `429`/`5xx` (60-second cooldown), up to 3 keys per check.
 
 ## Endpoints
 
@@ -23,8 +27,21 @@ or invalid token returns `401`; an authenticated non-Admin receives `403`.
 
 | Method | Endpoint | Behavior |
 |---|---|---|
-| `GET` | `/api/admin/settings` | Returns the active model, SMTP metadata, rate, and boolean secret-readiness flags. Secret values are omitted. |
-| `POST` | `/api/admin/llm/test-connection` | Checks that the configured Gemini key can access the fixed model. Does not generate an answer. |
+| `GET` | `/api/admin/settings` | Returns the active chat model, SMTP metadata, rate, and boolean secret-readiness flags. Secret values are omitted. |
+| `GET` | `/api/admin/llm/keys` | Lists keys with masked value, status, cooldown, last-used time, last error, and the auto-switch setting. |
+| `POST` | `/api/admin/llm/keys` | Adds an encrypted key and validates it against the configured chat model. |
+| `PATCH` | `/api/admin/llm/keys/{key_id}` | Renames, updates optional metadata, or pauses/resumes a key. |
+| `DELETE` | `/api/admin/llm/keys/{key_id}` | Removes a key from the pool. |
+| `POST` | `/api/admin/llm/keys/{key_id}/test` | Checks that one key can access the configured chat model. |
+| `PATCH` | `/api/admin/llm/auto-switch` | Enables or disables automatic rotation to the next healthy key. |
+| `GET` | `/api/admin/llm/models` | Lists chat models available to active keys. |
+| `PATCH` | `/api/admin/llm/model` | Updates the chat model used for new answers. |
+| `POST` | `/api/admin/llm/test-connection` | Checks the environment `GEMINI_API_KEY` against the configured model. |
+| `GET` | `/api/admin/decisions/keys` | Lists the OpenAI keys used by the scope gate with masked value, status, cooldown, last-used time, last error, and whether `OPENAI_API_KEY` is set as fallback. |
+| `POST` | `/api/admin/decisions/keys` | Adds an encrypted OpenAI key, validates it against `GET https://api.openai.com/v1/models`, and makes it available to the scope gate. |
+| `PATCH` | `/api/admin/decisions/keys/{key_id}` | Renames a key, changes its priority, or pauses/resumes it. |
+| `DELETE` | `/api/admin/decisions/keys/{key_id}` | Removes a key from the decisions pool. |
+| `POST` | `/api/admin/decisions/keys/{key_id}/test` | Checks that one stored key is accepted by OpenAI. |
 | `POST` | `/api/admin/email/test` | Sends a plain-text test email to the email address in the authenticated Admin token. No request body is needed. |
 
 Successful and failed connection checks return the same shape:
@@ -38,13 +55,13 @@ details, API keys, or SMTP passwords.
 
 ## Configure and verify locally
 
-1. Copy `.env.example` to `.env` and fill in the local Gemini key and shared sender
-   credentials. Use a Gmail App Password, not the account's normal password.
+1. Copy `.env.example` to `.env`, set `GEMINI_KEY_ENCRYPTION_KEY`, and fill in the
+   shared sender credentials. Use a Gmail App Password, not the account's normal
+   password.
 2. Restart the backend so it reads the environment values.
-3. Sign in as an Admin, open `/admin/settings`, and check that each credential shows
-   as configured.
-4. Use **Test connection** for Gemini and **Send test email** for SMTP. The email
-   check sends to the signed-in Admin's email address.
+3. Sign in as an Admin, open `/admin/settings`, and add at least one Gemini key.
+4. Use the per-key test action for Gemini and **Send test email** for SMTP. The
+   email check sends to the signed-in Admin's email address.
 
 Automated verification:
 

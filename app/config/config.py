@@ -34,6 +34,7 @@ class Settings(BaseSettings):
         vlm_model: Model identifier for Vision Language Model.
         vlm_temperature: Temperature setting for VLM responses.
         google_api_key: Secret API key for Google Gemini model access.
+        openai_api_key: Optional API key for the OpenAI Decisions scope gate.
         jwt_secret: HS256 signing key for DB-backed login tokens (dev default, override in prod).
         jwt_algorithm: JWT algorithm for login tokens.
         jwt_expire_minutes: Login token lifetime in minutes.
@@ -98,6 +99,13 @@ class Settings(BaseSettings):
     google_api_key: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    )
+    openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    # Encrypts DB-stored Gemini API keys. Falls back to jwt_secret for local/dev;
+    # production should set a dedicated value and keep it stable across restarts.
+    gemini_key_encryption_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="GEMINI_KEY_ENCRYPTION_KEY",
     )
     tavily_api_key: str | None = Field(default=None, validation_alias="TAVILY_API_KEY")
 
@@ -181,6 +189,18 @@ class Settings(BaseSettings):
         validation_alias="CHAT_CONTEXT_MAX_CHARS",
     )
 
+    # AI-125 suggested follow-up questions
+    chat_suggestions_enabled: bool = Field(
+        default=True,
+        validation_alias="CHAT_SUGGESTIONS_ENABLED",
+    )
+    chat_suggestions_timeout_seconds: float = Field(
+        default=10.0,
+        ge=1.0,
+        le=30.0,
+        validation_alias="CHAT_SUGGESTIONS_TIMEOUT_SECONDS",
+    )
+
     # Prompt configuration
     prompt_file: Path = Field(
         default=Path(__file__).resolve().parent / "prompts",
@@ -190,6 +210,8 @@ class Settings(BaseSettings):
 
     @field_validator(
         "google_api_key",
+        "openai_api_key",
+        "gemini_key_encryption_key",
         "smtp_sender_email",
         "smtp_app_password",
         mode="before",

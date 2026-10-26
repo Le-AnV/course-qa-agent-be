@@ -18,23 +18,22 @@ from app.core.prompt_manager import get_prompt_manager
 from app.services import (
     chat_context_service,
     chat_retrieval_service,
+    course_service,
     history_service,
+    openai_decision_service,
     quick_response_service,
     rag_service,
+    suggestion_service,
 )
 from app.services.chat_context_service import ConversationExchange
-from app.services.llm.provider import get_llm_model
+from app.services.llm import gateway
 
 logger = logging.getLogger(__name__)
 
 CHAT_TIMEOUT_SECONDS = 300.0
 
-GENERATION_ERROR_MESSAGE = (
-    "The answer could not be generated. Please try again."
-)
-TIMEOUT_ERROR_MESSAGE = (
-    "The answer timed out. Please try again."
-)
+GENERATION_ERROR_MESSAGE = "The answer could not be generated. Please try again."
+TIMEOUT_ERROR_MESSAGE = "The answer timed out. Please try again."
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:
@@ -64,54 +63,23 @@ def _chunk_text(content: Any) -> str:
     return ""
 
 
-ENABLE_QUOTA_FALLBACK: bool = True
-FALLBACK_MODEL_NAME: str = "models/gemini-flash-lite-latest"
-PRIMARY_MODEL_FIRST_CHUNK_TIMEOUT: float = 12.0
+async def _stream_model(llm: Any, messages: list[Any]) -> AsyncIterator[str]:
+    """Stream one injected model (tests/DI); production uses the key-pool gateway."""
 
-
-async def _stream_with_fallback(
-    llm: Any,
-    messages: list[Any],
-    *,
-    allow_fallback: bool = True,
-    first_chunk_timeout: float = PRIMARY_MODEL_FIRST_CHUNK_TIMEOUT,
-) -> AsyncIterator[str]:
-    """Stream chunks from LLM, falling back if 429 quota or connection hang occurs."""
-    if not (ENABLE_QUOTA_FALLBACK and allow_fallback):
-        async for chunk in llm.astream(messages):
-            text = _chunk_text(chunk.content)
-            if text:
-                yield text
-        return
-
-    stream_iter = llm.astream(messages).__aiter__()
-    try:
-        first_chunk = await asyncio.wait_for(
-            stream_iter.__anext__(),
-            timeout=first_chunk_timeout,
-        )
-        text = _chunk_text(first_chunk.content)
+    async for chunk in llm.astream(messages):
+        text = _chunk_text(chunk.content)
         if text:
             yield text
-        async for chunk in stream_iter:
-            text = _chunk_text(chunk.content)
-            if text:
-                yield text
-        return
-    except StopAsyncIteration:
-        return
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Primary LLM (%s) failed or timed out (%s). Falling back to %s.",
-            getattr(llm, "model", "primary"),
-            exc,
-            FALLBACK_MODEL_NAME,
-        )
-        fallback = get_llm_model(model=FALLBACK_MODEL_NAME)
-        async for chunk in fallback.astream(messages):
-            text = _chunk_text(chunk.content)
-            if text:
-                yield text
+
+
+def _answer_stream(
+    db: Session,
+    model: Any | None,
+    messages: list[Any],
+) -> AsyncIterator[str | gateway.StreamRestart]:
+    if model is not None:
+        return _stream_model(model, messages)
+    return gateway.astream_chat(db, messages)
 
 
 def _course_context(
@@ -122,14 +90,8 @@ def _course_context(
     lines: list[str] = []
 
     for index, chunk in enumerate(chunks, start=1):
-        locator = (
-            f", page {chunk.page}"
-            if chunk.page is not None
-            else ""
-        )
-        lines.append(
-            f"[{index}] {chunk.title}{locator}\n{chunk.content}"
-        )
+        locator = f", page {chunk.page}" if chunk.page is not None else ""
+        lines.append(f"[{index}] {chunk.title}{locator}\n{chunk.content}")
 
     return "\n\n".join(lines)
 
@@ -165,6 +127,7 @@ async def _persist_turn(
     message: str,
     answer: str,
     citations: Sequence[dict[str, Any]],
+    suggested_questions: Sequence[str] | None = None,
 ) -> tuple[Any, Any, Any] | None:
     """Save a completed turn without letting a DB failure break the SSE stream."""
 
@@ -182,6 +145,7 @@ async def _persist_turn(
             session_id=session_id,
             used_web_search=False,
             citations=citations,
+            suggested_questions=suggested_questions,
         )
     except Exception:
         logger.exception("Failed to persist chat turn for class %s.", class_id)
@@ -209,6 +173,7 @@ async def stream_chat(
     context_history = list(history or ())
     sources: list[rag_service.Source] = []
     answer_parts: list[str] = []
+    followup_questions: list[str] = []
     stage = "conversation context"
 
     try:
@@ -243,9 +208,80 @@ async def stream_chat(
                             if saved_session is not None
                             else (str(session_id) if session_id is not None else None)
                         ),
-                        "user_message_id": (
-                            str(user_msg.id) if user_msg is not None else None
+                        "user_message_id": (str(user_msg.id) if user_msg is not None else None),
+                        "assistant_message_id": (
+                            str(assistant_msg.id) if assistant_msg is not None else None
                         ),
+                        "suggestions": [],
+                        "suggested_questions": [],
+                    },
+                )
+                return
+
+            yield _sse(
+                "progress",
+                {"stage": "searching", "message": "Checking class scope"},
+            )
+            class_record = course_service.get_class(db, class_id)
+            scope_history = chat_context_service.format_history_context(
+                context_history,
+                max_chars=2000,
+            )
+            try:
+                out_of_scope = await openai_decision_service.is_confidently_out_of_scope(
+                    class_name=class_record.name if class_record is not None else "",
+                    class_description=(
+                        class_record.info.description
+                        if class_record is not None and class_record.info is not None
+                        else None
+                    ),
+                    question=message,
+                    history=scope_history,
+                    db=db,
+                )
+            except Exception:
+                logger.warning(
+                    "OpenAI Decisions scope check raised unexpectedly; continuing with RAG.",
+                    exc_info=True,
+                )
+                out_of_scope = False
+
+            logger.info(
+                "OpenAI Decisions classified the question as %s for class %s.",
+                "out_of_scope" if out_of_scope else "in_scope_or_uncertain",
+                class_id,
+            )
+
+            if out_of_scope:
+                text = (
+                    "This question appears to be outside the scope of this class. "
+                    "Please ask a question related to the course subject."
+                )
+                answer_parts.append(text)
+                yield _sse("token", {"text": text})
+                saved_turn = await _persist_turn(
+                    db=db,
+                    user_id=user_id,
+                    session_id=session_id,
+                    class_id=class_id,
+                    message=message,
+                    answer=text,
+                    citations=[],
+                )
+                saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
+                yield _sse(
+                    "done",
+                    {
+                        "source": rag_service.SOURCE_UNRELATED,
+                        "used_web_search": False,
+                        "threshold": 0.0,
+                        "top_score": None,
+                        "session_id": (
+                            str(saved_session.id)
+                            if saved_session is not None
+                            else (str(session_id) if session_id is not None else None)
+                        ),
+                        "user_message_id": str(user_msg.id) if user_msg is not None else None,
                         "assistant_message_id": (
                             str(assistant_msg.id) if assistant_msg is not None else None
                         ),
@@ -262,6 +298,7 @@ async def stream_chat(
                     context_history,
                     message,
                     model=model,
+                    db=db,
                 )
                 if standalone_question != message:
                     logger.info(
@@ -285,7 +322,7 @@ async def stream_chat(
                 time.monotonic() - stage_started,
                 len(decision.chunks),
             )
-            if decision.chunks:
+            if decision.chunks and decision.source == rag_service.SOURCE_CURRICULUM:
                 doc_titles = list(dict.fromkeys(c.title for c in decision.chunks if c.title))
                 count = len(decision.chunks)
                 unit = "section" if count == 1 else "sections"
@@ -302,7 +339,6 @@ async def stream_chat(
                 yield _sse("progress", {"stage": "reading", "message": read_msg})
 
             if decision.source == rag_service.SOURCE_CURRICULUM:
-                llm = model or get_llm_model()
                 sources = rag_service.curriculum_citations(decision.chunks)
 
                 if not sources:
@@ -322,10 +358,13 @@ async def stream_chat(
                     stage_started = time.monotonic()
                     logger.info("Starting grounded answer generation for class %s.", class_id)
                     answer_parts: list[str] = []
-                    async for text in _stream_with_fallback(llm, messages, allow_fallback=(model is None)):
-                        if text:
-                            answer_parts.append(text)
-                            yield _sse("token", {"text": text})
+                    async for part in _answer_stream(db, model, messages):
+                        if isinstance(part, gateway.StreamRestart):
+                            answer_parts.clear()
+                            yield _sse("restart", {"message": part.message})
+                        elif part:
+                            answer_parts.append(part)
+                            yield _sse("token", {"text": part})
                     logger.info(
                         "Grounded answer generation completed for class %s in %.2fs.",
                         class_id,
@@ -339,6 +378,22 @@ async def stream_chat(
                     ):
                         yield _sse("citation", asdict(source))
 
+                    # AI-125 AC-01: Suggested follow-up questions
+                    full_answer = "".join(answer_parts).strip()
+                    if (
+                        full_answer
+                        and full_answer != chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE
+                    ):
+                        followup_questions = await suggestion_service.generate_followup_questions(
+                            question=standalone_question,
+                            answer=full_answer,
+                            chunks=decision.chunks,
+                            model=model,
+                            db=db,
+                        )
+                        if followup_questions:
+                            yield _sse("suggestions", {"questions": followup_questions})
+
             elif decision.source == rag_service.SOURCE_INTERNET:
                 yield _sse("progress", {"stage": "searching", "message": "Searching the web"})
                 web_results = await asyncio.to_thread(rag_service.search_internet, message)
@@ -347,9 +402,14 @@ async def stream_chat(
                     answer_parts.append(text)
                     yield _sse("token", {"text": text})
                 else:
-                    llm = model or get_llm_model()
                     sources = rag_service.internet_citations(web_results)
-                    yield _sse("progress", {"stage": "reading", "message": f"Reviewing {len(web_results)} web sources"})
+                    yield _sse(
+                        "progress",
+                        {
+                            "stage": "reading",
+                            "message": f"Reviewing {len(web_results)} web sources",
+                        },
+                    )
                     context = "\n\n".join(
                         f"Source ({source.title} — {source.url}):\n{result.content}"
                         for source, result in zip(sources, web_results, strict=True)
@@ -362,12 +422,17 @@ async def stream_chat(
                     yield _sse("progress", {"stage": "drafting", "message": "Synthesizing answer"})
                     stage = "grounded answer generation"
                     stage_started = time.monotonic()
-                    logger.info("Starting Internet grounded answer generation for class %s.", class_id)
+                    logger.info(
+                        "Starting Internet grounded answer generation for class %s.", class_id
+                    )
                     answer_parts = []
-                    async for text in _stream_with_fallback(llm, messages, allow_fallback=(model is None)):
-                        if text:
-                            answer_parts.append(text)
-                            yield _sse("token", {"text": text})
+                    async for part in _answer_stream(db, model, messages):
+                        if isinstance(part, gateway.StreamRestart):
+                            answer_parts.clear()
+                            yield _sse("restart", {"message": part.message})
+                        elif part:
+                            answer_parts.append(part)
+                            yield _sse("token", {"text": part})
                     logger.info(
                         "Internet answer generation completed for class %s in %.2fs.",
                         class_id,
@@ -390,6 +455,7 @@ async def stream_chat(
                 message=message,
                 answer="".join(answer_parts),
                 citations=citation_payload,
+                suggested_questions=followup_questions or None,
             )
             saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
 
@@ -409,6 +475,8 @@ async def stream_chat(
                     "assistant_message_id": (
                         str(assistant_msg.id) if assistant_msg is not None else None
                     ),
+                    "suggestions": followup_questions,
+                    "suggested_questions": followup_questions,
                 },
             )
 

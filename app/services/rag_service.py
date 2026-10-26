@@ -23,14 +23,13 @@ import threading
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from functools import lru_cache
 from typing import Any, Protocol
 
 import httpx
 from langchain_core.documents import Document
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import search_config, settings
 from app.core.prompt_manager import get_prompt_manager
 from app.models.system_config import SystemConfig
 from app.services import citation_service, document_service
@@ -273,14 +272,13 @@ def save_retrieval_threshold(
 # --- AC-01/AC-02: retrieval runs first -------------------------------------
 
 
-@lru_cache(maxsize=1)
-def default_vector_store():
+def default_vector_store(db: Session | None = None):
     """Build the production class-scoped vector store lazily (needs API keys)."""
 
     from app.services.embedding.gemini_embedding import GeminiEmbedding
     from app.services.vector_store.qdrant_store import QdrantStore
 
-    return QdrantStore(embeddings=GeminiEmbedding())
+    return QdrantStore(embeddings=GeminiEmbedding(db=db))
 
 
 def retrieve_class_chunks(
@@ -300,7 +298,7 @@ def retrieve_class_chunks(
     """
 
     class_key = str(class_id)
-    vector_store = store or default_vector_store()
+    vector_store = store or default_vector_store(db)
     pairs = vector_store.similarity_search_with_score(
         question,
         k=top_k or settings.retriever_top_k,
@@ -407,20 +405,35 @@ def search_internet(question: str) -> list[WebResult]:
             pass
 
         client = _get_tavily_client()
-        response = client.post(
-            "https://api.tavily.com/search",
-            json={
-                "api_key": api_key,
-                "query": question,
-                "search_depth": "basic",
-                "max_results": 3,
-                "include_answer": False,
-                "include_raw_content": False,
-            },
-        )
+        payload: dict[str, Any] = {
+            "api_key": api_key,
+            "query": question,
+            "search_depth": search_config.TAVILY_SEARCH_DEPTH,
+            "max_results": search_config.TAVILY_MAX_RESULTS,
+            "include_domains": search_config.TRUSTED_WEB_DOMAINS,
+            "exclude_domains": search_config.BLOCKED_WEB_DOMAINS,
+            "include_answer": False,
+            "include_raw_content": False,
+        }
+        response = client.post("https://api.tavily.com/search", json=payload)
         response.raise_for_status()
         data = response.json()
         raw_results = data.get("results", [])
+
+        # Fallback to broader web search if trusted domains return no results
+        if not raw_results and search_config.FALLBACK_TO_GENERAL_SEARCH:
+            fallback_payload: dict[str, Any] = {
+                "api_key": api_key,
+                "query": question,
+                "search_depth": search_config.TAVILY_SEARCH_DEPTH,
+                "max_results": search_config.TAVILY_MAX_RESULTS,
+                "exclude_domains": search_config.BLOCKED_WEB_DOMAINS,
+                "include_answer": False,
+                "include_raw_content": False,
+            }
+            fallback_resp = client.post("https://api.tavily.com/search", json=fallback_payload)
+            if fallback_resp.is_success:
+                raw_results = fallback_resp.json().get("results", [])
 
         web_results: list[WebResult] = []
         for item in raw_results:
@@ -431,6 +444,12 @@ def search_internet(question: str) -> list[WebResult]:
                 continue
             jump_url = jump_builder(raw_url, content) if jump_builder is not None else raw_url
             web_results.append(WebResult(title=title, url=jump_url, content=content))
+
+        def _tier_sort_key(res: WebResult) -> int:
+            tier = search_config.get_source_tier(res.url)
+            return tier if tier is not None else 99
+
+        web_results.sort(key=_tier_sort_key)
 
         logger.info("Tavily search returned %d results for %r", len(web_results), question)
         return web_results
@@ -560,6 +579,7 @@ def cited_markers(answer: str) -> set[int]:
 def cited_page_citations(
     chunks: Sequence[ScoredChunk],
     answer: str,
+    max_citations: int = 3,
 ) -> list[Source]:
     """Citations for only the pages whose passages the answer referenced.
 
@@ -593,7 +613,7 @@ def cited_page_citations(
                 highlights=tuple(chunk.content for _, chunk in members),
             )
         )
-    return sources
+    return sources[:max_citations]
 
 
 def internet_citations(results: Sequence[WebResult]) -> list[Source]:
@@ -691,24 +711,13 @@ def _format_prompt(
 
 
 def generate_with_gemini(system_prompt: str, user_prompt: str) -> str:
-    """Default generator: Gemini with the strict grounding prompt."""
+    """Default generator: Gemini with the strict grounding prompt and key rotation."""
 
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    from app.services.llm.provider import get_llm_model
+    from app.services.llm import gateway
 
-    response = get_llm_model().invoke(
-        [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
-    )
-    content = response.content
-    if isinstance(content, list):
-        text_parts = []
-        for part in content:
-            if isinstance(part, dict) and "text" in part:
-                text_parts.append(part["text"])
-            elif isinstance(part, str):
-                text_parts.append(part)
-            elif hasattr(part, "text"):
-                text_parts.append(getattr(part, "text", ""))
-        return "\n".join(text_parts).strip()
-    return content if isinstance(content, str) else str(content)
+    return gateway.invoke_chat(
+        None,
+        [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)],
+    ).strip()

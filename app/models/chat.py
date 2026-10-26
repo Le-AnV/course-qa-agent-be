@@ -83,6 +83,8 @@ class ChatMessage(Base):
     used_web_search: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # AI-63 AC-03: citations stay attached to the answer that produced them.
     citations: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    # AI-125 AC-01: suggested follow-up questions stay attached to the assistant answer.
+    suggested_questions: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

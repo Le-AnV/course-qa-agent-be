@@ -126,6 +126,7 @@ def append_message(
         content=payload.content,
         used_web_search=payload.used_web_search,
         citations=payload.citations,
+        suggested_questions=payload.suggested_questions,
     )
 
 

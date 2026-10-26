@@ -35,6 +35,10 @@ class ChatMessageBase(BaseModel):
         default_factory=list,
         description="Sources cited by this message, preserved across history reloads",
     )
+    suggested_questions: list[str] = Field(
+        default_factory=list,
+        description="Suggested follow-up questions generated for this assistant message (AI-125)",
+    )
 
     @field_validator("citations", mode="before")
     @classmethod
@@ -43,10 +47,16 @@ class ChatMessageBase(BaseModel):
 
         return value or []
 
+    @field_validator("suggested_questions", mode="before")
+    @classmethod
+    def normalize_suggested_questions(cls, value):
+        """Treat a legacy NULL column as an empty question list."""
+
+        return value or []
+
 
 class MessageCreateRequest(ChatMessageBase):
     """Request payload to append a message to an existing session."""
-
 
 
 class ChatMessageResponse(ChatMessageBase):
@@ -63,7 +73,9 @@ class SessionCreateRequest(BaseModel):
     """Request payload to explicitly create a new chat session (AC-03)."""
 
     class_id: uuid.UUID = Field(description="UUID of the class the session belongs to")
-    title: str | None = Field(default=None, max_length=255, description="Optional conversation title")
+    title: str | None = Field(
+        default=None, max_length=255, description="Optional conversation title"
+    )
 
 
 class SessionRenameRequest(BaseModel):

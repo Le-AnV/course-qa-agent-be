@@ -247,7 +247,10 @@ def test_chat_loads_context_for_an_owned_session(
             session_id=session_id,
             history=history,
         )
-        yield _event("done", {"source": "none", "used_web_search": False, "threshold": 0.8, "top_score": None})
+        yield _event(
+            "done",
+            {"source": "none", "used_web_search": False, "threshold": 0.8, "top_score": None},
+        )
 
     monkeypatch.setattr(chat_router.chat_service, "stream_chat", fake_stream_chat)
 

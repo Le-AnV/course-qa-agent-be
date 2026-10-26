@@ -257,6 +257,7 @@ def append_message(
     content: str,
     used_web_search: bool = False,
     citations: Sequence[Any] | None = None,
+    suggested_questions: Sequence[str] | None = None,
 ) -> ChatMessage:
     """Append a single message to an existing session and update session's updated_at timestamp."""
     message = ChatMessage(
@@ -265,6 +266,7 @@ def append_message(
         content=content,
         used_web_search=used_web_search,
         citations=_citation_dicts(citations),
+        suggested_questions=list(suggested_questions) if suggested_questions else None,
     )
     db.add(message)
 
@@ -287,6 +289,7 @@ def save_chat_turn(
     session_id: uuid.UUID | None = None,
     used_web_search: bool = False,
     citations: Sequence[Any] | None = None,
+    suggested_questions: Sequence[str] | None = None,
     query_embedding: list[float] | None = None,
     qdrant_client: Any | None = None,
 ) -> tuple[ChatSession, ChatMessage, ChatMessage]:
@@ -339,6 +342,7 @@ def save_chat_turn(
         content=assistant_content,
         used_web_search=used_web_search,
         citations=_citation_dicts(citations),
+        suggested_questions=list(suggested_questions) if suggested_questions else None,
         created_at=turn_started + timedelta(milliseconds=1),
     )
 
