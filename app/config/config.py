@@ -101,6 +101,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     )
     openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    # Encrypts DB-stored Gemini API keys. Falls back to jwt_secret for local/dev;
+    # production should set a dedicated value and keep it stable across restarts.
+    gemini_key_encryption_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="GEMINI_KEY_ENCRYPTION_KEY",
+    )
     tavily_api_key: str | None = Field(default=None, validation_alias="TAVILY_API_KEY")
 
     # DB-backed auth (E1 / AI-25, AI-27, AI-31). Dev defaults only — override in prod.
@@ -205,6 +211,7 @@ class Settings(BaseSettings):
     @field_validator(
         "google_api_key",
         "openai_api_key",
+        "gemini_key_encryption_key",
         "smtp_sender_email",
         "smtp_app_password",
         mode="before",

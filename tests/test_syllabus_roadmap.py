@@ -68,7 +68,7 @@ def test_ingestion_service_extracts_and_saves_syllabus_roadmap(monkeypatch, tmp_
     monkeypatch.setattr(document_service, "supersede_older_versions", mock_activate)
     monkeypatch.setattr(document_service, "save_syllabus_roadmap", mock_save)
     monkeypatch.setattr(ingestion_service, "QdrantStore", lambda embeddings: qdrant)
-    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda: object())
+    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda **_: object())
 
     ingestion_service.process_document(db, doc_id)
 

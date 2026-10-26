@@ -12,6 +12,7 @@ dependencies = [
   "psycopg[binary]>=3.1",
   "bcrypt>=4.1",
   "pyjwt>=2.15.1",
+  "cryptography>=42",
   "openpyxl>=3.1",
   "email-validator>=2.0",
   "google-genai>=1,<3",

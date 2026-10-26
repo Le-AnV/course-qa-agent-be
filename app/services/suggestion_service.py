@@ -14,15 +14,15 @@ from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from sqlalchemy.orm import Session
 
 from app.config.config import settings
 from app.core.prompt_manager import get_prompt_manager
-from app.services.llm.provider import get_llm_model
+from app.services.llm import gateway
 from app.services.rag_service import ScoredChunk
 
 logger = logging.getLogger(__name__)
 
-FALLBACK_MODEL_NAME = "models/gemini-flash-lite-latest"
 MIN_FOLLOWUP_QUESTIONS = 2
 MAX_FOLLOWUP_QUESTIONS = 3
 MIN_CONTEXT_LENGTH = 20
@@ -89,28 +89,14 @@ def _parse_json_questions(raw: str, max_count: int = 3, min_count: int = 1) -> l
     return questions[:max_count]
 
 
-async def _invoke_with_fallback(
-    llm: Any,
+async def _invoke_pool(
+    db: Session | None,
     messages: list[SystemMessage | HumanMessage],
     timeout_seconds: float,
-    *,
-    is_custom_model: bool = False,
 ) -> str:
-    """Invoke LLM with timeout and fallback to lighter model."""
-    if is_custom_model:
-        response = await asyncio.wait_for(llm.ainvoke(messages), timeout=timeout_seconds)
-        return _extract_message_text(getattr(response, "content", response))
+    """Invoke through the key-pool gateway so suggestions rotate with chat keys."""
 
-    try:
-        response = await asyncio.wait_for(llm.ainvoke(messages), timeout=timeout_seconds)
-        return _extract_message_text(getattr(response, "content", response))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Primary LLM suggestion generation failed or timed out (%s). Falling back.", exc
-        )
-        fallback = get_llm_model(model=FALLBACK_MODEL_NAME)
-        response = await asyncio.wait_for(fallback.ainvoke(messages), timeout=timeout_seconds)
-        return _extract_message_text(getattr(response, "content", response))
+    return await gateway.ainvoke_chat(db, messages, timeout=timeout_seconds)
 
 
 async def generate_followup_questions(
@@ -119,6 +105,7 @@ async def generate_followup_questions(
     answer: str,
     chunks: Sequence[ScoredChunk],
     model: Any | None = None,
+    db: Session | None = None,
 ) -> list[str]:
     """Generate 2-3 suggested follow-up questions after a completed grounded answer (AC-01 to AC-05).
 
@@ -157,18 +144,23 @@ async def generate_followup_questions(
             answer=answer,
         )
 
-        llm = model or get_llm_model()
         messages = [
             SystemMessage(content=str(prompt["system-prompt"])),
             HumanMessage(content=str(prompt["user-prompt"])),
         ]
 
-        raw_output = await _invoke_with_fallback(
-            llm,
-            messages,
-            timeout_seconds=settings.chat_suggestions_timeout_seconds,
-            is_custom_model=(model is not None),
-        )
+        if model is not None:
+            response = await asyncio.wait_for(
+                model.ainvoke(messages),
+                timeout=settings.chat_suggestions_timeout_seconds,
+            )
+            raw_output = _extract_message_text(getattr(response, "content", response))
+        else:
+            raw_output = await _invoke_pool(
+                db,
+                messages,
+                timeout_seconds=settings.chat_suggestions_timeout_seconds,
+            )
 
         # AC-01: 2-3 questions
         # AC-03: if fewer than 2 questions, return []

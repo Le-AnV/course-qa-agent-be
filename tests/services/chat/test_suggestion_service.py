@@ -65,6 +65,38 @@ def test_generate_followup_questions_success():
     assert questions == ["What is backpropagation?", "How to choose a learning rate?"]
 
 
+def test_generate_followup_questions_uses_key_pool_gateway(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_ainvoke(db, messages, *, timeout):
+        captured["db"] = db
+        captured["timeout"] = timeout
+        captured["messages"] = messages
+        return '["What is backpropagation?", "How to choose a learning rate?"]'
+
+    monkeypatch.setattr(suggestion_service.gateway, "ainvoke_chat", fake_ainvoke)
+    db = MagicMock()
+    chunks = [
+        ScoredChunk(
+            content="Neural networks use backpropagation to calculate gradients and update weights with a learning rate.",
+            score=0.9,
+            metadata={"file_name": "nn.pdf"},
+        )
+    ]
+
+    questions = asyncio.run(
+        suggestion_service.generate_followup_questions(
+            question="What is a neural network?",
+            answer="A neural network is a computational model composed of interconnected layers.",
+            chunks=chunks,
+            db=db,
+        )
+    )
+
+    assert questions == ["What is backpropagation?", "How to choose a learning rate?"]
+    assert captured["db"] is db
+
+
 def test_generate_followup_questions_insufficient_context():
     # AC-03: Insufficient context (< 50 chars) returns []
     chunks = [

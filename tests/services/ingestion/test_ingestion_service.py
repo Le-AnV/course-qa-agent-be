@@ -38,7 +38,7 @@ def test_process_document_indexes_chunks_and_marks_document_indexed(monkeypatch,
     monkeypatch.setattr(document_service, "supersede_older_versions", activate)
     monkeypatch.setattr(ingestion_service, "_load_document", lambda _path: {"markdown": "# Lesson\nText", "images": {}})
     monkeypatch.setattr(ingestion_service, "QdrantStore", lambda embeddings: qdrant)
-    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda: object())
+    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda **_: object())
     monkeypatch.setattr(ingestion_service, "markdown_chunker", lambda _text, metadata: chunks)
     monkeypatch.setattr(ingestion_service, "recursive_chunker", lambda docs, *args, **kwargs: docs)
 
@@ -79,7 +79,7 @@ def test_process_document_indexes_generic_xlsx_with_sheet_row_locator(monkeypatc
 
     monkeypatch.setattr(document_service, "supersede_older_versions", mark_indexed)
     monkeypatch.setattr(ingestion_service, "QdrantStore", lambda embeddings: qdrant)
-    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda: object())
+    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda **_: object())
 
     ingestion_service.process_document(db, record.id)
 
@@ -106,7 +106,7 @@ def test_process_document_marks_failed_and_removes_partial_vectors(monkeypatch, 
     monkeypatch.setattr(document_service, "purge_document_vectors", purge)
     monkeypatch.setattr(ingestion_service, "_load_document", lambda _path: {"markdown": "lesson", "images": {}})
     monkeypatch.setattr(ingestion_service, "QdrantStore", lambda embeddings: qdrant)
-    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda: object())
+    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda **_: object())
     monkeypatch.setattr(
         ingestion_service,
         "markdown_chunker",
@@ -180,7 +180,7 @@ def test_process_document_stops_if_document_is_deleted_during_parsing(monkeypatc
         lambda _path: {"markdown": "lesson", "images": {}},
     )
     monkeypatch.setattr(ingestion_service, "QdrantStore", lambda embeddings: qdrant)
-    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda: object())
+    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda **_: object())
     monkeypatch.setattr(
         ingestion_service,
         "markdown_chunker",
@@ -214,7 +214,7 @@ def test_process_document_purges_vectors_if_document_is_deleted_during_upsert(
         lambda _path: {"markdown": "lesson", "images": {}},
     )
     monkeypatch.setattr(ingestion_service, "QdrantStore", lambda embeddings: qdrant)
-    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda: object())
+    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda **_: object())
     monkeypatch.setattr(
         ingestion_service,
         "markdown_chunker",

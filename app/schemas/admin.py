@@ -338,6 +338,64 @@ class AdminSettingsRead(BaseModel):
     email: EmailSettingsRead
 
 
+# --- Gemini multi-key pool ---
+class GeminiKeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    api_key: str = Field(min_length=1, max_length=500)
+    account_label: str | None = Field(default=None, max_length=255)
+    project_label: str | None = Field(default=None, max_length=255)
+    priority: int = Field(default=100, ge=0, le=1000)
+
+
+class GeminiKeyUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    account_label: str | None = Field(default=None, max_length=255)
+    project_label: str | None = Field(default=None, max_length=255)
+    priority: int | None = Field(default=None, ge=0, le=1000)
+    # Admin can pause/resume; invalid keys are detected by the gateway.
+    status: Literal["active", "paused"] | None = None
+
+
+class GeminiKeyRead(BaseModel):
+    id: uuid.UUID
+    name: str
+    account_label: str | None = None
+    project_label: str | None = None
+    masked_key: str
+    status: str
+    priority: int
+    available_models: list[str] = []
+    cooldown_until: datetime | None = None
+    last_error: str = ""
+    last_used_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class GeminiKeysRead(BaseModel):
+    keys: list[GeminiKeyRead] = []
+    active_count: int = 0
+    env_configured: bool = False
+    auto_switch: bool = True
+
+
+class GeminiModelConfigRead(BaseModel):
+    model: str
+    available_models: list[str] = []
+
+
+class GeminiModelConfigUpdate(BaseModel):
+    model: str = Field(min_length=1, max_length=200)
+
+
+class GeminiAutoSwitchUpdate(BaseModel):
+    enabled: bool
+
+
+class GeminiAutoSwitchRead(BaseModel):
+    enabled: bool
+
+
 class ConnectionTestResult(BaseModel):
     """Report an external connection check without exposing credentials."""
 

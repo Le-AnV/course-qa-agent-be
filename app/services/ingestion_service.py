@@ -94,7 +94,7 @@ def process_document(db: Session, document_id: uuid.UUID | str) -> None:
         # points first to make retries idempotent.
         document_service.purge_document_vectors(record.id)
         vector_write_started = True
-        QdrantStore(embeddings=GeminiEmbedding()).add_documents(chunks)
+        QdrantStore(embeddings=GeminiEmbedding(db=db)).add_documents(chunks)
 
         current = document_service.get_document(db, document_id)
         if current is None or current.status != document_service.STATUS_PROCESSING:

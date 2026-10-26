@@ -23,7 +23,6 @@ import threading
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from functools import lru_cache
 from typing import Any, Protocol
 
 import httpx
@@ -273,14 +272,13 @@ def save_retrieval_threshold(
 # --- AC-01/AC-02: retrieval runs first -------------------------------------
 
 
-@lru_cache(maxsize=1)
-def default_vector_store():
+def default_vector_store(db: Session | None = None):
     """Build the production class-scoped vector store lazily (needs API keys)."""
 
     from app.services.embedding.gemini_embedding import GeminiEmbedding
     from app.services.vector_store.qdrant_store import QdrantStore
 
-    return QdrantStore(embeddings=GeminiEmbedding())
+    return QdrantStore(embeddings=GeminiEmbedding(db=db))
 
 
 def retrieve_class_chunks(
@@ -300,7 +298,7 @@ def retrieve_class_chunks(
     """
 
     class_key = str(class_id)
-    vector_store = store or default_vector_store()
+    vector_store = store or default_vector_store(db)
     pairs = vector_store.similarity_search_with_score(
         question,
         k=top_k or settings.retriever_top_k,
@@ -713,24 +711,13 @@ def _format_prompt(
 
 
 def generate_with_gemini(system_prompt: str, user_prompt: str) -> str:
-    """Default generator: Gemini with the strict grounding prompt."""
+    """Default generator: Gemini with the strict grounding prompt and key rotation."""
 
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    from app.services.llm.provider import get_llm_model
+    from app.services.llm import gateway
 
-    response = get_llm_model().invoke(
-        [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
-    )
-    content = response.content
-    if isinstance(content, list):
-        text_parts = []
-        for part in content:
-            if isinstance(part, dict) and "text" in part:
-                text_parts.append(part["text"])
-            elif isinstance(part, str):
-                text_parts.append(part)
-            elif hasattr(part, "text"):
-                text_parts.append(getattr(part, "text", ""))
-        return "\n".join(text_parts).strip()
-    return content if isinstance(content, str) else str(content)
+    return gateway.invoke_chat(
+        None,
+        [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)],
+    ).strip()

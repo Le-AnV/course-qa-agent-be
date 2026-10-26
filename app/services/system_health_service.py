@@ -30,6 +30,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.models.gemini_key import GEMINI_KEY_ACTIVE, GeminiApiKey
 from app.schemas.system_health import ComponentHealth, SystemHealthRead
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,12 @@ def _check_qdrant(config: Settings) -> ComponentHealth:
     )
 
 
+def _has_active_key(db: Session) -> bool:
+    return (
+        db.query(GeminiApiKey).filter(GeminiApiKey.status == GEMINI_KEY_ACTIVE).count() > 0
+    )
+
+
 def _check_llm_config(config: Settings) -> ComponentHealth:
     """Cheap LLM readiness for the fast path — no external call."""
 
@@ -132,6 +139,31 @@ def _check_llm_live(config: Settings) -> ComponentHealth:
     )
 
 
+def _check_keys_live(db: Session) -> ComponentHealth:
+    """Live probe using the first healthy admin-managed key."""
+
+    from app.services import gemini_key_service
+    from app.services.llm import LlmConnectionError, check_key_connection
+
+    model = gemini_key_service.get_chat_model(db)
+    resolved = gemini_key_service.resolve_key(db, model=model)
+    if resolved is None:
+        return ComponentHealth(
+            name="llm",
+            status="unconfigured",
+            healthy=False,
+            detail="Gemini API key not configured",
+        )
+    try:
+        result = check_key_connection(resolved.api_key, model)
+    except LlmConnectionError:
+        logger.warning("Health check: Gemini API unreachable")
+        return ComponentHealth(
+            name="llm", status="down", healthy=False, detail="Gemini API unreachable"
+        )
+    return ComponentHealth(name="llm", status="up", healthy=True, detail=result.message)
+
+
 def _check_llm_live_cached(config: Settings) -> ComponentHealth:
     global _llm_cache
     now = time.monotonic()
@@ -148,10 +180,23 @@ def _check_llm_live_cached(config: Settings) -> ComponentHealth:
 def build_health(db: Session, config: Settings, *, live_llm: bool = False) -> SystemHealthRead:
     """Probe every dependency and roll the results into one report."""
 
+    if live_llm:
+        llm = _check_llm_live_cached(config)
+        if not llm.healthy and _has_active_key(db):
+            llm = _check_keys_live(db)
+    else:
+        llm = _check_llm_config(config)
+        if not llm.healthy and _has_active_key(db):
+            llm = ComponentHealth(
+                name="llm",
+                status="configured",
+                healthy=True,
+                detail="Gemini API key configured",
+            )
     components = [
         _check_database(db),
         _check_qdrant(config),
-        _check_llm_live_cached(config) if live_llm else _check_llm_config(config),
+        llm,
     ]
     healthy = all(component.healthy for component in components)
     return SystemHealthRead(

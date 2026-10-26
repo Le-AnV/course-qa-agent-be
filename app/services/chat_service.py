@@ -26,7 +26,7 @@ from app.services import (
     suggestion_service,
 )
 from app.services.chat_context_service import ConversationExchange
-from app.services.llm.provider import get_llm_model
+from app.services.llm import gateway
 
 logger = logging.getLogger(__name__)
 
@@ -63,54 +63,23 @@ def _chunk_text(content: Any) -> str:
     return ""
 
 
-ENABLE_QUOTA_FALLBACK: bool = True
-FALLBACK_MODEL_NAME: str = "models/gemini-flash-lite-latest"
-PRIMARY_MODEL_FIRST_CHUNK_TIMEOUT: float = 12.0
+async def _stream_model(llm: Any, messages: list[Any]) -> AsyncIterator[str]:
+    """Stream one injected model (tests/DI); production uses the key-pool gateway."""
 
-
-async def _stream_with_fallback(
-    llm: Any,
-    messages: list[Any],
-    *,
-    allow_fallback: bool = True,
-    first_chunk_timeout: float = PRIMARY_MODEL_FIRST_CHUNK_TIMEOUT,
-) -> AsyncIterator[str]:
-    """Stream chunks from LLM, falling back if 429 quota or connection hang occurs."""
-    if not (ENABLE_QUOTA_FALLBACK and allow_fallback):
-        async for chunk in llm.astream(messages):
-            text = _chunk_text(chunk.content)
-            if text:
-                yield text
-        return
-
-    stream_iter = llm.astream(messages).__aiter__()
-    try:
-        first_chunk = await asyncio.wait_for(
-            stream_iter.__anext__(),
-            timeout=first_chunk_timeout,
-        )
-        text = _chunk_text(first_chunk.content)
+    async for chunk in llm.astream(messages):
+        text = _chunk_text(chunk.content)
         if text:
             yield text
-        async for chunk in stream_iter:
-            text = _chunk_text(chunk.content)
-            if text:
-                yield text
-        return
-    except StopAsyncIteration:
-        return
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Primary LLM (%s) failed or timed out (%s). Falling back to %s.",
-            getattr(llm, "model", "primary"),
-            exc,
-            FALLBACK_MODEL_NAME,
-        )
-        fallback = get_llm_model(model=FALLBACK_MODEL_NAME)
-        async for chunk in fallback.astream(messages):
-            text = _chunk_text(chunk.content)
-            if text:
-                yield text
+
+
+def _answer_stream(
+    db: Session,
+    model: Any | None,
+    messages: list[Any],
+) -> AsyncIterator[str | gateway.StreamRestart]:
+    if model is not None:
+        return _stream_model(model, messages)
+    return gateway.astream_chat(db, messages)
 
 
 def _course_context(
@@ -328,6 +297,7 @@ async def stream_chat(
                     context_history,
                     message,
                     model=model,
+                    db=db,
                 )
                 if standalone_question != message:
                     logger.info(
@@ -368,7 +338,6 @@ async def stream_chat(
                 yield _sse("progress", {"stage": "reading", "message": read_msg})
 
             if decision.source == rag_service.SOURCE_CURRICULUM:
-                llm = model or get_llm_model()
                 sources = rag_service.curriculum_citations(decision.chunks)
 
                 if not sources:
@@ -388,12 +357,13 @@ async def stream_chat(
                     stage_started = time.monotonic()
                     logger.info("Starting grounded answer generation for class %s.", class_id)
                     answer_parts: list[str] = []
-                    async for text in _stream_with_fallback(
-                        llm, messages, allow_fallback=(model is None)
-                    ):
-                        if text:
-                            answer_parts.append(text)
-                            yield _sse("token", {"text": text})
+                    async for part in _answer_stream(db, model, messages):
+                        if isinstance(part, gateway.StreamRestart):
+                            answer_parts.clear()
+                            yield _sse("restart", {"message": part.message})
+                        elif part:
+                            answer_parts.append(part)
+                            yield _sse("token", {"text": part})
                     logger.info(
                         "Grounded answer generation completed for class %s in %.2fs.",
                         class_id,
@@ -418,6 +388,7 @@ async def stream_chat(
                             answer=full_answer,
                             chunks=decision.chunks,
                             model=model,
+                            db=db,
                         )
                         if followup_questions:
                             yield _sse("suggestions", {"questions": followup_questions})
@@ -430,7 +401,6 @@ async def stream_chat(
                     answer_parts.append(text)
                     yield _sse("token", {"text": text})
                 else:
-                    llm = model or get_llm_model()
                     sources = rag_service.internet_citations(web_results)
                     yield _sse(
                         "progress",
@@ -455,12 +425,13 @@ async def stream_chat(
                         "Starting Internet grounded answer generation for class %s.", class_id
                     )
                     answer_parts = []
-                    async for text in _stream_with_fallback(
-                        llm, messages, allow_fallback=(model is None)
-                    ):
-                        if text:
-                            answer_parts.append(text)
-                            yield _sse("token", {"text": text})
+                    async for part in _answer_stream(db, model, messages):
+                        if isinstance(part, gateway.StreamRestart):
+                            answer_parts.clear()
+                            yield _sse("restart", {"message": part.message})
+                        elif part:
+                            answer_parts.append(part)
+                            yield _sse("token", {"text": part})
                     logger.info(
                         "Internet answer generation completed for class %s in %.2fs.",
                         class_id,
