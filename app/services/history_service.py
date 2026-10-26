@@ -104,10 +104,15 @@ def get_sessions_by_class(
     count_query = select(func.count()).select_from(query.subquery())
     total = db.scalar(count_query) or 0
 
-    # Sort newest first and paginate
+    # Sort pinned first, then newest first and paginate
     sessions = (
         db.scalars(
-            query.order_by(ChatSession.updated_at.desc(), ChatSession.created_at.desc())
+            query.order_by(
+                ChatSession.is_pinned.desc(),
+                ChatSession.pinned_at.asc().nullslast(),
+                ChatSession.updated_at.desc(),
+                ChatSession.created_at.desc(),
+            )
             .offset(offset)
             .limit(limit)
         ).all()
@@ -207,6 +212,39 @@ def rename_session(
         .where(ChatSession.id == session.id)
         .values(title=title.strip(), updated_at=ChatSession.updated_at)
     )
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+def toggle_pin_session(
+    db: Session,
+    session_id: uuid.UUID,
+    user_id: uuid.UUID,
+    is_pinned: bool | None = None,
+) -> ChatSession:
+    """Pin or unpin an owned chat session.
+
+    If is_pinned is None, toggles current status.
+    Setting to pinned records pinned_at timestamp; unpinning clears it.
+    """
+    session = db.scalar(select(ChatSession).where(ChatSession.id == session_id))
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat session not found.",
+        )
+
+    if session.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: you do not own this chat session.",
+        )
+
+    new_pin_state = not session.is_pinned if is_pinned is None else is_pinned
+    session.is_pinned = new_pin_state
+    session.pinned_at = datetime.now(UTC) if new_pin_state else None
+
     db.commit()
     db.refresh(session)
     return session

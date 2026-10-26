@@ -17,6 +17,7 @@ from app.schemas.history import (
     DeleteSessionResponse,
     MessageCreateRequest,
     SessionCreateRequest,
+    SessionPinRequest,
     SessionRenameRequest,
 )
 from app.services import history_service
@@ -141,6 +142,23 @@ def rename_session(
         session_id=session_id,
         user_id=current_user.id,
         title=payload.title,
+    )
+
+
+@router.patch("/{session_id}/pin", response_model=ChatSessionResponse)
+def toggle_pin_session(
+    session_id: uuid.UUID,
+    payload: SessionPinRequest | None = None,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Pin or unpin one chat session owned by the authenticated user."""
+    target_is_pinned = payload.is_pinned if payload else None
+    return history_service.toggle_pin_session(
+        db=db,
+        session_id=session_id,
+        user_id=current_user.id,
+        is_pinned=target_is_pinned,
     )
 
 

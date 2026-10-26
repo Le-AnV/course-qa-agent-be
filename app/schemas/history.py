@@ -82,6 +82,15 @@ class SessionRenameRequest(BaseModel):
         return cleaned
 
 
+class SessionPinRequest(BaseModel):
+    """Request payload to toggle or explicitly set session pin state."""
+
+    is_pinned: bool | None = Field(
+        default=None,
+        description="Explicit boolean to set pin status. If omitted, current state is toggled.",
+    )
+
+
 class ChatSessionResponse(BaseModel):
     """Response schema for chat session summary in sidebar/list (AC-04, AC-06)."""
 
@@ -92,6 +101,8 @@ class ChatSessionResponse(BaseModel):
     title: str | None
     created_at: datetime
     updated_at: datetime
+    is_pinned: bool = False
+    pinned_at: datetime | None = None
 
 
 class ChatSessionListResponse(BaseModel):
