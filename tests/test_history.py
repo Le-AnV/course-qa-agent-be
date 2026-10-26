@@ -766,3 +766,210 @@ def test_new_chat_does_not_leak_context_from_old_session(
     assert "docker" in new_exchanges[0].user.lower()
     assert "python" not in new_exchanges[0].user.lower()
 
+
+# --- AI-101: Search Chat History ---
+
+
+def _create_search_session(
+    client: TestClient,
+    headers: dict[str, str],
+    class_id: str,
+    title: str,
+) -> str:
+    res = client.post(
+        "/api/history/sessions",
+        headers=headers,
+        json={"class_id": class_id, "title": title},
+    )
+    assert res.status_code == 201, res.text
+    return res.json()["id"]
+
+
+def _append_search_message(
+    client: TestClient,
+    headers: dict[str, str],
+    session_id: str,
+    content: str,
+) -> None:
+    res = client.post(
+        f"/api/history/sessions/{session_id}/messages",
+        headers=headers,
+        json={"role": "USER", "content": content},
+    )
+    assert res.status_code == 201, res.text
+
+
+def test_search_by_title_returns_matching_sessions(
+    client: TestClient, db_session: Session
+) -> None:
+    """AC-01: Tìm theo title trả về session, match_in='title'."""
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+    session_id = _create_search_session(client, headers, class_id, "Thuật toán BFS")
+
+    res = client.get("/api/history/search", params={"q": "BFS"}, headers=headers)
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["total"] == 1
+    assert data["query"] == "BFS"
+    assert data["items"][0]["session_id"] == session_id
+    assert data["items"][0]["match_in"] == "title"
+    assert "BFS" in data["items"][0]["snippet"]
+
+
+def test_search_by_message_content_returns_matching_sessions(
+    client: TestClient, db_session: Session
+) -> None:
+    """AC-01, AC-03: Tìm theo message trả về snippet chứa keyword."""
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+    session_id = _create_search_session(client, headers, class_id, "Recursion")
+    _append_search_message(client, headers, session_id, "Giải thích về đệ quy")
+
+    res = client.get("/api/history/search", params={"q": "đệ quy"}, headers=headers)
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["total"] == 1
+    assert data["items"][0]["session_id"] == session_id
+    assert data["items"][0]["match_in"] == "message"
+    assert "đệ quy" in data["items"][0]["snippet"]
+
+
+def test_search_does_not_return_other_users_sessions(
+    client: TestClient, db_session: Session
+) -> None:
+    """AC-02 RLS: User B không thấy session của User A."""
+    student_headers = _login(client, "student@academic.edu.vn", "Student@123")
+    trainer_headers = _login(client, "teacher@academic.edu.vn", "Teacher@123")
+    class_id = str(_get_test_class_id(db_session))
+    _create_search_session(client, student_headers, class_id, "secret session")
+
+    res = client.get("/api/history/search", params={"q": "secret"}, headers=trainer_headers)
+
+    assert res.status_code == 200
+    assert res.json()["items"] == []
+    assert res.json()["total"] == 0
+
+
+def test_search_with_no_match_returns_empty_list(client: TestClient) -> None:
+    """AC-04: q không khớp → items=[], total=0."""
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    res = client.get(
+        "/api/history/search",
+        params={"q": "xyzxyzxyznotexist"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["items"] == []
+    assert res.json()["total"] == 0
+
+
+def test_search_is_case_insensitive(client: TestClient, db_session: Session) -> None:
+    """AC-01: Tìm 'THUATTOAN' vẫn khớp title 'thuatToan'."""
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+    session_id = _create_search_session(client, headers, class_id, "thuatToan")
+
+    res = client.get("/api/history/search", params={"q": "THUATTOAN"}, headers=headers)
+
+    assert res.status_code == 200
+    assert res.json()["items"][0]["session_id"] == session_id
+
+
+def test_search_with_empty_q_returns_422(client: TestClient) -> None:
+    """Validation: q rỗng hoặc toàn khoảng trắng → HTTP 422."""
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    assert client.get(
+        "/api/history/search", params={"q": ""}, headers=headers
+    ).status_code == 422
+    assert client.get(
+        "/api/history/search", params={"q": "   "}, headers=headers
+    ).status_code == 422
+
+
+def test_search_requires_authentication(client: TestClient) -> None:
+    """Security: thiếu token → HTTP 401."""
+    assert client.get("/api/history/search", params={"q": "BFS"}).status_code == 401
+
+
+def test_search_respects_class_id_filter(
+    client: TestClient, db_session: Session
+) -> None:
+    """AC-01: class_id lạ không trả về session của class khác."""
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+    _create_search_session(client, headers, class_id, "BFS in class A")
+
+    res = client.get(
+        "/api/history/search",
+        params={"q": "BFS", "class_id": str(uuid.uuid4())},
+        headers=headers,
+    )
+
+    assert res.status_code == 200
+    assert res.json()["items"] == []
+
+
+def test_search_pagination_returns_total_and_slices(
+    client: TestClient, db_session: Session
+) -> None:
+    """AC-01: total phản ánh toàn bộ kết quả, items bị giới hạn bởi limit/offset."""
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+    for index in range(3):
+        _create_search_session(client, headers, class_id, f"BFS session {index}")
+
+    first_page = client.get(
+        "/api/history/search",
+        params={"q": "BFS", "limit": 2, "offset": 0},
+        headers=headers,
+    )
+    second_page = client.get(
+        "/api/history/search",
+        params={"q": "BFS", "limit": 2, "offset": 2},
+        headers=headers,
+    )
+
+    assert first_page.status_code == 200
+    assert first_page.json()["total"] == 3
+    assert len(first_page.json()["items"]) == 2
+    assert second_page.status_code == 200
+    assert second_page.json()["total"] == 3
+    assert len(second_page.json()["items"]) == 1
+
+
+def test_search_escapes_like_wildcards(
+    client: TestClient, db_session: Session
+) -> None:
+    """Security/Correctness: q='%' phải match literal '%', không match tất cả."""
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+    percent_id = _create_search_session(client, headers, class_id, "100% done")
+    _create_search_session(client, headers, class_id, "BFS overview")
+
+    res = client.get("/api/history/search", params={"q": "%"}, headers=headers)
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["total"] == 1
+    assert data["items"][0]["session_id"] == percent_id
+
+
+def test_search_title_match_takes_priority_over_message(
+    client: TestClient, db_session: Session
+) -> None:
+    """AC-01: session khớp cả title và message → ưu tiên match_in='title'."""
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+    session_id = _create_search_session(client, headers, class_id, "BFS overview")
+    _append_search_message(client, headers, session_id, "BFS details")
+
+    res = client.get("/api/history/search", params={"q": "BFS"}, headers=headers)
+
+    assert res.status_code == 200
+    assert res.json()["items"][0]["session_id"] == session_id
+    assert res.json()["items"][0]["match_in"] == "title"
+
+

@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.config.config import settings
@@ -373,3 +373,113 @@ def delete_session(
     db.delete(session)
     db.commit()
     return True
+
+
+def _escape_like(value: str) -> str:
+    """Escape LIKE wildcards để user input được match literal."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _extract_snippet(content: str, keyword: str, context_chars: int = 100) -> str:
+    """Trích xuất đoạn văn bản xung quanh từ khóa để hiển thị làm preview."""
+    idx = content.lower().find(keyword.lower())
+    if idx == -1:
+        return content[:context_chars] + ("..." if len(content) > context_chars else "")
+    start = max(0, idx - context_chars // 2)
+    end = min(len(content), idx + len(keyword) + context_chars // 2)
+    snippet = content[start:end]
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(content):
+        snippet = snippet + "..."
+    return snippet
+
+
+def search_sessions(
+    db: Session,
+    user_id: uuid.UUID,
+    query: str,
+    class_id: uuid.UUID | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    """
+    Tìm kiếm phiên chat theo từ khóa trong title và/hoặc message content.
+
+    Chiến lược:
+    1. Title match → match_in='title', snippet = title (UI ẩn snippet nếu trùng title).
+    2. Message match → match_in='message', snippet từ message đầu tiên khớp.
+    3. Nếu 1 session khớp cả 2 → ưu tiên match_in='title'.
+    4. Sort: updated_at DESC, created_at DESC.
+    5. RLS: WHERE ChatSession.user_id == user_id.
+    6. Pagination + total count bằng SQL.
+    """
+    query = query.strip()
+    if not query:
+        return [], 0
+
+    keyword = f"%{_escape_like(query)}%"
+
+    message_match = exists().where(
+        ChatMessage.session_id == ChatSession.id,
+        ChatMessage.content.ilike(keyword, escape="\\"),
+    )
+
+    base = select(ChatSession).where(
+        ChatSession.user_id == user_id,
+        or_(
+            ChatSession.title.ilike(keyword, escape="\\"),
+            message_match,
+        ),
+    )
+    if class_id is not None:
+        base = base.where(ChatSession.class_id == class_id)
+
+    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+
+    sessions = db.scalars(
+        base.order_by(ChatSession.updated_at.desc(), ChatSession.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+
+    if not sessions:
+        return [], total
+
+    session_ids = [session.id for session in sessions]
+    matching_messages = db.scalars(
+        select(ChatMessage)
+        .where(
+            ChatMessage.session_id.in_(session_ids),
+            ChatMessage.content.ilike(keyword, escape="\\"),
+        )
+        .order_by(ChatMessage.session_id, ChatMessage.created_at.asc())
+    ).all()
+
+    first_message_by_session: dict[uuid.UUID, ChatMessage] = {}
+    for message in matching_messages:
+        first_message_by_session.setdefault(message.session_id, message)
+
+    results: list[dict] = []
+    for session in sessions:
+        title_matches = bool(session.title and query.lower() in session.title.lower())
+        if title_matches:
+            results.append({
+                "session_id": session.id,
+                "title": session.title,
+                "updated_at": session.updated_at,
+                "snippet": session.title or "",
+                "match_in": "title",
+            })
+            continue
+
+        message = first_message_by_session.get(session.id)
+        results.append({
+            "session_id": session.id,
+            "title": session.title,
+            "updated_at": session.updated_at,
+            "snippet": _extract_snippet(message.content, query) if message else "",
+            "match_in": "message",
+        })
+
+    return results, total

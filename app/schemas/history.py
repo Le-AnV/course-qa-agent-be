@@ -111,3 +111,22 @@ class DeleteSessionResponse(BaseModel):
     """Response schema for session deletion confirmation."""
 
     message: str = "Chat session deleted successfully."
+
+
+class SearchResultItem(BaseModel):
+    """Search result item representing a matching chat session (AC-01, AC-03)."""
+
+    session_id: uuid.UUID
+    title: str | None
+    updated_at: datetime
+    snippet: str
+    match_in: Literal["title", "message"]
+
+
+class ChatSearchResponse(BaseModel):
+    """Response schema for GET /api/history/search endpoint (AI-101)."""
+
+    items: list[SearchResultItem] = Field(default_factory=list)
+    total: int = 0
+    query: str
+
