@@ -15,6 +15,10 @@ secret values.
   also requires rebuilding/redeploying the backend image.
 - The agreed bulk email rate is 20 messages per minute. This API reports the rate;
   enforcing it belongs to the AI-31 email outbox queue integration.
+- The scope gate (OpenAI Decisions) uses its own OpenAI key pool stored in the
+  `openai_api_key` table. `OPENAI_API_KEY` in the backend `.env` is only a fallback
+  when the pool has no healthy key. The pool always rotates on `401`/`403`
+  (key marked invalid) and `429`/`5xx` (60-second cooldown), up to 3 keys per check.
 
 ## Endpoints
 
@@ -33,6 +37,11 @@ or invalid token returns `401`; an authenticated non-Admin receives `403`.
 | `GET` | `/api/admin/llm/models` | Lists chat models available to active keys. |
 | `PATCH` | `/api/admin/llm/model` | Updates the chat model used for new answers. |
 | `POST` | `/api/admin/llm/test-connection` | Checks the environment `GEMINI_API_KEY` against the configured model. |
+| `GET` | `/api/admin/decisions/keys` | Lists the OpenAI keys used by the scope gate with masked value, status, cooldown, last-used time, last error, and whether `OPENAI_API_KEY` is set as fallback. |
+| `POST` | `/api/admin/decisions/keys` | Adds an encrypted OpenAI key, validates it against `GET https://api.openai.com/v1/models`, and makes it available to the scope gate. |
+| `PATCH` | `/api/admin/decisions/keys/{key_id}` | Renames a key, changes its priority, or pauses/resumes it. |
+| `DELETE` | `/api/admin/decisions/keys/{key_id}` | Removes a key from the decisions pool. |
+| `POST` | `/api/admin/decisions/keys/{key_id}/test` | Checks that one stored key is accepted by OpenAI. |
 | `POST` | `/api/admin/email/test` | Sends a plain-text test email to the email address in the authenticated Admin token. No request body is needed. |
 
 Successful and failed connection checks return the same shape:

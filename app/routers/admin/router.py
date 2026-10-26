@@ -15,6 +15,7 @@ from app.models.course import Class, Enrollment
 from app.models.email_outbox import EmailOutbox
 from app.models.import_job import ROW_FAILED, ImportBatch, ImportRow
 from app.models.user import User
+from app.routers.admin.decisions import router as decisions_router
 from app.routers.admin.gemini import router as gemini_router
 from app.schemas.admin import (
     AdminSettingsRead,
@@ -65,6 +66,7 @@ from app.services.system_health_service import build_health
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 router.include_router(gemini_router)
+router.include_router(decisions_router)
 
 
 def _class_to_read(db: Session, section: Class) -> ClassRead:
