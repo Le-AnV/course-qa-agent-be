@@ -181,6 +181,18 @@ class Settings(BaseSettings):
         validation_alias="CHAT_CONTEXT_MAX_CHARS",
     )
 
+    # AI-125 suggested follow-up questions
+    chat_suggestions_enabled: bool = Field(
+        default=True,
+        validation_alias="CHAT_SUGGESTIONS_ENABLED",
+    )
+    chat_suggestions_timeout_seconds: float = Field(
+        default=10.0,
+        ge=1.0,
+        le=30.0,
+        validation_alias="CHAT_SUGGESTIONS_TIMEOUT_SECONDS",
+    )
+
     # Prompt configuration
     prompt_file: Path = Field(
         default=Path(__file__).resolve().parent / "prompts",

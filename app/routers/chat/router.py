@@ -15,7 +15,12 @@ from app.models.course import Class, ClassTrainer, Enrollment
 from app.models.document import Document
 from app.models.user import User
 from app.schemas.chat import ChatRequest
-from app.services import chat_context_service, chat_service, document_service, pdf_highlight_service
+from app.services import (
+    chat_context_service,
+    chat_service,
+    document_service,
+    pdf_highlight_service,
+)
 from app.services.course_service import STATUS_ARCHIVED
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])

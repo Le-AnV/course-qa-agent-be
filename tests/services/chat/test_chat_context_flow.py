@@ -100,8 +100,11 @@ def test_follow_up_uses_history_and_persists_citations(db_session: Session, monk
 
     class FakeModel:
         async def ainvoke(self, messages):
-            captured["rewrite_prompt"] = "\n".join(str(message.content) for message in messages)
-            return SimpleNamespace(content="When is the database assignment deadline?")
+            prompt_text = "\n".join(str(message.content) for message in messages)
+            if "database assignment policy" in prompt_text or "standalone" in prompt_text.lower():
+                captured["rewrite_prompt"] = prompt_text
+                return SimpleNamespace(content="When is the database assignment deadline?")
+            return SimpleNamespace(content="[]")
 
         async def astream(self, messages):
             captured["answer_prompt"] = "\n".join(str(message.content) for message in messages)
