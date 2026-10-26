@@ -6,6 +6,7 @@ Create Date: 2026-10-26
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0020_chat_session_pinned"
