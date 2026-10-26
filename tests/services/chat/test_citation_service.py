@@ -66,3 +66,20 @@ def test_verify_citations_removes_hallucinated_and_out_of_bounds_markers():
     assert "[99]" not in clean_answer
     assert valid_indices == [1]
 
+
+def test_cited_page_citations_capped_at_max_citations():
+    from app.services.rag_service import ScoredChunk, cited_page_citations
+
+    # Create 5 distinct page chunks
+    chunks = [
+        ScoredChunk(content=f"Content for section {i}", score=0.9, metadata={"document_id": f"doc-{i}", "page_number": i})
+        for i in range(1, 6)
+    ]
+    # Answer cites all 5 chunks
+    answer = "Points: [1], [2], [3], [4], [5]."
+
+    # Default max_citations is 3
+    sources = cited_page_citations(chunks, answer)
+    assert len(sources) == 3
+    assert [s.document_id for s in sources] == ["doc-1", "doc-2", "doc-3"]
+

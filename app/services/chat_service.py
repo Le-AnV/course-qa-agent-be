@@ -279,7 +279,7 @@ async def stream_chat(
                 time.monotonic() - stage_started,
                 len(decision.chunks),
             )
-            if decision.chunks:
+            if decision.chunks and decision.source == rag_service.SOURCE_CURRICULUM:
                 doc_titles = list(dict.fromkeys(c.title for c in decision.chunks if c.title))
                 count = len(decision.chunks)
                 unit = "section" if count == 1 else "sections"

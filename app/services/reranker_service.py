@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from typing import Any
@@ -11,7 +12,7 @@ from app.config import settings
 from app.services.rag_service import ScoredChunk
 
 RERANK_CANDIDATES = 10
-RERANK_TOP_K = 5
+RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "3"))
 MAX_SEQUENCE_LENGTH = 512
 
 _model_lock = threading.Lock()

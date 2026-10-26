@@ -30,7 +30,7 @@ import httpx
 from langchain_core.documents import Document
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import search_config, settings
 from app.core.prompt_manager import get_prompt_manager
 from app.models.system_config import SystemConfig
 from app.services import citation_service, document_service
@@ -407,20 +407,35 @@ def search_internet(question: str) -> list[WebResult]:
             pass
 
         client = _get_tavily_client()
-        response = client.post(
-            "https://api.tavily.com/search",
-            json={
-                "api_key": api_key,
-                "query": question,
-                "search_depth": "basic",
-                "max_results": 3,
-                "include_answer": False,
-                "include_raw_content": False,
-            },
-        )
+        payload: dict[str, Any] = {
+            "api_key": api_key,
+            "query": question,
+            "search_depth": search_config.TAVILY_SEARCH_DEPTH,
+            "max_results": search_config.TAVILY_MAX_RESULTS,
+            "include_domains": search_config.TRUSTED_WEB_DOMAINS,
+            "exclude_domains": search_config.BLOCKED_WEB_DOMAINS,
+            "include_answer": False,
+            "include_raw_content": False,
+        }
+        response = client.post("https://api.tavily.com/search", json=payload)
         response.raise_for_status()
         data = response.json()
         raw_results = data.get("results", [])
+
+        # Fallback to broader web search if trusted domains return no results
+        if not raw_results and search_config.FALLBACK_TO_GENERAL_SEARCH:
+            fallback_payload: dict[str, Any] = {
+                "api_key": api_key,
+                "query": question,
+                "search_depth": search_config.TAVILY_SEARCH_DEPTH,
+                "max_results": search_config.TAVILY_MAX_RESULTS,
+                "exclude_domains": search_config.BLOCKED_WEB_DOMAINS,
+                "include_answer": False,
+                "include_raw_content": False,
+            }
+            fallback_resp = client.post("https://api.tavily.com/search", json=fallback_payload)
+            if fallback_resp.is_success:
+                raw_results = fallback_resp.json().get("results", [])
 
         web_results: list[WebResult] = []
         for item in raw_results:
@@ -431,6 +446,12 @@ def search_internet(question: str) -> list[WebResult]:
                 continue
             jump_url = jump_builder(raw_url, content) if jump_builder is not None else raw_url
             web_results.append(WebResult(title=title, url=jump_url, content=content))
+
+        def _tier_sort_key(res: WebResult) -> int:
+            tier = search_config.get_source_tier(res.url)
+            return tier if tier is not None else 99
+
+        web_results.sort(key=_tier_sort_key)
 
         logger.info("Tavily search returned %d results for %r", len(web_results), question)
         return web_results
@@ -560,6 +581,7 @@ def cited_markers(answer: str) -> set[int]:
 def cited_page_citations(
     chunks: Sequence[ScoredChunk],
     answer: str,
+    max_citations: int = 3,
 ) -> list[Source]:
     """Citations for only the pages whose passages the answer referenced.
 
@@ -593,7 +615,7 @@ def cited_page_citations(
                 highlights=tuple(chunk.content for _, chunk in members),
             )
         )
-    return sources
+    return sources[:max_citations]
 
 
 def internet_citations(results: Sequence[WebResult]) -> list[Source]:
