@@ -76,6 +76,7 @@ def db_session(monkeypatch: pytest.MonkeyPatch) -> Generator[Session, None, None
 @pytest.fixture()
 def client(db_session: Session) -> Generator[TestClient, None, None]:
     """TestClient with overridden get_db dependency."""
+
     def _override() -> Generator[Session, None, None]:
         yield db_session
 
@@ -309,9 +310,7 @@ def test_delete_session_does_not_affect_other_sessions(
     assert items[0]["id"] == session_2_id
 
 
-def test_delete_session_rejects_another_user(
-    client: TestClient, db_session: Session
-) -> None:
+def test_delete_session_rejects_another_user(client: TestClient, db_session: Session) -> None:
     """AC-02: A non-owner receives 403 and the session remains intact."""
     student_headers = _login(client, "student@academic.edu.vn", "Student@123")
     trainer_headers = _login(client, "teacher@academic.edu.vn", "Teacher@123")
@@ -334,10 +333,7 @@ def test_delete_session_rejects_another_user(
 
     forbidden = client.delete(f"/api/history/{session_id}", headers=trainer_headers)
     assert forbidden.status_code == 403
-    assert (
-        forbidden.json()["detail"]
-        == "Access forbidden: you do not own this chat session."
-    )
+    assert forbidden.json()["detail"] == "Access forbidden: you do not own this chat session."
 
     detail_res = client.get(f"/api/history/{session_id}", headers=student_headers)
     assert detail_res.status_code == 200
@@ -394,12 +390,7 @@ def test_delete_session_purges_content_gap_vectors(
     assert web_msg.json()["used_web_search"] is True
     web_msg_id = web_msg.json()["id"]
 
-    assert (
-        db_session.query(ChatMessage)
-        .filter(ChatMessage.session_id == session_uuid)
-        .count()
-        == 2
-    )
+    assert db_session.query(ChatMessage).filter(ChatMessage.session_id == session_uuid).count() == 2
 
     captured_message_ids: list[str] = []
 
@@ -421,9 +412,7 @@ def test_delete_session_purges_content_gap_vectors(
     db_session.expire_all()
     assert db_session.get(ChatSession, session_uuid) is None
     remaining_messages = (
-        db_session.query(ChatMessage)
-        .filter(ChatMessage.session_id == session_uuid)
-        .count()
+        db_session.query(ChatMessage).filter(ChatMessage.session_id == session_uuid).count()
     )
     assert remaining_messages == 0
 
@@ -455,9 +444,7 @@ def test_save_chat_turn_service_auto_creates_session_and_truncates_title(
     assert assistant_msg.used_web_search is False
 
 
-def test_message_citations_survive_history_reload(
-    client: TestClient, db_session: Session
-) -> None:
+def test_message_citations_survive_history_reload(client: TestClient, db_session: Session) -> None:
     """AI-63 AC-03: reopening an old answer must keep its original citations."""
 
     headers = _login(client, "student@academic.edu.vn", "Student@123")
@@ -493,6 +480,62 @@ def test_message_citations_survive_history_reload(
     detail_res = client.get(f"/api/history/{session_id}", headers=headers)
     assert detail_res.status_code == 200
     assert detail_res.json()["messages"][0]["citations"] == [citation]
+
+
+def test_message_suggested_questions_survive_history_reload(
+    client: TestClient, db_session: Session
+) -> None:
+    """AI-125: reopening an old answer must keep its suggested follow-up questions."""
+
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    class_id = str(_get_test_class_id(db_session))
+    create_res = client.post(
+        "/api/history/sessions",
+        headers=headers,
+        json={"class_id": class_id, "title": "Suggested questions answer"},
+    )
+    session_id = create_res.json()["id"]
+
+    suggestions = [
+        "What is gradient descent?",
+        "How to prevent overfitting?",
+    ]
+    append_res = client.post(
+        f"/api/history/sessions/{session_id}/messages",
+        headers=headers,
+        json={
+            "role": "ASSISTANT",
+            "content": "Deep learning models are trained via gradient descent.",
+            "used_web_search": False,
+            "citations": [],
+            "suggested_questions": suggestions,
+        },
+    )
+    assert append_res.status_code == 201
+
+    detail_res = client.get(f"/api/history/{session_id}", headers=headers)
+    assert detail_res.status_code == 200
+    assert detail_res.json()["messages"][0]["suggested_questions"] == suggestions
+
+
+def test_save_chat_turn_persists_suggested_questions(db_session: Session) -> None:
+    """AI-125: save_chat_turn saves suggested_questions into assistant message."""
+    student = db_session.query(User).filter(User.email == "student@academic.edu.vn").first()
+    clazz = db_session.query(Class).first()
+
+    suggestions = ["How does backprop work?", "Why use ReLU?"]
+    _session, _user_msg, assistant_msg = history_service.save_chat_turn(
+        db=db_session,
+        user_id=student.id,
+        class_id=clazz.id,
+        user_content="What is neural network?",
+        assistant_content="Neural networks are interconnected layers.",
+        session_id=None,
+        used_web_search=False,
+        suggested_questions=suggestions,
+    )
+
+    assert assistant_msg.suggested_questions == suggestions
 
 
 def test_rename_session_updates_title_without_bumping_activity(
@@ -548,9 +591,7 @@ def test_rename_session_rejects_another_users_session(
     assert res.status_code == 403
 
 
-def test_rename_session_rejects_blank_title(
-    client: TestClient, db_session: Session
-) -> None:
+def test_rename_session_rejects_blank_title(client: TestClient, db_session: Session) -> None:
     """A rename must contain at least one non-whitespace character."""
 
     headers = _login(client, "student@academic.edu.vn", "Student@123")
@@ -765,4 +806,3 @@ def test_new_chat_does_not_leak_context_from_old_session(
     assert len(new_exchanges) == 1
     assert "docker" in new_exchanges[0].user.lower()
     assert "python" not in new_exchanges[0].user.lower()
-
