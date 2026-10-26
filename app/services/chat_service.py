@@ -237,6 +237,7 @@ async def stream_chat(
                     ),
                     question=message,
                     history=scope_history,
+                    db=db,
                 )
             except Exception:
                 logger.warning(

@@ -396,6 +396,38 @@ class GeminiAutoSwitchRead(BaseModel):
     enabled: bool
 
 
+class DecisionsKeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    api_key: str = Field(min_length=1, max_length=500)
+    priority: int = Field(default=100, ge=0, le=1000)
+
+
+class DecisionsKeyUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    priority: int | None = Field(default=None, ge=0, le=1000)
+    # Admin can pause/resume; rejected keys are detected by the scope gate.
+    status: Literal["active", "paused"] | None = None
+
+
+class DecisionsKeyRead(BaseModel):
+    id: uuid.UUID
+    name: str
+    masked_key: str
+    status: str
+    priority: int
+    cooldown_until: datetime | None = None
+    last_error: str = ""
+    last_used_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DecisionsKeysRead(BaseModel):
+    keys: list[DecisionsKeyRead] = []
+    active_count: int = 0
+    env_configured: bool = False
+
+
 class ConnectionTestResult(BaseModel):
     """Report an external connection check without exposing credentials."""
 
