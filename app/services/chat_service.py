@@ -21,6 +21,7 @@ from app.services import (
     history_service,
     quick_response_service,
     rag_service,
+    suggestion_service,
 )
 from app.services.chat_context_service import ConversationExchange
 from app.services.llm.provider import get_llm_model
@@ -29,12 +30,8 @@ logger = logging.getLogger(__name__)
 
 CHAT_TIMEOUT_SECONDS = 300.0
 
-GENERATION_ERROR_MESSAGE = (
-    "The answer could not be generated. Please try again."
-)
-TIMEOUT_ERROR_MESSAGE = (
-    "The answer timed out. Please try again."
-)
+GENERATION_ERROR_MESSAGE = "The answer could not be generated. Please try again."
+TIMEOUT_ERROR_MESSAGE = "The answer timed out. Please try again."
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:
@@ -122,14 +119,8 @@ def _course_context(
     lines: list[str] = []
 
     for index, chunk in enumerate(chunks, start=1):
-        locator = (
-            f", page {chunk.page}"
-            if chunk.page is not None
-            else ""
-        )
-        lines.append(
-            f"[{index}] {chunk.title}{locator}\n{chunk.content}"
-        )
+        locator = f", page {chunk.page}" if chunk.page is not None else ""
+        lines.append(f"[{index}] {chunk.title}{locator}\n{chunk.content}")
 
     return "\n\n".join(lines)
 
@@ -165,6 +156,7 @@ async def _persist_turn(
     message: str,
     answer: str,
     citations: Sequence[dict[str, Any]],
+    suggested_questions: Sequence[str] | None = None,
 ) -> tuple[Any, Any, Any] | None:
     """Save a completed turn without letting a DB failure break the SSE stream."""
 
@@ -182,6 +174,7 @@ async def _persist_turn(
             session_id=session_id,
             used_web_search=False,
             citations=citations,
+            suggested_questions=suggested_questions,
         )
     except Exception:
         logger.exception("Failed to persist chat turn for class %s.", class_id)
@@ -209,6 +202,7 @@ async def stream_chat(
     context_history = list(history or ())
     sources: list[rag_service.Source] = []
     answer_parts: list[str] = []
+    followup_questions: list[str] = []
     stage = "conversation context"
 
     try:
@@ -243,12 +237,12 @@ async def stream_chat(
                             if saved_session is not None
                             else (str(session_id) if session_id is not None else None)
                         ),
-                        "user_message_id": (
-                            str(user_msg.id) if user_msg is not None else None
-                        ),
+                        "user_message_id": (str(user_msg.id) if user_msg is not None else None),
                         "assistant_message_id": (
                             str(assistant_msg.id) if assistant_msg is not None else None
                         ),
+                        "suggestions": [],
+                        "suggested_questions": [],
                     },
                 )
                 return
@@ -322,7 +316,9 @@ async def stream_chat(
                     stage_started = time.monotonic()
                     logger.info("Starting grounded answer generation for class %s.", class_id)
                     answer_parts: list[str] = []
-                    async for text in _stream_with_fallback(llm, messages, allow_fallback=(model is None)):
+                    async for text in _stream_with_fallback(
+                        llm, messages, allow_fallback=(model is None)
+                    ):
                         if text:
                             answer_parts.append(text)
                             yield _sse("token", {"text": text})
@@ -339,6 +335,21 @@ async def stream_chat(
                     ):
                         yield _sse("citation", asdict(source))
 
+                    # AI-125 AC-01: Suggested follow-up questions
+                    full_answer = "".join(answer_parts).strip()
+                    if (
+                        full_answer
+                        and full_answer != chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE
+                    ):
+                        followup_questions = await suggestion_service.generate_followup_questions(
+                            question=standalone_question,
+                            answer=full_answer,
+                            chunks=decision.chunks,
+                            model=model,
+                        )
+                        if followup_questions:
+                            yield _sse("suggestions", {"questions": followup_questions})
+
             elif decision.source == rag_service.SOURCE_INTERNET:
                 yield _sse("progress", {"stage": "searching", "message": "Searching the web"})
                 web_results = await asyncio.to_thread(rag_service.search_internet, message)
@@ -349,7 +360,13 @@ async def stream_chat(
                 else:
                     llm = model or get_llm_model()
                     sources = rag_service.internet_citations(web_results)
-                    yield _sse("progress", {"stage": "reading", "message": f"Reviewing {len(web_results)} web sources"})
+                    yield _sse(
+                        "progress",
+                        {
+                            "stage": "reading",
+                            "message": f"Reviewing {len(web_results)} web sources",
+                        },
+                    )
                     context = "\n\n".join(
                         f"Source ({source.title} — {source.url}):\n{result.content}"
                         for source, result in zip(sources, web_results, strict=True)
@@ -362,9 +379,13 @@ async def stream_chat(
                     yield _sse("progress", {"stage": "drafting", "message": "Synthesizing answer"})
                     stage = "grounded answer generation"
                     stage_started = time.monotonic()
-                    logger.info("Starting Internet grounded answer generation for class %s.", class_id)
+                    logger.info(
+                        "Starting Internet grounded answer generation for class %s.", class_id
+                    )
                     answer_parts = []
-                    async for text in _stream_with_fallback(llm, messages, allow_fallback=(model is None)):
+                    async for text in _stream_with_fallback(
+                        llm, messages, allow_fallback=(model is None)
+                    ):
                         if text:
                             answer_parts.append(text)
                             yield _sse("token", {"text": text})
@@ -390,6 +411,7 @@ async def stream_chat(
                 message=message,
                 answer="".join(answer_parts),
                 citations=citation_payload,
+                suggested_questions=followup_questions or None,
             )
             saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
 
@@ -409,6 +431,8 @@ async def stream_chat(
                     "assistant_message_id": (
                         str(assistant_msg.id) if assistant_msg is not None else None
                     ),
+                    "suggestions": followup_questions,
+                    "suggested_questions": followup_questions,
                 },
             )
 
