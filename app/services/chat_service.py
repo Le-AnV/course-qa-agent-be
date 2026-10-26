@@ -18,7 +18,9 @@ from app.core.prompt_manager import get_prompt_manager
 from app.services import (
     chat_context_service,
     chat_retrieval_service,
+    course_service,
     history_service,
+    openai_decision_service,
     quick_response_service,
     rag_service,
     suggestion_service,
@@ -243,6 +245,76 @@ async def stream_chat(
                         ),
                         "suggestions": [],
                         "suggested_questions": [],
+                    },
+                )
+                return
+
+            yield _sse(
+                "progress",
+                {"stage": "searching", "message": "Checking class scope"},
+            )
+            class_record = course_service.get_class(db, class_id)
+            scope_history = chat_context_service.format_history_context(
+                context_history,
+                max_chars=2000,
+            )
+            try:
+                out_of_scope = await openai_decision_service.is_confidently_out_of_scope(
+                    class_name=class_record.name if class_record is not None else "",
+                    class_description=(
+                        class_record.info.description
+                        if class_record is not None and class_record.info is not None
+                        else None
+                    ),
+                    question=message,
+                    history=scope_history,
+                )
+            except Exception:
+                logger.warning(
+                    "OpenAI Decisions scope check raised unexpectedly; continuing with RAG.",
+                    exc_info=True,
+                )
+                out_of_scope = False
+
+            logger.info(
+                "OpenAI Decisions classified the question as %s for class %s.",
+                "out_of_scope" if out_of_scope else "in_scope_or_uncertain",
+                class_id,
+            )
+
+            if out_of_scope:
+                text = (
+                    "This question appears to be outside the scope of this class. "
+                    "Please ask a question related to the course subject."
+                )
+                answer_parts.append(text)
+                yield _sse("token", {"text": text})
+                saved_turn = await _persist_turn(
+                    db=db,
+                    user_id=user_id,
+                    session_id=session_id,
+                    class_id=class_id,
+                    message=message,
+                    answer=text,
+                    citations=[],
+                )
+                saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
+                yield _sse(
+                    "done",
+                    {
+                        "source": rag_service.SOURCE_UNRELATED,
+                        "used_web_search": False,
+                        "threshold": 0.0,
+                        "top_score": None,
+                        "session_id": (
+                            str(saved_session.id)
+                            if saved_session is not None
+                            else (str(session_id) if session_id is not None else None)
+                        ),
+                        "user_message_id": str(user_msg.id) if user_msg is not None else None,
+                        "assistant_message_id": (
+                            str(assistant_msg.id) if assistant_msg is not None else None
+                        ),
                     },
                 )
                 return
