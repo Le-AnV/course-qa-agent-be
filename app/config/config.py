@@ -34,6 +34,7 @@ class Settings(BaseSettings):
         vlm_model: Model identifier for Vision Language Model.
         vlm_temperature: Temperature setting for VLM responses.
         google_api_key: Secret API key for Google Gemini model access.
+        openai_api_key: Optional API key for the OpenAI Decisions scope gate.
         jwt_secret: HS256 signing key for DB-backed login tokens (dev default, override in prod).
         jwt_algorithm: JWT algorithm for login tokens.
         jwt_expire_minutes: Login token lifetime in minutes.
@@ -99,6 +100,7 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     )
+    openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     tavily_api_key: str | None = Field(default=None, validation_alias="TAVILY_API_KEY")
 
     # DB-backed auth (E1 / AI-25, AI-27, AI-31). Dev defaults only — override in prod.
@@ -202,6 +204,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "google_api_key",
+        "openai_api_key",
         "smtp_sender_email",
         "smtp_app_password",
         mode="before",

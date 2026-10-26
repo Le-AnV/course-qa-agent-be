@@ -7,7 +7,9 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from app.services import chat_retrieval_service, rag_service
+import pytest
+
+from app.services import chat_retrieval_service, chat_service, rag_service
 from app.services.chat_service import stream_chat
 
 
@@ -20,6 +22,19 @@ def _parse_event(raw: str) -> tuple[str, dict]:
 
 async def _collect(stream) -> list[tuple[str, dict]]:
     return [_parse_event(item) async for item in stream]
+
+
+@pytest.fixture(autouse=True)
+def _disable_scope_gate_for_existing_chat_tests(monkeypatch) -> None:
+    async def in_scope(**kwargs) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        chat_service.openai_decision_service,
+        "is_confidently_out_of_scope",
+        in_scope,
+    )
+    monkeypatch.setattr(chat_service.course_service, "get_class", lambda *args: None)
 
 
 def _curriculum_decision() -> rag_service.RetrievalDecision:
@@ -78,6 +93,7 @@ def test_stream_chat_emits_tokens_citations_and_done(monkeypatch) -> None:
         "progress",
         "progress",
         "progress",
+        "progress",
         "token",
         "token",
         "citation",
@@ -85,11 +101,12 @@ def test_stream_chat_emits_tokens_citations_and_done(monkeypatch) -> None:
     ]
     assert [data["stage"] for event, data in events if event == "progress"] == [
         "searching",
+        "searching",
         "reading",
         "drafting",
     ]
-    assert events[3][1] == {"text": "Neural networks "}
-    assert events[5][1] == {
+    assert events[4][1] == {"text": "Neural networks "}
+    assert events[6][1] == {
         "index": 1,
         "kind": "curriculum",
         "title": "lesson.pdf",
@@ -100,7 +117,7 @@ def test_stream_chat_emits_tokens_citations_and_done(monkeypatch) -> None:
         "indexes": [1],
         "highlights": ["A neural network contains connected layers."],
     }
-    assert events[6][1] == {
+    assert events[7][1] == {
         "source": "curriculum",
         "used_web_search": False,
         "threshold": 0.8,
@@ -115,6 +132,58 @@ def test_stream_chat_emits_tokens_citations_and_done(monkeypatch) -> None:
     assert "A neural network contains connected layers." in rendered_prompt
     assert "Explain neural networks." in rendered_prompt
     assert "Every factual claim must end with the matching source marker" in rendered_prompt
+
+
+def test_confident_out_of_scope_skips_retrieval(monkeypatch) -> None:
+    scope_arguments: dict = {}
+
+    async def out_of_scope(**kwargs) -> bool:
+        scope_arguments.update(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        chat_service.openai_decision_service,
+        "is_confidently_out_of_scope",
+        out_of_scope,
+    )
+    monkeypatch.setattr(
+        chat_service.course_service,
+        "get_class",
+        lambda *args: SimpleNamespace(
+            name="Python Programming",
+            info=SimpleNamespace(description="Introductory Python course"),
+        ),
+    )
+    monkeypatch.setattr(
+        chat_retrieval_service,
+        "retrieve_for_chat",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Out-of-scope questions must not reach retrieval")
+        ),
+    )
+
+    events = asyncio.run(
+        _collect(
+            stream_chat(
+                db=MagicMock(),
+                message="What were today's lottery numbers?",
+                class_id="class-a",
+                timeout_seconds=1,
+            )
+        )
+    )
+
+    assert [event for event, _ in events] == ["progress", "token", "done"]
+    assert events[0][1] == {
+        "stage": "searching",
+        "message": "Checking class scope",
+    }
+    assert "outside the scope" in events[1][1]["text"]
+    assert events[2][1]["source"] == rag_service.SOURCE_UNRELATED
+    assert events[2][1]["used_web_search"] is False
+    assert scope_arguments["class_name"] == "Python Programming"
+    assert scope_arguments["class_description"] == "Introductory Python course"
+    assert scope_arguments["question"] == "What were today's lottery numbers?"
 
 
 def test_stream_chat_uses_evidence_even_when_cosine_is_below_08(monkeypatch) -> None:
@@ -164,6 +233,7 @@ def test_stream_chat_uses_evidence_even_when_cosine_is_below_08(monkeypatch) -> 
         "progress",
         "progress",
         "progress",
+        "progress",
         "token",
         "citation",
         "done",
@@ -193,6 +263,7 @@ def test_stream_chat_converts_model_failure_to_sse_error(monkeypatch) -> None:
     )
 
     assert events == [
+        ("progress", {"stage": "searching", "message": "Checking class scope"}),
         ("progress", {"stage": "searching", "message": "Searching class materials"}),
         ("progress", {"stage": "reading", "message": "Found 1 section in lesson.pdf"}),
         ("progress", {"stage": "drafting", "message": "Synthesizing answer"}),
@@ -224,6 +295,7 @@ def test_stream_chat_times_out_without_hanging(monkeypatch, caplog) -> None:
     )
 
     assert events == [
+        ("progress", {"stage": "searching", "message": "Checking class scope"}),
         ("progress", {"stage": "searching", "message": "Searching class materials"}),
         ("progress", {"stage": "reading", "message": "Found 1 section in lesson.pdf"}),
         ("progress", {"stage": "drafting", "message": "Synthesizing answer"}),
@@ -276,11 +348,12 @@ def test_stream_chat_does_not_search_web_or_call_model_without_evidence(monkeypa
         )
     )
 
-    assert [event for event, _ in events] == ["progress", "token", "done"]
-    assert events[0][1] == {"stage": "searching", "message": "Searching class materials"}
-    assert events[1][1] == {"text": chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE}
-    assert events[2][1]["source"] == chat_retrieval_service.SOURCE_NONE
-    assert events[2][1]["used_web_search"] is False
+    assert [event for event, _ in events] == ["progress", "progress", "token", "done"]
+    assert events[0][1] == {"stage": "searching", "message": "Checking class scope"}
+    assert events[1][1] == {"stage": "searching", "message": "Searching class materials"}
+    assert events[2][1] == {"text": chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE}
+    assert events[3][1]["source"] == chat_retrieval_service.SOURCE_NONE
+    assert events[3][1]["used_web_search"] is False
 
 
 def test_stream_chat_emits_suggestions_event_and_done(monkeypatch) -> None:
