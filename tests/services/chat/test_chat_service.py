@@ -11,6 +11,7 @@ import pytest
 
 from app.services import chat_retrieval_service, chat_service, rag_service
 from app.services.chat_service import stream_chat
+from app.services.llm import gateway
 
 
 def _parse_event(raw: str) -> tuple[str, dict]:
@@ -184,6 +185,36 @@ def test_confident_out_of_scope_skips_retrieval(monkeypatch) -> None:
     assert scope_arguments["class_name"] == "Python Programming"
     assert scope_arguments["class_description"] == "Introductory Python course"
     assert scope_arguments["question"] == "What were today's lottery numbers?"
+
+
+def test_stream_chat_emits_restart_and_keeps_only_the_new_answer(monkeypatch) -> None:
+    _patch_curriculum(monkeypatch)
+
+    async def fake_answer_stream(db, model, messages):
+        yield "partial "
+        yield gateway.StreamRestart()
+        yield "complete answer [1]."
+
+    monkeypatch.setattr("app.services.chat_service._answer_stream", fake_answer_stream)
+
+    events = asyncio.run(
+        _collect(
+            stream_chat(
+                db=MagicMock(),
+                message="Explain neural networks.",
+                class_id="class-a",
+                model=object(),
+                timeout_seconds=1,
+            )
+        )
+    )
+
+    assert ("restart", {"message": "Switching to the next Gemini key."}) in events
+    assert [data["text"] for event, data in events if event == "token"] == [
+        "partial ",
+        "complete answer [1].",
+    ]
+    assert events[-1][0] == "done"
 
 
 def test_stream_chat_uses_evidence_even_when_cosine_is_below_08(monkeypatch) -> None:

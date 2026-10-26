@@ -15,6 +15,7 @@ from app.models.course import Class, Enrollment
 from app.models.email_outbox import EmailOutbox
 from app.models.import_job import ROW_FAILED, ImportBatch, ImportRow
 from app.models.user import User
+from app.routers.admin.gemini import router as gemini_router
 from app.schemas.admin import (
     AdminSettingsRead,
     ClassAssign,
@@ -63,6 +64,7 @@ from app.services.llm import (
 from app.services.system_health_service import build_health
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+router.include_router(gemini_router)
 
 
 def _class_to_read(db: Session, section: Class) -> ClassRead:
@@ -532,10 +534,10 @@ def list_roles(_=Depends(require_admin)):
 
 # --- AI-105 runtime settings + connection checks (same DB-backed admin guard) ---
 @router.get("/settings", response_model=AdminSettingsRead)
-def read_admin_settings(_=Depends(require_admin)):
+def read_admin_settings(db: Session = Depends(get_db), _=Depends(require_admin)):
     """Return active configuration metadata without exposing credentials."""
 
-    return build_admin_settings(settings)
+    return build_admin_settings(settings, db)
 
 
 @router.post("/llm/test-connection", response_model=ConnectionTestResult)

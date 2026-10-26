@@ -499,7 +499,7 @@ def test_failed_replacement_does_not_supersede_indexed_version(
         ingestion_service, "_load_document", lambda _path: {"markdown": "new", "images": {}}
     )
     monkeypatch.setattr(ingestion_service, "QdrantStore", lambda embeddings: qdrant)
-    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda: object())
+    monkeypatch.setattr(ingestion_service, "GeminiEmbedding", lambda **_: object())
     monkeypatch.setattr(
         ingestion_service,
         "markdown_chunker",
