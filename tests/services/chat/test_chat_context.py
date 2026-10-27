@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
@@ -61,6 +62,7 @@ def _add_exchange(
     question: str,
     answer: str,
     offset: int,
+    excluded_from_context: bool = False,
 ) -> None:
     created = datetime.now(UTC) + timedelta(seconds=offset)
     db.add_all(
@@ -70,12 +72,14 @@ def _add_exchange(
                 role="USER",
                 content=question,
                 created_at=created,
+                excluded_from_context=excluded_from_context,
             ),
             ChatMessage(
                 session_id=session.id,
                 role="ASSISTANT",
                 content=answer,
                 created_at=created + timedelta(milliseconds=1),
+                excluded_from_context=excluded_from_context,
             ),
         ]
     )
@@ -133,6 +137,36 @@ def test_load_recent_exchanges_drops_orphaned_messages(db_session: Session) -> N
 
     assert len(history) == 1
     assert history[0].user == "question 1"
+
+
+def test_load_recent_exchanges_skips_turns_excluded_from_context(
+    db_session: Session,
+) -> None:
+    session = _session(db_session)
+    _add_exchange(
+        db_session,
+        session,
+        question="What is the assignment policy?",
+        answer="The policy is in the syllabus.",
+        offset=1,
+    )
+    _add_exchange(
+        db_session,
+        session,
+        question="What are today's lottery numbers?",
+        answer="This question appears to be outside the scope of this class.",
+        offset=2,
+        excluded_from_context=True,
+    )
+
+    history = chat_context_service.load_recent_exchanges(
+        db_session,
+        session_id=session.id,
+        user_id=session.user_id,
+        class_id=session.class_id,
+    )
+
+    assert [exchange.user for exchange in history] == ["What is the assignment policy?"]
 
 
 def test_load_recent_exchanges_enforces_ownership_and_class_scope(
@@ -261,3 +295,113 @@ def test_condense_question_falls_back_to_the_original_question() -> None:
     )
 
     assert rewritten == "What about that one?"
+
+
+def test_condense_question_falls_back_to_the_class_subject() -> None:
+    class BrokenModel:
+        async def ainvoke(self, messages):
+            raise RuntimeError("provider unavailable")
+
+    history = [
+        chat_context_service.ConversationExchange(
+            user="What is a pointer?",
+            assistant="A pointer stores a memory address.",
+        )
+    ]
+
+    rewritten = asyncio.run(
+        chat_context_service.condense_question(
+            history,
+            "Cho t ví dụ đi",
+            model=BrokenModel(),
+            class_name="C++ - Toturial",
+            class_description="Con trỏ, OOP và STL.",
+        )
+    )
+
+    assert rewritten == "Cho t ví dụ đi (C++ - Toturial — Con trỏ, OOP và STL)"
+
+
+def test_condense_question_qualifies_an_empty_rewrite_with_the_class() -> None:
+    class EmptyModel:
+        async def ainvoke(self, messages):
+            return SimpleNamespace(content="   ")
+
+    history = [
+        chat_context_service.ConversationExchange(
+            user="What is a pointer?",
+            assistant="A pointer stores a memory address.",
+        )
+    ]
+
+    rewritten = asyncio.run(
+        chat_context_service.condense_question(
+            history,
+            "Cho t ví dụ đi",
+            model=EmptyModel(),
+            class_name="C++ - Toturial",
+            class_description="Con trỏ, OOP và STL.",
+        )
+    )
+
+    assert rewritten == "Cho t ví dụ đi (C++ - Toturial — Con trỏ, OOP và STL)"
+
+
+def test_condense_question_does_not_repeat_a_class_already_in_the_question() -> None:
+    class BrokenModel:
+        async def ainvoke(self, messages):
+            raise RuntimeError("provider unavailable")
+
+    history = [
+        chat_context_service.ConversationExchange(
+            user="What is a pointer?",
+            assistant="A pointer stores a memory address.",
+        )
+    ]
+
+    rewritten = asyncio.run(
+        chat_context_service.condense_question(
+            history,
+            "C++ có con trỏ không?",
+            model=BrokenModel(),
+            class_name="C++",
+            class_description="Con trỏ, OOP và STL.",
+        )
+    )
+
+    assert rewritten == "C++ có con trỏ không?"
+
+
+def test_condense_question_stops_at_the_shared_deadline(monkeypatch) -> None:
+    async def hanging_gateway(*args, **kwargs):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(chat_context_service.gateway, "ainvoke_chat", hanging_gateway)
+    history = [
+        chat_context_service.ConversationExchange(
+            user="What is a pointer?",
+            assistant="A pointer stores a memory address.",
+        )
+    ]
+
+    async def run() -> tuple[str, float]:
+        started = time.monotonic()
+        deadline = asyncio.get_running_loop().time() + 0.1
+        rewritten = await chat_context_service.condense_question(
+            history,
+            "Cho t ví dụ đi",
+            class_name="C++ - Toturial",
+            class_description="Con trỏ, OOP và STL.",
+            deadline=deadline,
+        )
+        return rewritten, time.monotonic() - started
+
+    rewritten, elapsed = asyncio.run(run())
+
+    assert rewritten == chat_context_service.qualify_with_class(
+        "Cho t ví dụ đi",
+        "C++ - Toturial",
+        "Con trỏ, OOP và STL.",
+    )
+    # The shared deadline must not be extended by a fresh fallback timeout.
+    assert elapsed < 1

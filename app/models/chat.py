@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     Uuid,
+    false,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -85,6 +86,14 @@ class ChatMessage(Base):
     citations: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
     # AI-125 AC-01: suggested follow-up questions stay attached to the assistant answer.
     suggested_questions: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # AI-63: a refused turn stays visible in the history UI but must never be
+    # replayed as conversational context for later rewrites or answers.
+    excluded_from_context: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

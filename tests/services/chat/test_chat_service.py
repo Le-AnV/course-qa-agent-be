@@ -36,7 +36,7 @@ def _disable_scope_gate_for_existing_chat_tests(monkeypatch) -> None:
         return False
 
     monkeypatch.setattr(
-        chat_service.openai_decision_service,
+        chat_service.decision_service,
         "is_confidently_out_of_scope",
         in_scope,
     )
@@ -148,7 +148,7 @@ def test_confident_out_of_scope_skips_retrieval(monkeypatch) -> None:
         return True
 
     monkeypatch.setattr(
-        chat_service.openai_decision_service,
+        chat_service.decision_service,
         "is_confidently_out_of_scope",
         out_of_scope,
     )

@@ -258,6 +258,7 @@ def append_message(
     used_web_search: bool = False,
     citations: Sequence[Any] | None = None,
     suggested_questions: Sequence[str] | None = None,
+    excluded_from_context: bool = False,
 ) -> ChatMessage:
     """Append a single message to an existing session and update session's updated_at timestamp."""
     message = ChatMessage(
@@ -267,6 +268,7 @@ def append_message(
         used_web_search=used_web_search,
         citations=_citation_dicts(citations),
         suggested_questions=list(suggested_questions) if suggested_questions else None,
+        excluded_from_context=excluded_from_context,
     )
     db.add(message)
 
@@ -308,6 +310,7 @@ def save_chat_turn(
     suggested_questions: Sequence[str] | None = None,
     query_embedding: list[float] | None = None,
     qdrant_client: Any | None = None,
+    excluded_from_context: bool = False,
 ) -> tuple[ChatSession, ChatMessage, ChatMessage]:
     """Persist a complete Q&A turn (User prompt + Assistant response) into the database (AC-01, AC-02, AC-03).
 
@@ -316,6 +319,8 @@ def save_chat_turn(
     3. Stores the assistant citations so history reloads keep the original answer traceable (AI-63 AC-03).
     4. If used_web_search is True and query_embedding is provided, syncs to Qdrant content_gap_queries (AC-03).
        NOTE: Strictly does NOT invoke Gemini Embedding API — reuses existing query_embedding.
+    5. ``excluded_from_context`` keeps a refused turn out of later prompts while
+       leaving it visible when the conversation is reopened.
     """
     if session_id is None:
         # Title defaults to the first 50 characters of the initial question
@@ -351,6 +356,7 @@ def save_chat_turn(
         content=user_content,
         used_web_search=False,
         created_at=turn_started,
+        excluded_from_context=excluded_from_context,
     )
     assistant_msg = ChatMessage(
         session_id=session.id,
@@ -360,6 +366,7 @@ def save_chat_turn(
         citations=_citation_dicts(citations),
         suggested_questions=list(suggested_questions) if suggested_questions else None,
         created_at=turn_started + timedelta(milliseconds=1),
+        excluded_from_context=excluded_from_context,
     )
 
     db.add(user_msg)
