@@ -8,9 +8,9 @@ cosine score is compared with the admin-configured threshold (AC-05, default
 answer from its own knowledge (AC-04) — when no source exists, a deterministic
 message is returned instead of an invented answer.
 
-The Internet provider is intentionally a stub here: AI-67 owns the real T19
-agent and the provider is still being chosen (TECHSTACK §7.4). AI-61 will
-consume :func:`answer_question` for the streaming chat endpoint; this module
+The Internet provider lives here too: AI-67 owns the T19 agent, implemented with
+SerpApi (Google organic results) plus the shared source-reputation tiers. AI-61
+consumes :func:`answer_question` for the streaming chat endpoint; this module
 owns the routing decision and the source contract.
 """
 
@@ -369,30 +369,76 @@ def decide_source(
 # --- AC-03: Internet agent hand-off ---------------------------------------
 
 
-_tavily_client_lock = threading.Lock()
-_tavily_client: httpx.Client | None = None
+_search_client_lock = threading.Lock()
+_search_client: httpx.Client | None = None
+SERPAPI_SEARCH_ENDPOINT = "https://serpapi.com/search.json"
+SERPAPI_MAX_RESULTS = search_config.SERPAPI_MAX_RESULTS
+SERPAPI_FETCH_RESULTS = search_config.SERPAPI_FETCH_RESULTS
+_VIETNAMESE_CHARS = set("ăâđêôơưàáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵ")
 
 
-def _get_tavily_client() -> httpx.Client:
-    global _tavily_client
-    with _tavily_client_lock:
-        if _tavily_client is None or _tavily_client.is_closed:
-            _tavily_client = httpx.Client(
-                timeout=httpx.Timeout(10.0, connect=5.0),
+def _get_search_client() -> httpx.Client:
+    global _search_client
+    with _search_client_lock:
+        if _search_client is None or _search_client.is_closed:
+            _search_client = httpx.Client(
+                timeout=httpx.Timeout(settings.serpapi_timeout_seconds),
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
             )
-        return _tavily_client
+        return _search_client
+
+
+def _is_vietnamese(text: str) -> bool:
+    return any(char in _VIETNAMESE_CHARS for char in text.lower())
+
+
+def _serpapi_params(question: str, api_key: str) -> dict[str, Any]:
+    """Build Google search parameters localised to the question language.
+
+    No ``gl`` is pinned: Google's global index ranks authoritative sources
+    (docs, Stack Overflow, MDN, Real Python) above low-traffic blogs, which was
+    the quality problem with the previous provider.
+    """
+
+    return {
+        "engine": "google",
+        "q": question,
+        "api_key": api_key,
+        "num": SERPAPI_FETCH_RESULTS,
+        "hl": "vi" if _is_vietnamese(question) else "en",
+    }
+
+
+def _serpapi_web_results(
+    data: dict[str, Any],
+    jump_builder: Callable[[str, str], str] | None = None,
+) -> list[WebResult]:
+    """Map a SerpApi ``organic_results`` response to the T19 web-result contract."""
+
+    web_results: list[WebResult] = []
+    for item in data.get("organic_results") or []:
+        if len(web_results) >= SERPAPI_FETCH_RESULTS:
+            break
+        title = str(item.get("title") or "Web Source")
+        raw_url = str(item.get("link") or "")
+        content = str(item.get("snippet") or "").strip()
+        if not raw_url:
+            continue
+        jump_url = jump_builder(raw_url, content) if jump_builder is not None else raw_url
+        web_results.append(WebResult(title=title, url=jump_url, content=content))
+    return web_results
 
 
 def search_internet(question: str) -> list[WebResult]:
-    """T19 Internet source agent powered by Tavily Search API (AI-67).
+    """T19 Internet source agent powered by SerpApi (Google Search) (AI-67).
 
-    Queries Tavily REST API when TAVILY_API_KEY is configured. Generates
-    W3C scroll-to-text-fragment deep-links for each web result.
+    Uses Google's organic results so answers cite mainstream, well-maintained
+    pages instead of the low-traffic sites a metered search API tends to return.
     """
-    api_key = settings.tavily_api_key
+
+    api_key = settings.serpapi_api_key
     if not api_key:
-        logger.info("TAVILY_API_KEY is not configured; returning no web results.")
+        logger.info("SERPAPI_API_KEY is not configured; returning no web results.")
         return []
 
     try:
@@ -404,57 +450,24 @@ def search_internet(question: str) -> list[WebResult]:
         except ImportError:
             pass
 
-        client = _get_tavily_client()
-        payload: dict[str, Any] = {
-            "api_key": api_key,
-            "query": question,
-            "search_depth": search_config.TAVILY_SEARCH_DEPTH,
-            "max_results": search_config.TAVILY_MAX_RESULTS,
-            "include_domains": search_config.TRUSTED_WEB_DOMAINS,
-            "exclude_domains": search_config.BLOCKED_WEB_DOMAINS,
-            "include_answer": False,
-            "include_raw_content": False,
-        }
-        response = client.post("https://api.tavily.com/search", json=payload)
+        response = _get_search_client().get(
+            SERPAPI_SEARCH_ENDPOINT,
+            params=_serpapi_params(question, api_key),
+        )
         response.raise_for_status()
-        data = response.json()
-        raw_results = data.get("results", [])
+        web_results = _serpapi_web_results(response.json(), jump_builder)
 
-        # Fallback to broader web search if trusted domains return no results
-        if not raw_results and search_config.FALLBACK_TO_GENERAL_SEARCH:
-            fallback_payload: dict[str, Any] = {
-                "api_key": api_key,
-                "query": question,
-                "search_depth": search_config.TAVILY_SEARCH_DEPTH,
-                "max_results": search_config.TAVILY_MAX_RESULTS,
-                "exclude_domains": search_config.BLOCKED_WEB_DOMAINS,
-                "include_answer": False,
-                "include_raw_content": False,
-            }
-            fallback_resp = client.post("https://api.tavily.com/search", json=fallback_payload)
-            if fallback_resp.is_success:
-                raw_results = fallback_resp.json().get("results", [])
+        # Google does not accept an include/exclude domain list, so the shared
+        # reputation tiers are applied locally: blocked sites are dropped and
+        # the rest are ranked Tier 1 -> Tier 2 -> Tier 3 -> unknown.
+        allowed = [item for item in web_results if not search_config.is_blocked(item.url)]
+        allowed.sort(key=lambda item: search_config.get_source_tier(item.url) or 99)
+        web_results = allowed[:SERPAPI_MAX_RESULTS]
 
-        web_results: list[WebResult] = []
-        for item in raw_results:
-            title = str(item.get("title") or "Web Source")
-            raw_url = str(item.get("url") or "")
-            content = str(item.get("content") or "")
-            if not raw_url:
-                continue
-            jump_url = jump_builder(raw_url, content) if jump_builder is not None else raw_url
-            web_results.append(WebResult(title=title, url=jump_url, content=content))
-
-        def _tier_sort_key(res: WebResult) -> int:
-            tier = search_config.get_source_tier(res.url)
-            return tier if tier is not None else 99
-
-        web_results.sort(key=_tier_sort_key)
-
-        logger.info("Tavily search returned %d results for %r", len(web_results), question)
+        logger.info("SerpApi search returned %d results for %r", len(web_results), question)
         return web_results
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Tavily search failed: %s", exc)
+        logger.warning("SerpApi search failed: %s", exc)
         return []
 
 

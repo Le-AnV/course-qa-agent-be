@@ -10,11 +10,11 @@
 
 ## Purpose
 
-Let an authenticated student ask a question in a class chat and receive a streamed answer grounded in class materials. Before retrieval, the backend can use OpenAI Decisions to reject questions that are confidently outside the class subject. For questions that pass the gate, it retrieves and reranks class passages, routes between class documents and Internet sources using retrieval scores, and streams the answer with citations.
+Let an authenticated student ask a question in a class chat and receive a streamed answer grounded in class materials. Before retrieval, the backend rejects questions that are confidently outside the class subject (class scope gate). For questions that pass it, the backend resolves follow-ups, retrieves and reranks class passages, routes between class documents and Internet sources using retrieval scores, and streams the answer with citations.
 
 ## Scope
 
-The implementation includes class-scoped retrieval, Cross Encoder reranking, grounded answer generation, SSE progress and answer events, citations, and access to cited source files. It also checks class scope before retrieval and uses the AI-65 score thresholds to choose between class materials, Internet search, and no-evidence responses. AI-67 provides the Internet search integration.
+The implementation includes class-scoped retrieval, Cross Encoder reranking, grounded answer generation, SSE progress and answer events, citations, and access to cited source files. It also checks class scope before retrieval and uses the AI-65 score thresholds to choose between class materials, Internet search, and no-evidence responses. AI-67 provides the SerpApi Internet search integration.
 
 ## Request flow
 
@@ -26,8 +26,8 @@ Authenticate and verify membership in the requested class
   ▼
 Return a deterministic quick response when applicable
   ▼
-OpenAI Decisions checks the question against the class name and description
-  ├─ confidently out of scope (confidence >= 0.8) → refuse; skip retrieval and web search
+Class scope check against the class name and description (Gemini by default)
+  ├─ confidently out of scope (confidence >= threshold) → refuse; skip retrieval and web search
   └─ in scope, uncertain, or decision unavailable → continue
   ▼
 Resolve follow-up question using bounded conversation history (when applicable)
@@ -39,20 +39,24 @@ Retrieve up to 10 candidate passages from Qdrant
 If best cosine score < T_low (default 0.45), skip Cross Encoder and return no-evidence response
   ▼
 Cross Encoder reranks candidates and keeps the top 3 by default (`RERANK_TOP_K`)
-  ├─ score >= T_high (default 0.80) → answer from class documents
-  ├─ T_low <= score < T_high → search the Internet with Tavily
+  ├─ score >= T_high (DB `retrieval_threshold`, currently 0.7; code default 0.80) → answer from class documents
+  ├─ T_low <= score < T_high → search the Internet with SerpApi
   └─ no candidates / score < T_low → return no-evidence response
   ▼
 Stream a grounded Gemini answer and citations as SSE
 ```
 
-The scope gate only stops a question when OpenAI Decisions returns `out_of_scope` with confidence at least 0.8. If the key is absent, the response is uncertain, or the request fails, the service continues to RAG. When retrieval has no candidates or falls below the lower threshold, the chat service returns a fixed no-evidence message instead of asking Gemini to answer without evidence.
+The class gate only stops a question when the decision service returns `out_of_scope` at or above the configured confidence. If the key is absent, the response is uncertain, or the request fails, the service continues to RAG. When retrieval has no candidates or falls below the lower threshold, the chat service returns a fixed no-evidence message instead of asking Gemini to answer without evidence.
 
 ## Class scope gate
 
-`is_confidently_out_of_scope()` sends the class name, optional class description, current question, and bounded recent conversation to `POST https://api.openai.com/v1/decisions` using the `gpt-6-luna` decision model. Recent conversation is included to resolve short follow-up wording; it does not broaden the class subject. The API key comes from the encrypted OpenAI key pool (`openai_api_key` table, managed at `/admin/settings`); `OPENAI_API_KEY` in the backend `.env` is only a fallback when no database key is healthy. Secrets are never returned to the client.
+`is_confidently_out_of_scope()` sends the class name, optional class description, current question, and bounded recent conversation to the configured decision provider with `DECISION_MODEL`. Gemini is the default (`DECISION_PROVIDER=gemini`, native `google-genai` structured output using a Gemini key). Any OpenAI-compatible endpoint can be selected instead with `DECISION_PROVIDER=openai` (or `openai_compatible`): the service then calls `POST {DECISION_BASE_URL}/chat/completions`, so OpenAI, Groq, OpenRouter, Ollama or vLLM work without code changes. In both cases the model answers with a JSON `verdict` (`in_scope` or `out_of_scope`) and `confidence`. Recent conversation is included to resolve short follow-up wording; it does not broaden the class subject. Credentials stay server-side and are never returned to the client.
 
-Keys are tried in priority order (up to 3 per check). A `401`/`403` marks the key invalid, and a `429` or `5xx` puts it in a 60-second cooldown before the next healthy key is tried. The request timeout is 8 seconds (3 seconds to connect). Only an `out_of_scope` choice with confidence `>= 0.8` stops processing. Missing credentials, provider errors, malformed responses, and lower-confidence results fail open and continue through the existing retrieval flow. A confident rejection returns a fixed out-of-scope answer before document retrieval or Internet search.
+Keys come from the admin-managed pools first (`gemini_api_keys` / `openai_api_keys`, managed at `/admin/settings`); `GEMINI_API_KEY` and `OPENAI_API_KEY` in the backend `.env` are only used when no pool key is healthy. `DECISION_KEY_ATTEMPTS` (3) bounds how many pool keys one attempt may try in priority order. A rejected key is marked invalid, a rate-limited or failing key cools down, and the next healthy key is tried. The gate has its own model-level fallback and cooldown (see below) on top of key rotation.
+
+`DECISION_TIMEOUT_SECONDS` (12s), `DECISION_CONNECT_TIMEOUT_SECONDS` (3s, OpenAI-compatible path), and `DECISION_MAX_OUTPUT_TOKENS` (200) bound the call. Only an `out_of_scope` verdict with confidence `>= DECISION_CONFIDENCE_THRESHOLD` (0.8) stops processing. Missing credentials, provider errors, malformed payloads, unknown verdicts, and lower-confidence results fail open and continue through the existing retrieval flow. A confident rejection returns a fixed out-of-scope answer before document retrieval or Internet search.
+
+A transient Gemini `503 UNAVAILABLE` or `504 DEADLINE_EXCEEDED` must not disable the gate for every turn. When `DECISION_FALLBACK_ENABLED=true` (default), the primary attempt uses the budget left after reserving `DECISION_FALLBACK_TIMEOUT_SECONDS` (6s) inside `DECISION_TIMEOUT_SECONDS`; if it fails, `DECISION_FALLBACK_MODEL` (`models/gemini-flash-lite-latest`) is tried once with the reserved budget. A failing primary is then skipped for `DECISION_COOLDOWN_SECONDS` (60s), so later turns call the fallback directly instead of paying the same timeout again. Both attempts failing still fail open. The Gemini SDK enforces a 10s minimum manual HTTP deadline, so the transport deadline is never set below that; `asyncio.wait_for` still enforces the shorter per-attempt budget.
 
 ## Retrieval and reranking
 
@@ -83,7 +87,7 @@ Request body:
 
 | Event | Data | Meaning |
 |---|---|---|
-| `progress` | `{ "stage": "searching", "message": "Checking class scope" }` | OpenAI Decisions scope check started. |
+| `progress` | `{ "stage": "searching", "message": "Checking class scope" }` | Class scope decision started. |
 | `progress` | `{ "stage": "searching", "message": "Searching class materials" }` | Class retrieval and reranking started. |
 | `progress` | `{ "stage": "reading", "message": "Found ..." }` | Relevant class passages are available. |
 | `progress` | `{ "stage": "searching", "message": "Searching the web" }` | AI-65 routing selected Internet search. |
@@ -95,7 +99,7 @@ Request body:
 | `done` | `{ "source": "curriculum", "used_web_search": false, "threshold": 0.8, "top_score": ..., "suggestions": [...] }` | Stream completed. `source` can be `conversation`, `curriculum`, `internet`, `unrelated`, or `none`. `top_score` is the retained vector similarity score, not the Cross Encoder ranking logit. |
 | `error` | `{ "message": "..." }` | A safe generation or timeout message. |
 
-The chat service timeout constant is 300 seconds. The stream reports a timeout message if retrieval/reranking or answer generation exceeds it, and a generic message if an unexpected error prevents completion.
+The chat service timeout is `CHAT_TIMEOUT_SECONDS` (300s by default). The stream reports a timeout message if retrieval/reranking or answer generation exceeds it, and a generic message if an unexpected error prevents completion.
 
 ### `GET /api/chat/sources/{document_id}`
 
@@ -109,10 +113,11 @@ When there are no valid citations, the service skips answer generation. Retrieva
 
 ## Current limitations
 
-- The scope gate uses class name and description; it does not inspect retrieved passages or decide whether those passages fully answer the question. Missing or failed Decisions calls continue to RAG.
-- AI-65 routing uses vector cosine scores, not Cross Encoder logits. With the default thresholds, a score from 0.45 up to (but not including) 0.80 routes to Internet search. Thus, a class may contain related documents while a query still routes to the web if its retrieved score is below the high threshold.
+- The scope gate uses class name and description; it does not inspect retrieved passages or decide whether those passages fully answer the question. Missing or failed decisions continue to RAG.
+- AI-65 routing uses vector cosine scores, not Cross Encoder logits. With the current thresholds (`unrelated_threshold` 0.45, `retrieval_threshold` 0.7 in `system_config`), a score from 0.45 up to (but not including) 0.7 routes to Internet search.
 - If class passages are selected but do not answer the question, the answer prompt is responsible for abstaining. There is no separate deterministic evidence evaluator in this flow.
-- Internet search requires a configured Tavily key; if no web results are available, the service returns a fixed no-source message.
+- Off-topic turns are refused before retrieval, so they are not sent to the retrieval or web search path. The class gate is stateless: every question is compared with the class name and description, so a session cannot drift into another subject without being checked.
+- Internet search requires a configured `SERPAPI_API_KEY`; if no web results are available, the service returns a fixed no-source message.
 - Reranking runs locally in the backend process. On CPU, cold model loading and pair scoring can add latency; the persistent model cache avoids downloading model files on every container start, but does not eliminate first-load inference cost.
 
 ## Implementation map
@@ -124,11 +129,13 @@ When there are no valid citations, the service skips answer generation. Retrieva
 | Class-scoped retrieval and reranking orchestration | `app/services/chat_retrieval_service.py` |
 | Cross Encoder loading and scoring | `app/services/reranker_service.py` |
 | SSE orchestration, prompt formatting, generation and citations | `app/services/chat_service.py` |
-| Pre-retrieval class scope gate | `app/services/openai_decision_service.py`, `app/services/openai_key_service.py`, `OPENAI_API_KEY` fallback in `app/config/config.py` |
+| Pre-retrieval class scope gate | `app/services/decision_service.py`, key pools via `app/services/gemini_key_service.py` / `app/services/openai_key_service.py`, `GEMINI_API_KEY` / `OPENAI_API_KEY` fallback in `app/config/config.py` |
+| Scope decision prompt | `app/config/prompts/class_scope.yaml` (`class-scope-prompt`) |
+| Scope decision configuration | `DECISION_*` settings in `app/config/config.py` and `.env.example` |
 | Qdrant retrieval and live-document guard | `app/services/rag_service.py` and `app/services/vector_store/qdrant_store.py` |
 | Prompt contract | `app/config/prompts/answer_course.yaml` (`answer-course-prompt`) |
 | Reranker model configuration | `app/config/config.py`, `.env.example` |
-| Chat timeout | `CHAT_TIMEOUT_SECONDS` in `app/services/chat_service.py` |
+| Chat timeout | `CHAT_TIMEOUT_SECONDS` in `app/config/config.py` |
 | Persistent model download cache | `docker-compose.yml` (`reranker_cache`) |
 
 ## Verification
@@ -142,4 +149,4 @@ uv run ruff check .
 
 For a manual check, start the backend with PostgreSQL and Qdrant available, sign in as a class member, and submit a question whose answer is present in an indexed class document. Confirm the response is streamed, citations point to that class's documents, opening a citation serves the source file, and a question with no matching evidence receives the no-evidence message without an LLM-generated answer.
 
-For the scope gate, add at least one key under Settings > OpenAI key pool (Decisions) or configure `OPENAI_API_KEY`, then test a clearly in-scope question and a clearly out-of-scope question. Confirm the latter receives the fixed scope response and does not emit `Searching class materials` or `Searching the web`. Also verify that with no healthy key and no environment fallback, or an unavailable Decisions API, the existing RAG flow continues. Follow-up suggestions are emitted only after a grounded answer from class documents.
+For the class scope gate, add at least one key under Settings > Gemini key pool (or OpenAI key pool (Decisions) when `DECISION_PROVIDER=openai`) or configure `GEMINI_API_KEY` / `OPENAI_API_KEY`, then test a clearly in-scope question and a clearly out-of-scope question. Confirm the latter receives the fixed scope response and does not emit `Searching class materials` or `Searching the web`. Also verify that with no healthy key and no environment fallback, or an unavailable provider, the existing RAG flow continues. Follow-up suggestions are emitted only after a grounded answer from class documents.

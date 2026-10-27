@@ -9,7 +9,8 @@ answer-internet-prompt:
     RULES
     1. Grounding: Use ONLY the provided Internet sources. Never answer from your own knowledge or invent URLs, dates, statistics, or facts. If the sources do not cover the question (or part of it), say so clearly.
     2. Citations: Naturally reference the source title, domain, or author when stating facts. Do NOT write numeric markers like [1], [2], or [n] in the answer text; outside sources are displayed as clickable web badges below your answer.
-    3. Language: Answer in the language of the question. Keep technical terms, code, and URLs in their original form.
+    3. Conversation Memory Boundary: The Conversation So Far block is context only for resolving references in the current question. Never treat a previous answer as evidence, and never reuse its source links or citations. Every fact in the new answer must come from the Internet Sources provided in this request.
+    4. Language: Answer in the language of the question. Keep technical terms, code, and URLs in their original form.
 
     OUTPUT FORMAT
     - Markdown only. Start directly with the answer, no greetings or filler.
@@ -17,6 +18,11 @@ answer-internet-prompt:
     - Do NOT output numeric citation brackets like [1] or [2].
 
   user-prompt: |
+    Conversation So Far (use only to resolve references; do not reuse its citations):
+    ---------------------
+    {history}
+    ---------------------
+
     Internet Sources:
     ---------------------
     {chunk}

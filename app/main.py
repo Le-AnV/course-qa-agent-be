@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.core.database import get_session_local, init_engine
 from app.core.deps import get_db
+from app.core.logging import configure_logging
 from app.core.seed import seed_database
 from app.routers.admin.router import router as admin_router
 from app.routers.auth.router import router as auth_router
@@ -27,6 +28,7 @@ from app.services.document_service import fail_stale_processing
 from app.services.system_health_service import build_health
 
 logger = logging.getLogger(__name__)
+configure_logging()
 
 
 @asynccontextmanager

@@ -14,8 +14,10 @@ retrieval runs (AC-03).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -33,7 +35,6 @@ from app.services.llm import gateway
 
 logger = logging.getLogger(__name__)
 
-MAX_REWRITTEN_QUESTION_CHARS = 1200
 _CITATION_MARKER = re.compile(r"\[\d+\]")
 
 
@@ -63,6 +64,72 @@ def _message_text(content: Any) -> str:
         return "".join(parts)
 
     return ""
+
+
+def _remaining_timeout(deadline: float, cap: float) -> float:
+    """Return the smaller of the per-call cap and the shared deadline."""
+
+    return max(0.0, min(cap, deadline - asyncio.get_running_loop().time()))
+
+
+async def _ainvoke_short(
+    messages: list[Any],
+    model: Any | None,
+    *,
+    deadline: float,
+    db: Session | None = None,
+) -> Any:
+    """Call a small helper model within a shared wall-clock deadline.
+
+    Tests inject their own model, so the wait/fallback path only applies to the
+    production client. A provider error propagates to the caller, which decides
+    whether to fall back to safe behaviour. The fallback shares the remaining
+    budget instead of receiving a fresh timeout. Production calls go through the
+    Gemini key-pool gateway so a failing key is rotated instead of failing the
+    rewrite.
+    """
+
+    if model is not None:
+        return await model.ainvoke(messages)
+
+    cap = settings.chat_condense_timeout_seconds
+    timeout = _remaining_timeout(deadline, cap)
+    if timeout <= 0:
+        raise TimeoutError("No time left for the follow-up rewrite.")
+
+    started = time.monotonic()
+    try:
+        return await asyncio.wait_for(
+            gateway.ainvoke_chat(
+                db,
+                messages,
+                timeout=timeout,
+                allow_fallback=False,
+                avoid_sticky_key=True,
+            ),
+            timeout=timeout,
+        )
+    except Exception as exc:  # any provider failure may need the fallback
+        logger.warning(
+            "Primary rewrite model failed after %.2fs (%s); trying fallback %s.",
+            time.monotonic() - started,
+            type(exc).__name__,
+            settings.chat_fallback_model,
+        )
+        timeout = _remaining_timeout(deadline, cap)
+        if timeout <= 0:
+            raise TimeoutError("No time left for the fallback rewrite.") from exc
+        return await asyncio.wait_for(
+            gateway.ainvoke_chat(
+                db,
+                messages,
+                model=settings.chat_fallback_model,
+                timeout=timeout,
+                allow_fallback=False,
+                avoid_sticky_key=True,
+            ),
+            timeout=timeout,
+        )
 
 
 def _validate_session(
@@ -152,6 +219,7 @@ def load_recent_exchanges(
         .where(
             ChatMessage.session_id == session_id,
             ChatMessage.role.in_(("USER", "ASSISTANT")),
+            ChatMessage.excluded_from_context.is_(False),
         )
         .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
         .limit(limit * 2 + 2)
@@ -199,15 +267,58 @@ def format_history_context(
     return "\n\n".join(blocks)
 
 
-def _clean_rewrite(text: str, original: str) -> str:
-    """Normalize a model rewrite and reject an empty or answer-like response."""
+def _class_context_label(
+    class_name: str | None,
+    class_description: str | None,
+) -> str:
+    """Build a short class label from the syllabus for a failed rewrite."""
+
+    name = " ".join((class_name or "").split())
+    description = " ".join((class_description or "").split())
+    if description:
+        description = description[: settings.chat_class_context_max_chars].rstrip(" ,;.-")
+    if name and description:
+        return f"{name} — {description}"
+    return name or description
+
+
+def qualify_with_class(
+    question: str,
+    class_name: str | None,
+    class_description: str | None,
+) -> str:
+    """Anchor a follow-up to its class subject instead of searching a bare fragment.
+
+    The rewrite model is the preferred path. When it fails, the class name and
+    description are the same scope anchor the class gate uses; appending them
+    keeps pronouns and omitted subjects resolvable for retrieval and web search.
+    """
+
+    label = _class_context_label(class_name, class_description)
+    if not label:
+        return question
+
+    cleaned = question.strip()
+    haystack = cleaned.casefold()
+    if label.casefold() in haystack:
+        return cleaned
+    name = " ".join((class_name or "").split())
+    if name and name.casefold() in haystack:
+        return cleaned
+
+    qualified = f"{cleaned} ({label})"
+    return qualified[: settings.chat_rewrite_max_chars].rstrip()
+
+
+def _clean_rewrite(text: str) -> str | None:
+    """Normalize a model rewrite and reject empty output."""
 
     cleaned = text.strip().strip('"').strip("'").strip()
     if cleaned.lower().startswith("standalone question:"):
         cleaned = cleaned.split(":", 1)[1].strip()
     if not cleaned:
-        return original
-    return cleaned[:MAX_REWRITTEN_QUESTION_CHARS]
+        return None
+    return cleaned[: settings.chat_rewrite_max_chars]
 
 
 async def condense_question(
@@ -217,11 +328,17 @@ async def condense_question(
     model: Any | None = None,
     db: Session | None = None,
     max_chars: int | None = None,
+    class_name: str | None = None,
+    class_description: str | None = None,
+    deadline: float | None = None,
 ) -> str:
-    """Rewrite a follow-up using recent turns (AC-02).
+    """Rewrite a follow-up using recent turns and the class subject (AC-02).
 
-    The original question is the safe fallback: a missing model, a provider
-    error, or an empty rewrite must never break the chat request.
+    The rewrite is the preferred path. If the model is missing, the provider
+    errors, or the response is empty, the question is qualified with the class
+    name/description so retrieval and web search still receive a scoped query.
+    ``deadline`` is an absolute event-loop timestamp shared with the class gate;
+    the primary and fallback attempts split the remaining budget.
     """
 
     if not history:
@@ -231,6 +348,10 @@ async def condense_question(
     if not history_text:
         return question
 
+    if deadline is None:
+        deadline = asyncio.get_running_loop().time() + settings.chat_condense_timeout_seconds
+
+    started = time.monotonic()
     try:
         prompt = get_prompt_manager().format(
             "condense-question-prompt",
@@ -243,14 +364,35 @@ async def condense_question(
         ]
         if model is not None:
             response = await model.ainvoke(messages)
-            rewritten = _message_text(getattr(response, "content", response))
         else:
-            rewritten = await gateway.ainvoke_chat(db, messages, timeout=2.5)
-    except Exception:
+            response = await _ainvoke_short(messages, model, deadline=deadline, db=db)
+        rewritten = _message_text(getattr(response, "content", response))
+    except TimeoutError:
         logger.warning(
-            "Follow-up question condensation failed; using the original question.",
-            exc_info=True,
+            "Follow-up rewrite exceeded its deadline after %.2fs; using the class-qualified question.",
+            time.monotonic() - started,
         )
-        return question
+        return qualify_with_class(question, class_name, class_description)
+    except Exception as exc:  # noqa: BLE001 - any provider failure must degrade safely
+        logger.warning(
+            "Follow-up rewrite failed after %.2fs (%s); using the class-qualified question.",
+            time.monotonic() - started,
+            type(exc).__name__,
+        )
+        return qualify_with_class(question, class_name, class_description)
 
-    return _clean_rewrite(rewritten, question)
+    cleaned = _clean_rewrite(rewritten)
+    if cleaned is None:
+        logger.info(
+            "Follow-up rewrite returned no usable text after %.2fs; using the class-qualified question.",
+            time.monotonic() - started,
+        )
+        return qualify_with_class(question, class_name, class_description)
+
+    logger.info(
+        "Follow-up rewrite completed in %.2fs (%d -> %d chars).",
+        time.monotonic() - started,
+        len(question),
+        len(cleaned),
+    )
+    return cleaned

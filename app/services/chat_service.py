@@ -14,13 +14,14 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy.orm import Session
 
+from app.config.config import settings
 from app.core.prompt_manager import get_prompt_manager
 from app.services import (
     chat_context_service,
     chat_retrieval_service,
     course_service,
+    decision_service,
     history_service,
-    openai_decision_service,
     quick_response_service,
     rag_service,
     suggestion_service,
@@ -29,8 +30,6 @@ from app.services.chat_context_service import ConversationExchange
 from app.services.llm import gateway
 
 logger = logging.getLogger(__name__)
-
-CHAT_TIMEOUT_SECONDS = 300.0
 
 GENERATION_ERROR_MESSAGE = "The answer could not be generated. Please try again."
 TIMEOUT_ERROR_MESSAGE = "The answer timed out. Please try again."
@@ -130,6 +129,8 @@ async def _persist_turn(
     answer: str,
     citations: Sequence[dict[str, Any]],
     suggested_questions: Sequence[str] | None = None,
+    used_web_search: bool = False,
+    excluded_from_context: bool = False,
 ) -> tuple[Any, Any, Any] | None:
     """Save a completed turn without letting a DB failure break the SSE stream."""
 
@@ -145,13 +146,24 @@ async def _persist_turn(
             user_content=message,
             assistant_content=answer,
             session_id=session_id,
-            used_web_search=False,
+            used_web_search=used_web_search,
             citations=citations,
             suggested_questions=suggested_questions,
+            excluded_from_context=excluded_from_context,
         )
     except Exception:
         logger.exception("Failed to persist chat turn for class %s.", class_id)
         return None
+
+
+async def _cancel_tasks(*tasks: asyncio.Task[Any] | None) -> None:
+    """Cancel pending pre-retrieval work and suppress its cancellation errors."""
+
+    pending = [task for task in tasks if task is not None and not task.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def stream_chat(
@@ -163,7 +175,7 @@ async def stream_chat(
     session_id: uuid.UUID | None = None,
     history: Sequence[ConversationExchange] | None = None,
     model: Any | None = None,
-    timeout_seconds: float = CHAT_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
 ) -> AsyncIterator[str]:
     """Retrieve class evidence and stream a grounded answer as SSE.
 
@@ -173,15 +185,23 @@ async def stream_chat(
     """
 
     context_history = list(history or ())
+    logger.info(
+        "Chat turn started: class=%s session=%s history=%d message_chars=%d.",
+        class_id,
+        session_id,
+        len(context_history),
+        len(message),
+    )
     sources: list[rag_service.Source] = []
     answer_parts: list[str] = []
     followup_questions: list[str] = []
     suggestion_task: asyncio.Task[list[str]] | None = None
     turn_completed = False
     stage = "conversation context"
+    budget = timeout_seconds if timeout_seconds is not None else settings.chat_timeout_seconds
 
     try:
-        async with asyncio.timeout(timeout_seconds):
+        async with asyncio.timeout(budget):
             quick_answer = quick_response_service.get_quick_response(message)
             if quick_answer:
                 chunks = quick_response_service.split_into_stream_chunks(quick_answer)
@@ -227,89 +247,164 @@ async def stream_chat(
                 {"stage": "searching", "message": "Checking class scope"},
             )
             class_record = course_service.get_class(db, class_id)
+            class_name = class_record.name if class_record is not None else ""
+            class_description = (
+                class_record.info.description
+                if class_record is not None and class_record.info is not None
+                else None
+            )
             scope_history = chat_context_service.format_history_context(
                 context_history,
-                max_chars=2000,
+                max_chars=settings.chat_scope_history_max_chars,
             )
-            try:
-                out_of_scope = await openai_decision_service.is_confidently_out_of_scope(
-                    class_name=class_record.name if class_record is not None else "",
-                    class_description=(
-                        class_record.info.description
-                        if class_record is not None and class_record.info is not None
-                        else None
-                    ),
+
+            # The gate and the follow-up rewrite are independent, so start both
+            # immediately and bound them with one wall-clock deadline. Awaiting
+            # the gate first means a refusal is never delayed by a rewrite that
+            # is no longer needed.
+            pre_retrieval_started = time.monotonic()
+            deadline = (
+                asyncio.get_running_loop().time()
+                + settings.chat_pre_retrieval_timeout_seconds
+            )
+            gate_task = asyncio.create_task(
+                decision_service.is_confidently_out_of_scope(
+                    class_name=class_name,
+                    class_description=class_description,
                     question=message,
                     history=scope_history,
                     db=db,
-                )
-            except Exception:
-                logger.warning(
-                    "OpenAI Decisions scope check raised unexpectedly; continuing with RAG.",
-                    exc_info=True,
-                )
-                out_of_scope = False
-
-            logger.info(
-                "OpenAI Decisions classified the question as %s for class %s.",
-                "out_of_scope" if out_of_scope else "in_scope_or_uncertain",
-                class_id,
+                ),
+                name="class-scope-gate",
             )
-
-            if out_of_scope:
-                text = (
-                    "This question appears to be outside the scope of this class. "
-                    "Please ask a question related to the course subject."
-                )
-                answer_parts.append(text)
-                yield _sse("token", {"text": text})
-                saved_turn = await _persist_turn(
-                    db=db,
-                    user_id=user_id,
-                    session_id=session_id,
-                    class_id=class_id,
-                    message=message,
-                    answer=text,
-                    citations=[],
-                )
-                saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
-                yield _sse(
-                    "done",
-                    {
-                        "source": rag_service.SOURCE_UNRELATED,
-                        "used_web_search": False,
-                        "threshold": 0.0,
-                        "top_score": None,
-                        "session_id": (
-                            str(saved_session.id)
-                            if saved_session is not None
-                            else (str(session_id) if session_id is not None else None)
-                        ),
-                        "user_message_id": str(user_msg.id) if user_msg is not None else None,
-                        "assistant_message_id": (
-                            str(assistant_msg.id) if assistant_msg is not None else None
-                        ),
-                    },
-                )
-                return
-
-            yield _sse("progress", {"stage": "searching", "message": "Searching class materials"})
-
-            standalone_question = message
+            rewrite_task: asyncio.Task[str] | None = None
             if context_history:
-                stage = "follow-up question resolution"
-                standalone_question = await chat_context_service.condense_question(
-                    context_history,
-                    message,
-                    model=model,
-                    db=db,
+                rewrite_task = asyncio.create_task(
+                    chat_context_service.condense_question(
+                        context_history,
+                        message,
+                        model=model,
+                        class_name=class_name,
+                        class_description=class_description,
+                        deadline=deadline,
+                        db=db,
+                    ),
+                    name="follow-up-rewrite",
                 )
-                if standalone_question != message:
-                    logger.info(
-                        "Resolved follow-up for class %s using %d previous exchanges.",
-                        class_id,
-                        len(context_history),
+
+            try:
+                out_of_scope = False
+                try:
+                    async with asyncio.timeout_at(deadline):
+                        out_of_scope = await gate_task
+                except TimeoutError:
+                    await _cancel_tasks(gate_task)
+                    logger.warning(
+                        "Scope gate exceeded the %.1fs pre-retrieval deadline; failing open.",
+                        settings.chat_pre_retrieval_timeout_seconds,
                     )
+                except Exception:
+                    logger.warning(
+                        "Scope gate raised unexpectedly; continuing with RAG.",
+                        exc_info=True,
+                    )
+                    out_of_scope = False
+
+                gate_elapsed = time.monotonic() - pre_retrieval_started
+
+                if out_of_scope:
+                    await _cancel_tasks(rewrite_task)
+                    logger.info(
+                        "Scope gate blocked the turn after %.2fs "
+                        "(class=%s, rewrite_cancelled=%s).",
+                        gate_elapsed,
+                        class_id,
+                        rewrite_task is not None,
+                    )
+                    text = (
+                        "This question appears to be outside the scope of this class. "
+                        "Please ask a question related to the course subject."
+                    )
+                    answer_parts.append(text)
+                    yield _sse("token", {"text": text})
+                    saved_turn = await _persist_turn(
+                        db=db,
+                        user_id=user_id,
+                        session_id=session_id,
+                        class_id=class_id,
+                        message=message,
+                        answer=text,
+                        citations=[],
+                        excluded_from_context=True,
+                    )
+                    saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
+                    yield _sse(
+                        "done",
+                        {
+                            "source": rag_service.SOURCE_UNRELATED,
+                            "used_web_search": False,
+                            "threshold": 0.0,
+                            "top_score": None,
+                            "session_id": (
+                                str(saved_session.id)
+                                if saved_session is not None
+                                else (str(session_id) if session_id is not None else None)
+                            ),
+                            "user_message_id": str(user_msg.id) if user_msg is not None else None,
+                            "assistant_message_id": (
+                                str(assistant_msg.id) if assistant_msg is not None else None
+                            ),
+                            "suggestions": [],
+                            "suggested_questions": [],
+                        },
+                    )
+                    return
+
+                yield _sse(
+                    "progress", {"stage": "searching", "message": "Searching class materials"}
+                )
+
+                standalone_question = message
+                if rewrite_task is not None:
+                    stage = "follow-up question resolution"
+                    try:
+                        async with asyncio.timeout_at(deadline):
+                            standalone_question = await rewrite_task
+                    except TimeoutError:
+                        await _cancel_tasks(rewrite_task)
+                        standalone_question = chat_context_service.qualify_with_class(
+                            message, class_name, class_description
+                        )
+                        logger.warning(
+                            "Follow-up rewrite missed the %.1fs pre-retrieval deadline; "
+                            "using the class-qualified question.",
+                            settings.chat_pre_retrieval_timeout_seconds,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Follow-up rewrite raised unexpectedly; using the class-qualified question.",
+                            exc_info=True,
+                        )
+                        standalone_question = chat_context_service.qualify_with_class(
+                            message, class_name, class_description
+                        )
+                    logger.info(
+                        "Pre-retrieval finished in %.2fs "
+                        "(gate=%.2fs, rewrite=yes, question_chars=%d, class=%s).",
+                        time.monotonic() - pre_retrieval_started,
+                        gate_elapsed,
+                        len(standalone_question),
+                        class_id,
+                    )
+                else:
+                    logger.info(
+                        "Pre-retrieval finished in %.2fs (gate=%.2fs, rewrite=skipped, class=%s).",
+                        time.monotonic() - pre_retrieval_started,
+                        gate_elapsed,
+                        class_id,
+                    )
+            finally:
+                await _cancel_tasks(gate_task, rewrite_task)
 
             stage = "class retrieval and reranking"
             stage_started = time.monotonic()
@@ -395,7 +490,9 @@ async def stream_chat(
 
             elif decision.source == rag_service.SOURCE_INTERNET:
                 yield _sse("progress", {"stage": "searching", "message": "Searching the web"})
-                web_results = await asyncio.to_thread(rag_service.search_internet, message)
+                web_results = await asyncio.to_thread(
+                    rag_service.search_internet, standalone_question
+                )
                 if not web_results:
                     text = rag_service.NO_SOURCE_MESSAGE
                     answer_parts.append(text)
@@ -416,7 +513,8 @@ async def stream_chat(
                     messages = _format_messages(
                         "answer-internet-prompt",
                         context=context,
-                        question=message,
+                        question=standalone_question,
+                        history=chat_context_service.format_history_context(context_history),
                     )
                     yield _sse("progress", {"stage": "drafting", "message": "Synthesizing answer"})
                     stage = "grounded answer generation"
@@ -454,6 +552,8 @@ async def stream_chat(
                 message=message,
                 answer="".join(answer_parts),
                 citations=citation_payload,
+                suggested_questions=followup_questions or None,
+                used_web_search=decision.source == rag_service.SOURCE_INTERNET,
             )
             saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
 
