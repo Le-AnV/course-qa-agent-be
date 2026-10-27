@@ -48,6 +48,15 @@ def _load_model() -> tuple[Any, Any, Any]:
         return _loaded_model
 
 
+def warm_up() -> None:
+    """Load the Cross Encoder ahead of the first request."""
+
+    try:
+        _load_model()
+    except Exception:
+        logger.warning("Failed to warm up the Cross Encoder model.", exc_info=True)
+
+
 def rerank_chunks(
     question: str,
     chunks: list[ScoredChunk],

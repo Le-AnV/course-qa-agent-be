@@ -155,6 +155,42 @@ def test_mark_key_failure_cools_down_a_rate_limited_key(db_session):
     assert "429" in key.last_error
 
 
+def test_mark_key_failure_parks_a_credit_exhausted_key_for_a_day(db_session):
+    key = keys.create_key(db_session, name="NoCredit", api_key="AIzaSyNoCredit1010")
+
+    keys.mark_key_failure(
+        db_session,
+        key,
+        '429 {"type":"insufficient_quota","code":"credit_balance_exhausted"}',
+        now=NOW,
+    )
+
+    assert key.status == keys.STATUS_ACTIVE
+    assert keys.effective_status(key, now=NOW) == keys.STATUS_COOLDOWN
+    seconds = (key.cooldown_until - NOW).total_seconds()
+    assert seconds == pytest.approx(keys.QUOTA_EXHAUSTED_COOLDOWN_SECONDS)
+
+
+def test_mark_key_failure_uses_a_short_cooldown_for_a_timeout(db_session):
+    key = keys.create_key(db_session, name="Slow", api_key="AIzaSySlow2020")
+    error = TimeoutError()
+
+    keys.mark_key_failure(db_session, key, error, now=NOW)
+
+    seconds = (key.cooldown_until - NOW).total_seconds()
+    assert seconds == pytest.approx(keys.TIMEOUT_COOLDOWN_SECONDS)
+
+
+def test_select_key_prefers_the_sticky_key(db_session):
+    low = keys.create_key(db_session, name="Low", api_key="AIzaSySticky3030", priority=1)
+    high = keys.create_key(db_session, name="High", api_key="AIzaSySticky4040", priority=9)
+
+    selected = keys.select_key(db_session, model=MODEL, now=NOW, preferred_id=high.id)
+
+    assert selected is not None
+    assert selected.id == high.id
+    assert selected.id != low.id
+
 def test_mark_key_failure_disables_an_invalid_key(db_session):
     key = keys.create_key(db_session, name="Invalid", api_key="AIzaSyInvalid9999")
 
@@ -302,6 +338,7 @@ def test_gateway_restarts_on_the_next_key_after_a_mid_stream_limit(
             if self.api_key == "AIzaSyPartial3333":
                 yield SimpleNamespace(content="partial")
                 raise RuntimeError("429 RESOURCE_EXHAUSTED: per minute limit exceeded")
+            await asyncio.sleep(0.1)
             yield SimpleNamespace(content="complete answer")
 
     monkeypatch.setattr(
@@ -317,7 +354,11 @@ def test_gateway_restarts_on_the_next_key_after_a_mid_stream_limit(
     assert chunks[0] == "partial"
     assert isinstance(chunks[1], gateway.StreamRestart)
     assert chunks[2:] == ["complete answer"]
-    assert calls == ["AIzaSyPartial3333", "AIzaSyRecovery4444"]
+    assert calls == [
+        "AIzaSyPartial3333",
+        "AIzaSyRecovery4444",
+        "AIzaSyRecovery4444",
+    ]
     assert first.cooldown_until is not None
     assert second.last_used_at is not None
 

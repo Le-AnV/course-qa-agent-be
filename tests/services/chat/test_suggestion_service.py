@@ -68,10 +68,11 @@ def test_generate_followup_questions_success():
 def test_generate_followup_questions_uses_key_pool_gateway(monkeypatch):
     captured: dict[str, object] = {}
 
-    async def fake_ainvoke(db, messages, *, timeout):
+    async def fake_ainvoke(db, messages, *, timeout, **kwargs):
         captured["db"] = db
         captured["timeout"] = timeout
         captured["messages"] = messages
+        captured["avoid_sticky_key"] = kwargs.get("avoid_sticky_key")
         return '["What is backpropagation?", "How to choose a learning rate?"]'
 
     monkeypatch.setattr(suggestion_service.gateway, "ainvoke_chat", fake_ainvoke)
@@ -142,3 +143,32 @@ def test_generate_followup_questions_handles_llm_failure():
     )
 
     assert questions == []
+
+
+def test_generate_followup_questions_works_without_a_completed_answer():
+    captured: dict = {}
+
+    class FakeLLM:
+        async def ainvoke(self, messages):
+            captured["prompt"] = "\n".join(str(m.content) for m in messages)
+            return MagicMock(content='["What is a gradient?", "Why use layers?"]')
+
+    chunks = [
+        ScoredChunk(
+            content="Neural networks use backpropagation to calculate gradients and update weights.",
+            score=0.9,
+            metadata={"file_name": "nn.pdf"},
+        )
+    ]
+
+    questions = asyncio.run(
+        suggestion_service.generate_followup_questions(
+            question="What is a neural network?",
+            answer="",
+            chunks=chunks,
+            model=FakeLLM(),
+        )
+    )
+
+    assert questions == ["What is a gradient?", "Why use layers?"]
+    assert "still being" in captured["prompt"]

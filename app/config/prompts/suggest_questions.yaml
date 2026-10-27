@@ -11,6 +11,9 @@ suggest-questions-prompt:
     - Build on the User Question and Completed Answer: go deeper or move to the next step.
     - Do not repeat anything the Completed Answer already fully covers.
     - If the Course Context is too limited to support useful questions, return [].
+    - The Completed Answer may say it is unavailable because it is still being
+      generated; in that case base the questions on the Course Context and User
+      Question only.
     - Language: match the User Question, not the Course Context or Completed Answer.
 
     # FORMAT

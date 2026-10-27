@@ -1,5 +1,6 @@
 """Course QA Agent backend — FastAPI modular monolith entrypoint."""
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -21,6 +22,7 @@ from app.routers.class_config import router as class_config_router
 from app.routers.documents import router as documents_router
 from app.routers.history import router as history_router
 from app.routers.student.router import router as student_router
+from app.services import reranker_service
 from app.services.document_service import fail_stale_processing
 from app.services.system_health_service import build_health
 
@@ -45,6 +47,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except (OSError, SQLAlchemyError) as exc:
         # Never crash boot when the DB is unreachable (e.g. /health in CI).
         logger.warning("Database unavailable at startup; skipping seed: %s", exc)
+    try:
+        await asyncio.to_thread(reranker_service.warm_up)
+    except Exception:
+        logger.warning("Cross Encoder warm-up failed; will load on demand.", exc_info=True)
     yield
 
 

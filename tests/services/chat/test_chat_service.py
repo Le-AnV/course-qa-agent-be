@@ -9,7 +9,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.services import chat_retrieval_service, chat_service, rag_service
+from app.services import (
+    chat_retrieval_service,
+    chat_service,
+    rag_service,
+    suggestion_service,
+)
 from app.services.chat_service import stream_chat
 from app.services.llm import gateway
 
@@ -419,6 +424,9 @@ def test_stream_chat_emits_suggestions_event_and_done(monkeypatch) -> None:
     assert "suggestions" in event_names
     assert "done" in event_names
 
+    # `done` must not wait for suggestion generation.
+    assert event_names.index("done") < event_names.index("suggestions")
+
     suggestions_event = next(data for event, data in events if event == "suggestions")
     assert suggestions_event == {
         "questions": [
@@ -428,7 +436,42 @@ def test_stream_chat_emits_suggestions_event_and_done(monkeypatch) -> None:
     }
 
     done_event = next(data for event, data in events if event == "done")
-    assert done_event["suggestions"] == [
-        "How does backpropagation update weights?",
-        "What activation functions are commonly used?",
-    ]
+    assert done_event["suggestions"] == []
+
+
+def test_stream_chat_prefetches_suggestions_while_the_answer_streams(monkeypatch) -> None:
+    started = asyncio.Event()
+    captured: dict = {}
+
+    async def fake_generate(**kwargs):
+        captured.update(kwargs)
+        started.set()
+        return ["Question one?", "Question two?"]
+
+    monkeypatch.setattr(
+        suggestion_service, "generate_followup_questions", fake_generate
+    )
+    _patch_curriculum(monkeypatch)
+
+    class Model:
+        async def astream(self, messages):
+            # Would deadlock if suggestions were only started after the answer.
+            await asyncio.wait_for(started.wait(), timeout=1)
+            yield SimpleNamespace(content="Answer [1].")
+
+    events = asyncio.run(
+        _collect(
+            stream_chat(
+                db=MagicMock(),
+                message="Explain neural networks.",
+                class_id="class-a",
+                model=Model(),
+                timeout_seconds=2,
+            )
+        )
+    )
+
+    names = [event for event, _ in events]
+    assert names.index("done") < names.index("suggestions")
+    assert captured["answer"] == ""
+    assert captured["question"] == "Explain neural networks."

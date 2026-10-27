@@ -112,6 +112,26 @@ def test_mark_key_failure_cools_down_a_rate_limited_key(db_session) -> None:
     assert keys.effective_status(key, now=NOW + timedelta(seconds=61)) == keys.STATUS_ACTIVE
 
 
+def test_mark_key_failure_cools_an_out_of_quota_key_for_a_day(db_session) -> None:
+    key = keys.create_key(db_session, name="Broke", api_key=API_KEY)
+
+    keys.mark_key_failure(
+        db_session,
+        key,
+        "429 Too Many Requests insufficient_quota",
+        now=NOW,
+    )
+
+    db_session.refresh(key)
+    assert keys.effective_status(key, now=NOW) == keys.STATUS_COOLDOWN
+    assert keys.effective_status(
+        key, now=NOW + timedelta(hours=23)
+    ) == keys.STATUS_COOLDOWN
+    assert keys.effective_status(
+        key, now=NOW + timedelta(hours=25)
+    ) == keys.STATUS_ACTIVE
+
+
 def test_resolve_key_falls_back_to_the_environment_key(db_session, monkeypatch) -> None:
     monkeypatch.setattr(settings, "openai_api_key", "env-key")
 
