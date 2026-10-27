@@ -1,10 +1,8 @@
-"""Scope-gate key pool and rotation tests for the decision service (AI-61)."""
+"""Scope-gate tests for the decisions key pool and rotation (TDD)."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-from collections.abc import Generator
 
 import httpx
 import pytest
@@ -15,22 +13,23 @@ from sqlalchemy.pool import StaticPool
 from app import models  # noqa: F401  (register tables)
 from app.config import settings
 from app.core.database import Base, get_session_local, reset_engine
-from app.services import decision_service, openai_key_service
+from app.services import openai_decision_service, openai_key_service
 
 TEST_DB_URL = "sqlite://"
 OUT_OF_SCOPE = {
-    "choices": [
+    "answers": [
         {
-            "message": {
-                "content": json.dumps({"verdict": "out_of_scope", "confidence": 0.95})
-            }
+            "type": "choice",
+            "name": "scope",
+            "choice": "out_of_scope",
+            "confidence": 0.95,
         }
     ]
 }
 
 
 @pytest.fixture()
-def db_session(monkeypatch) -> Generator[Session, None, None]:
+def db_session(monkeypatch):
     from app.core import database as dbmod
 
     reset_engine()
@@ -55,20 +54,15 @@ def db_session(monkeypatch) -> Generator[Session, None, None]:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_settings(monkeypatch) -> Generator[None, None, None]:
-    decision_service.reset_failure_state()
-    monkeypatch.setattr(settings, "decision_provider", "openai")
-    monkeypatch.setattr(settings, "decision_fallback_enabled", False)
+def _isolated_settings(monkeypatch):
     monkeypatch.setattr(settings, "openai_api_key", None)
     monkeypatch.setattr(
         openai_key_service, "validate_key", lambda api_key: ["gpt-6-luna"]
     )
-    yield
-    decision_service.reset_failure_state()
 
 
 class _FakeApi:
-    """Answer the chat-completions endpoint with the configured status sequence."""
+    """Answer the decisions endpoint with the configured status sequence."""
 
     def __init__(self, responses: list[tuple[int, dict | None]]) -> None:
         self.responses = list(responses)
@@ -93,6 +87,8 @@ class _FakeApi:
                 request = httpx.Request("POST", url)
 
                 class FakeResponse:
+                    status_code_ = status_code
+
                     def raise_for_status(self) -> None:
                         if status_code >= 400:
                             raise httpx.HTTPStatusError(
@@ -110,9 +106,9 @@ class _FakeApi:
 
 
 def _ask(db: Session, api: _FakeApi, monkeypatch) -> bool:
-    monkeypatch.setattr(decision_service.httpx, "AsyncClient", api.client())
+    monkeypatch.setattr(openai_decision_service.httpx, "AsyncClient", api.client())
     return asyncio.run(
-        decision_service.is_confidently_out_of_scope(
+        openai_decision_service.is_confidently_out_of_scope(
             class_name="C++ Basic",
             class_description="Introductory C++ course",
             question="How do Python lists work?",
@@ -123,7 +119,9 @@ def _ask(db: Session, api: _FakeApi, monkeypatch) -> bool:
 
 
 def test_scope_decision_uses_the_pool_key(db_session, monkeypatch) -> None:
-    openai_key_service.create_key(db_session, name="Pool key", api_key="sk-pool-key-1111")
+    openai_key_service.create_key(
+        db_session, name="Pool key", api_key="sk-pool-key-1111"
+    )
     api = _FakeApi([(200, OUT_OF_SCOPE)])
 
     result = _ask(db_session, api, monkeypatch)
@@ -180,12 +178,12 @@ def test_scope_decision_fails_open_when_every_key_fails(db_session, monkeypatch)
 def test_scope_decision_skips_the_call_without_a_key(db_session, monkeypatch) -> None:
     class ExplodingClient:
         def __init__(self, **_: object) -> None:
-            raise AssertionError("the scope gate must not call the provider without a key")
+            raise AssertionError("the scope gate must not call OpenAI without a key")
 
-    monkeypatch.setattr(decision_service.httpx, "AsyncClient", ExplodingClient)
+    monkeypatch.setattr(openai_decision_service.httpx, "AsyncClient", ExplodingClient)
 
     result = asyncio.run(
-        decision_service.is_confidently_out_of_scope(
+        openai_decision_service.is_confidently_out_of_scope(
             class_name="C++ Basic",
             class_description=None,
             question="How do Python lists work?",
@@ -195,19 +193,3 @@ def test_scope_decision_skips_the_call_without_a_key(db_session, monkeypatch) ->
     )
 
     assert result is False
-
-
-def test_key_attempts_setting_bounds_rotation(db_session, monkeypatch) -> None:
-    openai_key_service.create_key(
-        db_session, name="First", api_key="sk-first-0006", priority=1
-    )
-    openai_key_service.create_key(
-        db_session, name="Second", api_key="sk-second-0007", priority=2
-    )
-    monkeypatch.setattr(settings, "decision_key_attempts", 1)
-    api = _FakeApi([(500, None)])
-
-    result = _ask(db_session, api, monkeypatch)
-
-    assert result is False
-    assert api.auth_headers == ["Bearer sk-first-0006"]

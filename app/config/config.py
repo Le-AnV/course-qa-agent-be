@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 from pydantic import AliasChoices, EmailStr, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -34,14 +34,7 @@ class Settings(BaseSettings):
         vlm_model: Model identifier for Vision Language Model.
         vlm_temperature: Temperature setting for VLM responses.
         google_api_key: Secret API key for Google Gemini model access.
-        openai_api_key: Optional API key for an OpenAI-compatible scope provider.
-        decision_provider: Provider used for the class scope verdict (gemini, openai, openai_compatible).
-        decision_model: Model used for class scope verdicts.
-        decision_fallback_model: Model tried once when the primary decision model fails.
-        decision_cooldown_seconds: How long a failing primary decision model is skipped.
-        decision_key_attempts: How many admin-managed keys one decision attempt may try.
-        decision_base_url: Base URL for an OpenAI-compatible provider.
-        decision_confidence_threshold: Minimum confidence before a scope verdict blocks a turn.
+        openai_api_key: Optional API key for the OpenAI Decisions scope gate.
         jwt_secret: HS256 signing key for DB-backed login tokens (dev default, override in prod).
         jwt_algorithm: JWT algorithm for login tokens.
         jwt_expire_minutes: Login token lifetime in minutes.
@@ -118,78 +111,6 @@ class Settings(BaseSettings):
         validation_alias="GEMINI_KEY_ENCRYPTION_KEY",
     )
     tavily_api_key: str | None = Field(default=None, validation_alias="TAVILY_API_KEY")
-    # Scope verdicts are provider-agnostic: Gemini through the Google SDK (the
-    # default, because the app already holds a Gemini key), or any
-    # OpenAI-compatible /chat/completions endpoint (OpenAI, Groq, OpenRouter,
-    # Ollama, vLLM...). Only the transport changes; the prompts stay in YAML.
-    decision_provider: Literal["gemini", "openai", "openai_compatible"] = Field(
-        default="gemini",
-        validation_alias="DECISION_PROVIDER",
-    )
-    decision_model: str = Field(
-        default="models/gemini-3.1-flash-lite",
-        validation_alias="DECISION_MODEL",
-    )
-    decision_base_url: str = Field(
-        default="https://api.openai.com/v1",
-        validation_alias=AliasChoices("DECISION_BASE_URL", "OPENAI_BASE_URL"),
-    )
-    decision_confidence_threshold: float = Field(
-        default=0.8,
-        ge=0.0,
-        le=1.0,
-        validation_alias="DECISION_CONFIDENCE_THRESHOLD",
-    )
-    decision_timeout_seconds: float = Field(
-        default=12.0,
-        ge=1.0,
-        le=60.0,
-        validation_alias="DECISION_TIMEOUT_SECONDS",
-    )
-    # A transient Gemini 503/504 used to make the gate fail open for the whole
-    # turn. A different lite model is tried within the same gate budget, and the
-    # failing primary model is skipped for a short cooldown so later turns do
-    # not pay the same timeout again.
-    decision_fallback_enabled: bool = Field(
-        default=True,
-        validation_alias="DECISION_FALLBACK_ENABLED",
-    )
-    decision_fallback_model: str = Field(
-        default="models/gemini-flash-lite-latest",
-        validation_alias="DECISION_FALLBACK_MODEL",
-    )
-    decision_fallback_timeout_seconds: float = Field(
-        default=6.0,
-        ge=1.0,
-        le=60.0,
-        validation_alias="DECISION_FALLBACK_TIMEOUT_SECONDS",
-    )
-    decision_cooldown_seconds: float = Field(
-        default=60.0,
-        ge=0.0,
-        le=600.0,
-        validation_alias="DECISION_COOLDOWN_SECONDS",
-    )
-    # How many admin-managed keys one attempt may try before the gate falls back
-    # to the fallback model (or fails open). 1 disables key rotation.
-    decision_key_attempts: int = Field(
-        default=3,
-        ge=1,
-        le=10,
-        validation_alias="DECISION_KEY_ATTEMPTS",
-    )
-    decision_connect_timeout_seconds: float = Field(
-        default=3.0,
-        ge=1.0,
-        le=30.0,
-        validation_alias="DECISION_CONNECT_TIMEOUT_SECONDS",
-    )
-    decision_max_output_tokens: int = Field(
-        default=200,
-        ge=16,
-        le=2000,
-        validation_alias="DECISION_MAX_OUTPUT_TOKENS",
-    )
     serpapi_api_key: str | None = Field(default=None, validation_alias="SERPAPI_API_KEY")
     serpapi_timeout_seconds: float = Field(
         default=10.0,
@@ -322,7 +243,7 @@ class Settings(BaseSettings):
     )
     # The class gate and the follow-up rewrite are independent, so they run in
     # parallel under one wall-clock deadline. This caps the worst case instead
-    # of adding DECISION_TIMEOUT_SECONDS on top of two rewrite attempts.
+    # of adding the gate timeout on top of two rewrite attempts.
     chat_pre_retrieval_timeout_seconds: float = Field(
         default=15.0,
         ge=1.0,

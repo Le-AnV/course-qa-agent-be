@@ -69,14 +69,14 @@ first persisted turn and returns it in the final `done` SSE event together with
 | `CHAT_FALLBACK_MODEL` | `models/gemini-flash-lite-latest` | Rewrite model tried when the chat model fails |
 | `LOG_LEVEL` | `INFO` | Application log level; `INFO` keeps the per-turn timing lines |
 
-The gate's own budget, fallback model, cooldown and key rotation are covered in
-[AI-61](ai-61-rag-qa-backend.md#class-scope-gate) (`DECISION_*`).
+The gate's timeout, threshold and OpenAI key rotation are covered in
+[AI-61](ai-61-rag-qa-backend.md#class-scope-gate).
 
 ## Latency
 
-The gate and rewrite used to run sequentially: `DECISION_TIMEOUT_SECONDS` (12s)
+The gate and rewrite used to run sequentially: the gate's 8s OpenAI timeout
 plus up to two `CHAT_CONDENSE_TIMEOUT_SECONDS` attempts (10s each), so a slow
-provider could delay retrieval by more than 30s. Both now start at the same
+provider could delay retrieval by more than 25s. Both now start at the same
 time and share `CHAT_PRE_RETRIEVAL_TIMEOUT_SECONDS`, which bounds the whole
 pre-retrieval phase. The primary and fallback rewrite attempts split the
 remaining budget instead of each receiving a fresh timeout. A blocking gate is
