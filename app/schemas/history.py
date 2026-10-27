@@ -94,6 +94,15 @@ class SessionRenameRequest(BaseModel):
         return cleaned
 
 
+class SessionPinRequest(BaseModel):
+    """Request payload to toggle or explicitly set session pin state."""
+
+    is_pinned: bool | None = Field(
+        default=None,
+        description="Explicit boolean to set pin status. If omitted, current state is toggled.",
+    )
+
+
 class ChatSessionResponse(BaseModel):
     """Response schema for chat session summary in sidebar/list (AC-04, AC-06)."""
 
@@ -104,6 +113,8 @@ class ChatSessionResponse(BaseModel):
     title: str | None
     created_at: datetime
     updated_at: datetime
+    is_pinned: bool = False
+    pinned_at: datetime | None = None
 
 
 class ChatSessionListResponse(BaseModel):
@@ -123,3 +134,22 @@ class DeleteSessionResponse(BaseModel):
     """Response schema for session deletion confirmation."""
 
     message: str = "Chat session deleted successfully."
+
+
+class SearchResultItem(BaseModel):
+    """Search result item representing a matching chat session (AC-01, AC-03)."""
+
+    session_id: uuid.UUID
+    title: str | None
+    updated_at: datetime
+    snippet: str
+    match_in: Literal["title", "message"]
+
+
+class ChatSearchResponse(BaseModel):
+    """Response schema for GET /api/history/search endpoint (AI-101)."""
+
+    items: list[SearchResultItem] = Field(default_factory=list)
+    total: int = 0
+    query: str
+

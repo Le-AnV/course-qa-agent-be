@@ -50,6 +50,8 @@ class ChatSession(Base):
         server_default=func.now(),
         nullable=False,
     )
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped["User"] = relationship("User")
     clazz: Mapped["Class"] = relationship("Class")
