@@ -1,4 +1,4 @@
-"""Configuration for Internet Web Search (Tavily).
+"""Configuration for Internet web search (SerpApi / Google).
 
 Defines trusted, high-reputation domain tiers (official documentation,
 academic institutions, curated references) and blocked spam/cheat sites
@@ -140,14 +140,11 @@ DEFAULT_BLOCKED_WEB_DOMAINS: list[str] = [
     "123docz.net",
 ]
 
-# Search depth: "basic" (fast, lightweight) or "advanced" (deeper content inspection)
-TAVILY_SEARCH_DEPTH: str = os.getenv("TAVILY_SEARCH_DEPTH", "basic")
+# Number of ranked web results kept for citation after reputation filtering
+SERPAPI_MAX_RESULTS: int = int(os.getenv("SERPAPI_MAX_RESULTS", "5"))
 
-# Number of top web results to fetch
-TAVILY_MAX_RESULTS: int = int(os.getenv("TAVILY_MAX_RESULTS", "3"))
-
-# Fallback: if trusted domains return 0 results, search the broader web (still blocking spam)
-FALLBACK_TO_GENERAL_SEARCH: bool = True
+# Google results requested before filtering (a wider net keeps 5 good hits)
+SERPAPI_FETCH_RESULTS: int = int(os.getenv("SERPAPI_FETCH_RESULTS", "10"))
 
 TRUSTED_WEB_DOMAINS: list[str] = list(DEFAULT_TRUSTED_WEB_DOMAINS)
 BLOCKED_WEB_DOMAINS: list[str] = list(DEFAULT_BLOCKED_WEB_DOMAINS)
@@ -163,6 +160,15 @@ def _host(url: str) -> str:
 def _matches(host: str, domains: list[str]) -> bool:
     """Khớp chính xác hoặc subdomain an toàn theo ranh giới dấu chấm."""
     return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def is_blocked(url: str) -> bool:
+    """Trả về True khi host nằm trong danh sách chặn cứng."""
+
+    host = _host(url)
+    if not host:
+        return False
+    return _matches(host, DEFAULT_BLOCKED_WEB_DOMAINS)
 
 
 def get_source_tier(url: str) -> int | None:
