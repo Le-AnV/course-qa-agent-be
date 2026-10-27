@@ -96,7 +96,12 @@ async def _invoke_pool(
 ) -> str:
     """Invoke through the key-pool gateway so suggestions rotate with chat keys."""
 
-    return await gateway.ainvoke_chat(db, messages, timeout=timeout_seconds)
+    return await gateway.ainvoke_chat(
+        db,
+        messages,
+        timeout=timeout_seconds,
+        avoid_sticky_key=True,
+    )
 
 
 async def generate_followup_questions(
@@ -107,7 +112,7 @@ async def generate_followup_questions(
     model: Any | None = None,
     db: Session | None = None,
 ) -> list[str]:
-    """Generate 2-3 suggested follow-up questions after a completed grounded answer (AC-01 to AC-05).
+    """Generate 2-3 suggested follow-up questions for a grounded answer (AC-01 to AC-05).
 
     Returns an empty list when:
     - Suggestions are globally disabled
@@ -118,7 +123,7 @@ async def generate_followup_questions(
     if not settings.chat_suggestions_enabled:
         return []
 
-    if not question.strip() or not answer.strip() or not chunks:
+    if not question.strip() or not chunks:
         return []
 
     # Build context from chunks
@@ -141,7 +146,11 @@ async def generate_followup_questions(
             "suggest-questions-prompt",
             context=context_text,
             question=question,
-            answer=answer,
+            answer=answer.strip()
+            or (
+                "Not available yet - this suggestion is generated in parallel with "
+                "the answer. Base the questions on the Course Context and User Question."
+            ),
         )
 
         messages = [
@@ -149,18 +158,17 @@ async def generate_followup_questions(
             HumanMessage(content=str(prompt["user-prompt"])),
         ]
 
-        if model is not None:
-            response = await asyncio.wait_for(
-                model.ainvoke(messages),
-                timeout=settings.chat_suggestions_timeout_seconds,
-            )
-            raw_output = _extract_message_text(getattr(response, "content", response))
-        else:
-            raw_output = await _invoke_pool(
-                db,
-                messages,
-                timeout_seconds=settings.chat_suggestions_timeout_seconds,
-            )
+        # One total budget for the whole call: key rotation must not multiply it.
+        async with asyncio.timeout(settings.chat_suggestions_timeout_seconds):
+            if model is not None:
+                response = await model.ainvoke(messages)
+                raw_output = _extract_message_text(getattr(response, "content", response))
+            else:
+                raw_output = await _invoke_pool(
+                    db,
+                    messages,
+                    timeout_seconds=settings.chat_suggestions_timeout_seconds,
+                )
 
         # AC-01: 2-3 questions
         # AC-03: if fewer than 2 questions, return []

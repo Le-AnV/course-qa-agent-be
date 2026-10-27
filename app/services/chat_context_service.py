@@ -245,7 +245,7 @@ async def condense_question(
             response = await model.ainvoke(messages)
             rewritten = _message_text(getattr(response, "content", response))
         else:
-            rewritten = await gateway.ainvoke_chat(db, messages, timeout=4.0)
+            rewritten = await gateway.ainvoke_chat(db, messages, timeout=2.5)
     except Exception:
         logger.warning(
             "Follow-up question condensation failed; using the original question.",

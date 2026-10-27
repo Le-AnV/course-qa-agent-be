@@ -242,6 +242,22 @@ def append_message(
     return message
 
 
+def update_suggested_questions(
+    db: Session,
+    message_id: uuid.UUID,
+    questions: Sequence[str],
+) -> ChatMessage | None:
+    """Attach generated follow-up questions to an already persisted answer."""
+
+    message = db.get(ChatMessage, message_id)
+    if message is None:
+        return None
+    message.suggested_questions = list(questions) if questions else None
+    db.commit()
+    db.refresh(message)
+    return message
+
+
 def save_chat_turn(
     db: Session,
     user_id: uuid.UUID,

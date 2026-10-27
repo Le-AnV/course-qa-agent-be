@@ -175,29 +175,28 @@ class GeminiEmbedding(Embeddings):
             vectors.extend(self._embed_batch(texts[start : start + DOCUMENT_BATCH_SIZE]))
         return vectors
 
-    @retry(
-        retry=retry_if_exception(_always_retry),
-        wait=_wait_before_retry,
-        stop=stop_after_attempt(5),
-        before_sleep=lambda retry_state: logger.warning(
-            "Retrying Gemini embedding query... Attempt %s. Error: %s",
-            retry_state.attempt_number,
-            getattr(retry_state.outcome, "exception", lambda: None)() or "unknown error",
-        ),
-    )
     def embed_query(self, text: str) -> list[float]:
-        """Embed a single query string with automatic retries on failure (AC-04).
+        """Embed a single query string, rotating keys without backoff sleeps.
+
+        Query embedding sits on the chat hot path, so a throttled key must be
+        swapped immediately instead of waiting for a retry delay. Document
+        batches keep their paced retries because uploads are not interactive.
 
         Args:
-            text (str): The query text to embed.
+            text (str): The query string to embed.
 
         Returns:
             list[float]: The embedding vector for the query.
         """
-        try:
-            vector = self._embeddings.embed_query(text)
-        except Exception as error:
-            self._rotate_key(error)
-            raise
-        self._touch()
-        return vector
+        last_error: BaseException | None = None
+        for _ in range(3):
+            try:
+                vector = self._embeddings.embed_query(text)
+            except Exception as error:  # noqa: BLE001 - rotate on any provider error
+                last_error = error
+                self._rotate_key(error)
+                continue
+            self._touch()
+            return vector
+        assert last_error is not None
+        raise last_error

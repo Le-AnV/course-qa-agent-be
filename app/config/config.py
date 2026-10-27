@@ -195,7 +195,7 @@ class Settings(BaseSettings):
         validation_alias="CHAT_SUGGESTIONS_ENABLED",
     )
     chat_suggestions_timeout_seconds: float = Field(
-        default=10.0,
+        default=30.0,
         ge=1.0,
         le=30.0,
         validation_alias="CHAT_SUGGESTIONS_TIMEOUT_SECONDS",

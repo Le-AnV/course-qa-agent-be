@@ -34,9 +34,11 @@ STATUSES = (STATUS_ACTIVE, STATUS_PAUSED, STATUS_INVALID)
 
 CHAT_MODEL_CONFIG_KEY = "gemini_chat_model"
 AUTO_SWITCH_CONFIG_KEY = "gemini_auto_switch"
-FALLBACK_CHAT_MODEL = "models/gemini-flash-lite-latest"
+FALLBACK_CHAT_MODEL = "models/gemini-3.1-flash-lite"
 PACIFIC = ZoneInfo("America/Los_Angeles")
 DEFAULT_COOLDOWN_SECONDS = 60.0
+QUOTA_EXHAUSTED_COOLDOWN_SECONDS = 86_400.0
+TIMEOUT_COOLDOWN_SECONDS = 30.0
 MAX_ERROR_LENGTH = 1000
 
 _RETRY_PATTERNS = (
@@ -258,6 +260,7 @@ def select_key(
     model: str,
     now: datetime | None = None,
     exclude_ids: set[uuid.UUID] | None = None,
+    preferred_id: uuid.UUID | None = None,
 ) -> GeminiApiKey | None:
     """Choose the highest-priority healthy key that can serve ``model``."""
 
@@ -282,6 +285,7 @@ def select_key(
 
     eligible.sort(
         key=lambda key: (
+            0 if preferred_id is not None and key.id == preferred_id else 1,
             key.priority,
             _utc(key.last_used_at) or datetime.min.replace(tzinfo=UTC),
             _utc(key.created_at) or datetime.min.replace(tzinfo=UTC),
@@ -297,10 +301,17 @@ def resolve_key(
     model: str,
     now: datetime | None = None,
     exclude_ids: set[uuid.UUID] | None = None,
+    preferred_id: uuid.UUID | None = None,
 ) -> ResolvedGeminiKey | None:
     """Resolve a DB key first, then fall back to GOOGLE_API_KEY/GEMINI_API_KEY."""
 
-    key = select_key(db, model=model, now=now, exclude_ids=exclude_ids)
+    key = select_key(
+        db,
+        model=model,
+        now=now,
+        exclude_ids=exclude_ids,
+        preferred_id=preferred_id,
+    )
     if key is not None:
         return ResolvedGeminiKey(
             api_key=decrypt_key(key),
@@ -349,8 +360,18 @@ def mark_key_failure(
         key.status = STATUS_INVALID
         key.cooldown_until = None
     else:
-        if "per day" in lowered or "daily" in lowered:
+        quota_markers = (
+            "insufficient_quota",
+            "credit_balance_exhausted",
+            "no credits remaining",
+            "exceeded your current quota",
+        )
+        if any(marker in lowered for marker in quota_markers):
+            seconds = QUOTA_EXHAUSTED_COOLDOWN_SECONDS
+        elif "per day" in lowered or "daily" in lowered:
             seconds = max((_next_day_start(current) - current).total_seconds(), 1.0)
+        elif isinstance(error, TimeoutError) or "timed out" in lowered:
+            seconds = TIMEOUT_COOLDOWN_SECONDS
         else:
             seconds = _retry_delay_seconds(message) or DEFAULT_COOLDOWN_SECONDS
         key.cooldown_until = current + timedelta(seconds=seconds)

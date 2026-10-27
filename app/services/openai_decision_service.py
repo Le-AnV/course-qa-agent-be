@@ -125,7 +125,15 @@ async def _request_decisions(api_key: str, payload: dict) -> list:
             headers={"Authorization": f"Bearer {api_key}"},
             json=payload,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            detail = getattr(response, "text", "")[:500]
+            raise httpx.HTTPStatusError(
+                f"{error} {detail}",
+                request=error.request,
+                response=error.response,
+            ) from error
     answers = response.json().get("answers", [])
     if not isinstance(answers, list):
         raise TypeError("OpenAI Decisions returned malformed answers.")

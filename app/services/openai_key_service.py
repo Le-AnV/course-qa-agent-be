@@ -32,6 +32,7 @@ STATUSES = (STATUS_ACTIVE, STATUS_PAUSED, STATUS_INVALID)
 
 MODELS_URL = "https://api.openai.com/v1/models"
 DEFAULT_COOLDOWN_SECONDS = 60.0
+QUOTA_EXHAUSTED_COOLDOWN_SECONDS = 86_400.0
 MAX_ERROR_LENGTH = 1000
 
 _RETRY_PATTERNS = (
@@ -300,5 +301,18 @@ def mark_key_failure(
         key.status = STATUS_INVALID
         key.cooldown_until = None
     else:
-        key.cooldown_until = current + timedelta(seconds=_cooldown_seconds(message))
+        quota_markers = (
+            "insufficient_quota",
+            "credit_balance_exhausted",
+            "no credits remaining",
+            "exceeded your current quota",
+        )
+        if any(marker in lowered for marker in quota_markers):
+            key.cooldown_until = current + timedelta(
+                seconds=QUOTA_EXHAUSTED_COOLDOWN_SECONDS
+            )
+        else:
+            key.cooldown_until = current + timedelta(
+                seconds=_cooldown_seconds(message)
+            )
     db.commit()

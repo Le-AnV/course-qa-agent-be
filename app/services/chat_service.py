@@ -34,6 +34,8 @@ CHAT_TIMEOUT_SECONDS = 300.0
 
 GENERATION_ERROR_MESSAGE = "The answer could not be generated. Please try again."
 TIMEOUT_ERROR_MESSAGE = "The answer timed out. Please try again."
+SUGGESTION_PREFETCH_GRACE_SECONDS = 4.0
+SUGGESTION_RETRY_TIMEOUT_SECONDS = 10.0
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:
@@ -174,6 +176,8 @@ async def stream_chat(
     sources: list[rag_service.Source] = []
     answer_parts: list[str] = []
     followup_questions: list[str] = []
+    suggestion_task: asyncio.Task[list[str]] | None = None
+    turn_completed = False
     stage = "conversation context"
 
     try:
@@ -358,6 +362,17 @@ async def stream_chat(
                     stage_started = time.monotonic()
                     logger.info("Starting grounded answer generation for class %s.", class_id)
                     answer_parts: list[str] = []
+                    # Prefetch suggestions while the answer streams so they
+                    # are ready around the same time as `done`.
+                    suggestion_task = asyncio.create_task(
+                        suggestion_service.generate_followup_questions(
+                            question=standalone_question,
+                            answer="",
+                            chunks=decision.chunks,
+                            model=model,
+                            db=db,
+                        )
+                    )
                     async for part in _answer_stream(db, model, messages):
                         if isinstance(part, gateway.StreamRestart):
                             answer_parts.clear()
@@ -377,22 +392,6 @@ async def stream_chat(
                         decision.chunks, "".join(answer_parts)
                     ):
                         yield _sse("citation", asdict(source))
-
-                    # AI-125 AC-01: Suggested follow-up questions
-                    full_answer = "".join(answer_parts).strip()
-                    if (
-                        full_answer
-                        and full_answer != chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE
-                    ):
-                        followup_questions = await suggestion_service.generate_followup_questions(
-                            question=standalone_question,
-                            answer=full_answer,
-                            chunks=decision.chunks,
-                            model=model,
-                            db=db,
-                        )
-                        if followup_questions:
-                            yield _sse("suggestions", {"questions": followup_questions})
 
             elif decision.source == rag_service.SOURCE_INTERNET:
                 yield _sse("progress", {"stage": "searching", "message": "Searching the web"})
@@ -455,7 +454,6 @@ async def stream_chat(
                 message=message,
                 answer="".join(answer_parts),
                 citations=citation_payload,
-                suggested_questions=followup_questions or None,
             )
             saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
 
@@ -479,8 +477,11 @@ async def stream_chat(
                     "suggested_questions": followup_questions,
                 },
             )
+            turn_completed = True
 
     except TimeoutError:
+        if suggestion_task is not None:
+            suggestion_task.cancel()
         logger.warning(
             "Chat request timed out during %s for class %s.",
             stage,
@@ -500,3 +501,55 @@ async def stream_chat(
             "error",
             {"message": GENERATION_ERROR_MESSAGE},
         )
+
+    if suggestion_task is None:
+        return
+
+    if not turn_completed:
+        suggestion_task.cancel()
+        return
+
+    try:
+        followup_questions = await asyncio.wait_for(
+            suggestion_task, timeout=SUGGESTION_PREFETCH_GRACE_SECONDS
+        )
+    except TimeoutError:
+        suggestion_task.cancel()
+        followup_questions = []
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("Follow-up question generation failed after done.", exc_info=True)
+        return
+
+    if not followup_questions:
+        try:
+            followup_questions = await asyncio.wait_for(
+                suggestion_service.generate_followup_questions(
+                    question=standalone_question,
+                    answer="".join(answer_parts),
+                    chunks=decision.chunks,
+                    model=model,
+                    db=db,
+                ),
+                timeout=SUGGESTION_RETRY_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.warning("Follow-up question retry failed after done.", exc_info=True)
+            return
+
+    if not followup_questions:
+        return
+
+    if assistant_msg is not None:
+        try:
+            await asyncio.to_thread(
+                history_service.update_suggested_questions,
+                db=db,
+                message_id=assistant_msg.id,
+                questions=followup_questions,
+            )
+        except Exception:
+            logger.warning("Failed to persist follow-up questions.", exc_info=True)
+
+    yield _sse("suggestions", {"questions": followup_questions})
