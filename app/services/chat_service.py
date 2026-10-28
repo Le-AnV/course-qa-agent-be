@@ -131,6 +131,8 @@ async def _persist_turn(
     suggested_questions: Sequence[str] | None = None,
     used_web_search: bool = False,
     excluded_from_context: bool = False,
+    thinking_ms: int | None = None,
+    trace: Sequence[str] | None = None,
 ) -> tuple[Any, Any, Any] | None:
     """Save a completed turn without letting a DB failure break the SSE stream."""
 
@@ -150,6 +152,8 @@ async def _persist_turn(
             citations=citations,
             suggested_questions=suggested_questions,
             excluded_from_context=excluded_from_context,
+            thinking_ms=thinking_ms,
+            trace=trace,
         )
     except Exception:
         logger.exception("Failed to persist chat turn for class %s.", class_id)
@@ -199,6 +203,21 @@ async def stream_chat(
     turn_completed = False
     stage = "conversation context"
     budget = timeout_seconds if timeout_seconds is not None else settings.chat_timeout_seconds
+    trace_steps: dict[str, str] = {}
+    first_token_ms: int | None = None
+    request_started = time.monotonic()
+
+    def _token(text: str) -> str:
+        """Stamp the first answer token so thinking time survives history reloads."""
+        nonlocal first_token_ms
+        if first_token_ms is None:
+            first_token_ms = int((time.monotonic() - request_started) * 1000)
+        return _sse("token", {"text": text})
+
+    def _progress(stage_name: str, text: str) -> str:
+        """Record the latest message per stage so the stored trace matches the UI."""
+        trace_steps[stage_name] = text
+        return _sse("progress", {"stage": stage_name, "message": text})
 
     try:
         async with asyncio.timeout(budget):
@@ -217,6 +236,8 @@ async def stream_chat(
                     message=message,
                     answer=quick_answer,
                     citations=[],
+                    thinking_ms=0,
+                    trace=[],
                 )
                 saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
 
@@ -242,10 +263,7 @@ async def stream_chat(
                 )
                 return
 
-            yield _sse(
-                "progress",
-                {"stage": "searching", "message": "Checking class scope"},
-            )
+            yield _progress("searching", "Checking class scope")
             class_record = course_service.get_class(db, class_id)
             class_name = class_record.name if class_record is not None else ""
             class_description = (
@@ -326,7 +344,7 @@ async def stream_chat(
                         "Please ask a question related to the course subject."
                     )
                     answer_parts.append(text)
-                    yield _sse("token", {"text": text})
+                    yield _token(text)
                     saved_turn = await _persist_turn(
                         db=db,
                         user_id=user_id,
@@ -336,6 +354,8 @@ async def stream_chat(
                         answer=text,
                         citations=[],
                         excluded_from_context=True,
+                        thinking_ms=first_token_ms,
+                        trace=list(trace_steps.values()),
                     )
                     saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
                     yield _sse(
@@ -360,9 +380,7 @@ async def stream_chat(
                     )
                     return
 
-                yield _sse(
-                    "progress", {"stage": "searching", "message": "Searching class materials"}
-                )
+                yield _progress("searching", "Searching class materials")
 
                 standalone_question = message
                 if rewrite_task is not None:
@@ -435,7 +453,7 @@ async def stream_chat(
                         read_msg = f"Found {count} {unit} in {primary} & {len(doc_titles) - 1} more"
                 else:
                     read_msg = f"Found {count} relevant {unit}"
-                yield _sse("progress", {"stage": "reading", "message": read_msg})
+                yield _progress("reading", read_msg)
 
             if decision.source == rag_service.SOURCE_CURRICULUM:
                 sources = rag_service.curriculum_citations(decision.chunks)
@@ -443,7 +461,7 @@ async def stream_chat(
                 if not sources:
                     text = chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE
                     answer_parts.append(text)
-                    yield _sse("token", {"text": text})
+                    yield _token(text)
                 else:
                     messages = _format_messages(
                         "answer-course-prompt",
@@ -452,7 +470,7 @@ async def stream_chat(
                         history=chat_context_service.format_history_context(context_history),
                     )
 
-                    yield _sse("progress", {"stage": "drafting", "message": "Synthesizing answer"})
+                    yield _progress("drafting", "Synthesizing answer")
                     stage = "grounded answer generation"
                     stage_started = time.monotonic()
                     logger.info("Starting grounded answer generation for class %s.", class_id)
@@ -474,7 +492,7 @@ async def stream_chat(
                             yield _sse("restart", {"message": part.message})
                         elif part:
                             answer_parts.append(part)
-                            yield _sse("token", {"text": part})
+                            yield _token(part)
                     logger.info(
                         "Grounded answer generation completed for class %s in %.2fs.",
                         class_id,
@@ -489,23 +507,17 @@ async def stream_chat(
                         yield _sse("citation", asdict(source))
 
             elif decision.source == rag_service.SOURCE_INTERNET:
-                yield _sse("progress", {"stage": "searching", "message": "Searching the web"})
+                yield _progress("searching", "Searching the web")
                 web_results = await asyncio.to_thread(
                     rag_service.search_internet, standalone_question
                 )
                 if not web_results:
                     text = rag_service.NO_SOURCE_MESSAGE
                     answer_parts.append(text)
-                    yield _sse("token", {"text": text})
+                    yield _token(text)
                 else:
                     sources = rag_service.internet_citations(web_results)
-                    yield _sse(
-                        "progress",
-                        {
-                            "stage": "reading",
-                            "message": f"Reviewing {len(web_results)} web sources",
-                        },
-                    )
+                    yield _progress("reading", f"Reviewing {len(web_results)} web sources")
                     context = "\n\n".join(
                         f"Source ({source.title} — {source.url}):\n{result.content}"
                         for source, result in zip(sources, web_results, strict=True)
@@ -516,7 +528,7 @@ async def stream_chat(
                         question=standalone_question,
                         history=chat_context_service.format_history_context(context_history),
                     )
-                    yield _sse("progress", {"stage": "drafting", "message": "Synthesizing answer"})
+                    yield _progress("drafting", "Synthesizing answer")
                     stage = "grounded answer generation"
                     stage_started = time.monotonic()
                     logger.info(
@@ -529,7 +541,7 @@ async def stream_chat(
                             yield _sse("restart", {"message": part.message})
                         elif part:
                             answer_parts.append(part)
-                            yield _sse("token", {"text": part})
+                            yield _token(part)
                     logger.info(
                         "Internet answer generation completed for class %s in %.2fs.",
                         class_id,
@@ -541,7 +553,7 @@ async def stream_chat(
             else:
                 text = chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE
                 answer_parts.append(text)
-                yield _sse("token", {"text": text})
+                yield _token(text)
 
             citation_payload = [asdict(source) for source in sources]
             saved_turn = await _persist_turn(
@@ -554,6 +566,8 @@ async def stream_chat(
                 citations=citation_payload,
                 suggested_questions=followup_questions or None,
                 used_web_search=decision.source == rag_service.SOURCE_INTERNET,
+                thinking_ms=first_token_ms,
+                trace=list(trace_steps.values()),
             )
             saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
 

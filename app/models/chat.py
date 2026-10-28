@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Integer,
     String,
     Text,
     Uuid,
@@ -94,6 +95,9 @@ class ChatMessage(Base):
         server_default=false(),
         nullable=False,
     )
+    # Thinking metadata survives history reloads so "Thought for Xs" stays visible.
+    thinking_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    trace: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

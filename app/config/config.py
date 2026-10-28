@@ -265,6 +265,14 @@ class Settings(BaseSettings):
         validation_alias="CHAT_TIMEOUT_SECONDS",
     )
 
+    # Daily question quota for students (teachers/admins are unlimited).
+    student_daily_question_limit: int = Field(
+        default=20,
+        ge=1,
+        le=1000,
+        validation_alias="STUDENT_DAILY_QUESTION_LIMIT",
+    )
+
     # Prompt configuration
     prompt_file: Path = Field(
         default=Path(__file__).resolve().parent / "prompts",

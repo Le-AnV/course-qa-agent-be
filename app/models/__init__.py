@@ -8,5 +8,6 @@ from app.models.gemini_key import GeminiApiKey  # noqa: F401
 from app.models.import_job import ImportBatch, ImportRow  # noqa: F401
 from app.models.openai_key import OpenAIApiKey  # noqa: F401
 from app.models.system_config import SystemConfig  # noqa: F401
+from app.models.usage import ChatDailyUsage  # noqa: F401
 from app.models.user import Account, Permission, Role, RolePermission, User  # noqa: F401
 

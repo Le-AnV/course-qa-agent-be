@@ -39,6 +39,14 @@ class ChatMessageBase(BaseModel):
         default_factory=list,
         description="Suggested follow-up questions generated for this assistant message (AI-125)",
     )
+    thinking_ms: int | None = Field(
+        default=None,
+        description="Time spent before the first answer token, preserved across history reloads",
+    )
+    trace: list[str] = Field(
+        default_factory=list,
+        description="Thinking steps that produced this answer, preserved across history reloads",
+    )
 
     @field_validator("citations", mode="before")
     @classmethod
@@ -51,6 +59,13 @@ class ChatMessageBase(BaseModel):
     @classmethod
     def normalize_suggested_questions(cls, value):
         """Treat a legacy NULL column as an empty question list."""
+
+        return value or []
+
+    @field_validator("trace", mode="before")
+    @classmethod
+    def normalize_trace(cls, value):
+        """Treat a legacy NULL column as an empty trace list."""
 
         return value or []
 
@@ -152,4 +167,3 @@ class ChatSearchResponse(BaseModel):
     items: list[SearchResultItem] = Field(default_factory=list)
     total: int = 0
     query: str
-
