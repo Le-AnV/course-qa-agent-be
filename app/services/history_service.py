@@ -259,6 +259,8 @@ def append_message(
     citations: Sequence[Any] | None = None,
     suggested_questions: Sequence[str] | None = None,
     excluded_from_context: bool = False,
+    thinking_ms: int | None = None,
+    trace: Sequence[str] | None = None,
 ) -> ChatMessage:
     """Append a single message to an existing session and update session's updated_at timestamp."""
     message = ChatMessage(
@@ -269,6 +271,8 @@ def append_message(
         citations=_citation_dicts(citations),
         suggested_questions=list(suggested_questions) if suggested_questions else None,
         excluded_from_context=excluded_from_context,
+        thinking_ms=thinking_ms,
+        trace=list(trace) if trace else None,
     )
     db.add(message)
 
@@ -308,6 +312,8 @@ def save_chat_turn(
     used_web_search: bool = False,
     citations: Sequence[Any] | None = None,
     suggested_questions: Sequence[str] | None = None,
+    thinking_ms: int | None = None,
+    trace: Sequence[str] | None = None,
     query_embedding: list[float] | None = None,
     qdrant_client: Any | None = None,
     excluded_from_context: bool = False,
@@ -365,6 +371,8 @@ def save_chat_turn(
         used_web_search=used_web_search,
         citations=_citation_dicts(citations),
         suggested_questions=list(suggested_questions) if suggested_questions else None,
+        thinking_ms=thinking_ms,
+        trace=list(trace) if trace else None,
         created_at=turn_started + timedelta(milliseconds=1),
         excluded_from_context=excluded_from_context,
     )

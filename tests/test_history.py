@@ -538,6 +538,35 @@ def test_save_chat_turn_persists_suggested_questions(db_session: Session) -> Non
     assert assistant_msg.suggested_questions == suggestions
 
 
+def test_save_chat_turn_persists_thinking_metadata(client: TestClient, db_session: Session) -> None:
+    """Thinking time and reasoning trace survive a history reload."""
+    student = db_session.query(User).filter(User.email == "student@academic.edu.vn").first()
+    clazz = db_session.query(Class).first()
+    trace = ["Searching class materials.", "Reading lesson.pdf.", "Synthesizing answer."]
+
+    session, _user_msg, assistant_msg = history_service.save_chat_turn(
+        db=db_session,
+        user_id=student.id,
+        class_id=clazz.id,
+        user_content="What is a neural network?",
+        assistant_content="A neural network is a stack of layers.",
+        session_id=None,
+        used_web_search=False,
+        thinking_ms=4321,
+        trace=trace,
+    )
+
+    assert assistant_msg.thinking_ms == 4321
+    assert assistant_msg.trace == trace
+
+    headers = _login(client, "student@academic.edu.vn", "Student@123")
+    detail_res = client.get(f"/api/history/{session.id}", headers=headers)
+    assert detail_res.status_code == 200
+    persisted = detail_res.json()["messages"][-1]
+    assert persisted["thinking_ms"] == 4321
+    assert persisted["trace"] == trace
+
+
 def test_rename_session_updates_title_without_bumping_activity(
     client: TestClient, db_session: Session
 ) -> None:
