@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
+from collections.abc import AsyncIterator
+from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -14,16 +17,42 @@ from app.core.deps import get_current_user, get_db
 from app.models.course import Class, ClassTrainer, Enrollment
 from app.models.document import Document
 from app.models.user import User
-from app.schemas.chat import ChatRequest
+from app.schemas.chat import ChatQuotaResponse, ChatRequest
 from app.services import (
     chat_context_service,
     chat_service,
     document_service,
     pdf_highlight_service,
+    quota_service,
 )
 from app.services.course_service import STATUS_ARCHIVED
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+
+async def _stream_with_quota_refund(
+    stream: AsyncIterator[str],
+    *,
+    db: Session,
+    user_id: uuid.UUID | None,
+    quota_day: date | None,
+) -> AsyncIterator[str]:
+    """Return the spent question when the stream ends without a ``done`` event."""
+
+    completed = False
+    try:
+        async for chunk in stream:
+            if chunk.startswith("event: done"):
+                completed = True
+            yield chunk
+    finally:
+        if quota_day is not None and not completed and user_id is not None:
+            try:
+                quota_service.refund_question(db, user_id, quota_day)
+            except Exception:
+                logger.exception("Failed to refund a chat question for user %s.", user_id)
 
 
 def _require_class_access(db: Session, user: User, class_id: uuid.UUID) -> None:
@@ -162,6 +191,22 @@ def highlight_source_rects(
     return {"document_id": str(document_id), "page": payload.page, "rects": rects}
 
 
+@router.get("/quota", response_model=ChatQuotaResponse)
+def get_chat_quota(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ChatQuotaResponse:
+    """Return today's remaining questions without spending one."""
+
+    status = quota_service.get_status(db, current_user)
+    return ChatQuotaResponse(
+        limit=status.limit,
+        used=status.used,
+        remaining=status.remaining,
+        resets_at=status.resets_at,
+    )
+
+
 @router.post("")
 async def chat(
     payload: ChatRequest,
@@ -181,14 +226,28 @@ async def chat(
             class_id=payload.class_id,
         )
 
+    quota = quota_service.consume_question(db, current_user)
+    if quota.exhausted:
+        raise HTTPException(
+            status_code=429,
+            detail=quota_service.limit_reached_message(quota),
+        )
+
+    stream = chat_service.stream_chat(
+        db=db,
+        message=payload.message,
+        class_id=payload.class_id,
+        user_id=current_user.id,
+        session_id=payload.session_id,
+        history=history,
+    )
+
     return StreamingResponse(
-        chat_service.stream_chat(
+        _stream_with_quota_refund(
+            stream,
             db=db,
-            message=payload.message,
-            class_id=payload.class_id,
             user_id=current_user.id,
-            session_id=payload.session_id,
-            history=history,
+            quota_day=quota.day,
         ),
         media_type="text/event-stream",
         headers={

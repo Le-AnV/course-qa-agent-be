@@ -200,6 +200,12 @@ def test_chat_streams_sse_for_an_enrolled_student(
         "history": [],
     }
 
+    from app.services import quota_service
+
+    student = db_session.get(User, db_session.info["student_id"])
+    assert student is not None
+    assert quota_service.get_status(db_session, student).used == 1
+
 
 def test_chat_loads_context_for_an_owned_session(
     client: TestClient,
@@ -507,3 +513,95 @@ def test_student_cannot_open_a_source_from_an_archived_class(
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Class not found."
+
+
+def test_chat_quota_reports_and_enforces_the_daily_limit(
+    client: TestClient,
+    student_headers: dict[str, str],
+    db_session: Session,
+) -> None:
+    from app.models.usage import ChatDailyUsage
+    from app.services import quota_service
+
+    db_session.add(
+        ChatDailyUsage(
+            user_id=db_session.info["student_id"],
+            usage_date=quota_service._today(),
+            used=settings.student_daily_question_limit,
+        )
+    )
+    db_session.commit()
+
+    quota = client.get("/api/chat/quota", headers=student_headers)
+
+    assert quota.status_code == 200
+    assert quota.json()["remaining"] == 0
+    assert quota.json()["used"] == settings.student_daily_question_limit
+
+    response = client.post(
+        "/api/chat",
+        headers=student_headers,
+        json={"message": "What is unit 1?", "class_id": str(db_session.info["class_a_id"])},
+    )
+
+    assert response.status_code == 429
+    assert "Daily question limit reached" in response.json()["detail"]
+
+
+def test_failed_answer_refunds_the_question(
+    client: TestClient,
+    student_headers: dict[str, str],
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    from app.services import quota_service
+
+    async def fake_stream_chat(**_kwargs):
+        yield _event("error", {"message": "boom"})
+
+    monkeypatch.setattr(chat_router.chat_service, "stream_chat", fake_stream_chat)
+    student = db_session.get(User, db_session.info["student_id"])
+    assert student is not None
+    before = quota_service.get_status(db_session, student)
+
+    response = client.post(
+        "/api/chat",
+        headers=student_headers,
+        json={"message": "What is unit 1?", "class_id": str(db_session.info["class_a_id"])},
+    )
+
+    assert response.status_code == 200
+    assert "event: error" in response.text
+    after = quota_service.get_status(db_session, student)
+    assert after.used == before.used
+
+
+def test_stream_token_containing_done_still_refunds_on_error(
+    client: TestClient,
+    student_headers: dict[str, str],
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    from app.services import quota_service
+
+    async def fake_stream_chat(**_kwargs):
+        yield _event("token", {"text": "event: done"})
+        yield _event("error", {"message": "boom"})
+
+    monkeypatch.setattr(chat_router.chat_service, "stream_chat", fake_stream_chat)
+    student = db_session.get(User, db_session.info["student_id"])
+    assert student is not None
+    before = quota_service.get_status(db_session, student)
+
+    response = client.post(
+        "/api/chat",
+        headers=student_headers,
+        json={"message": "What is unit 1?", "class_id": str(db_session.info["class_a_id"])},
+    )
+
+    assert response.status_code == 200
+    assert "event: token" in response.text
+    assert "event: error" in response.text
+    after = quota_service.get_status(db_session, student)
+    assert after.used == before.used
+
