@@ -54,7 +54,7 @@ def _disable_class_scope_gate(monkeypatch) -> None:
         return False
 
     monkeypatch.setattr(
-        chat_service.decision_service,
+        chat_service.openai_decision_service,
         "is_confidently_out_of_scope",
         in_scope,
     )
@@ -204,7 +204,7 @@ def test_refused_turn_is_persisted_but_not_replayed_as_context(
         return True
 
     monkeypatch.setattr(
-        chat_service.decision_service,
+        chat_service.openai_decision_service,
         "is_confidently_out_of_scope",
         out_of_scope,
     )
@@ -568,7 +568,7 @@ def test_gate_and_rewrite_run_in_parallel(db_session: Session, monkeypatch) -> N
         marks["rewrite_end"] = time.monotonic()
         return "When is the database assignment deadline?"
 
-    monkeypatch.setattr(chat_service.decision_service, "is_confidently_out_of_scope", gate)
+    monkeypatch.setattr(chat_service.openai_decision_service, "is_confidently_out_of_scope", gate)
     monkeypatch.setattr(chat_context_service, "condense_question", rewrite)
     monkeypatch.setattr(
         chat_retrieval_service,
@@ -622,7 +622,7 @@ def test_gate_block_returns_immediately_and_cancels_the_rewrite(
             raise
         return "must not be used"
 
-    monkeypatch.setattr(chat_service.decision_service, "is_confidently_out_of_scope", gate)
+    monkeypatch.setattr(chat_service.openai_decision_service, "is_confidently_out_of_scope", gate)
     monkeypatch.setattr(chat_context_service, "condense_question", slow_rewrite)
 
     started = time.monotonic()
@@ -673,7 +673,7 @@ def test_rewrite_that_misses_the_deadline_uses_the_class_qualified_question(
         captured["retrieval_question"] = question
         return _decision(question)
 
-    monkeypatch.setattr(chat_service.decision_service, "is_confidently_out_of_scope", gate)
+    monkeypatch.setattr(chat_service.openai_decision_service, "is_confidently_out_of_scope", gate)
     monkeypatch.setattr(chat_context_service, "condense_question", hanging_rewrite)
     monkeypatch.setattr(chat_retrieval_service, "retrieve_for_chat", retrieve)
     monkeypatch.setattr(chat_service.course_service, "get_class", lambda *args: _class_record())
@@ -728,7 +728,7 @@ def test_gate_that_misses_the_deadline_fails_open(db_session: Session, monkeypat
         return _decision(question)
 
     monkeypatch.setattr(
-        chat_service.decision_service, "is_confidently_out_of_scope", slow_gate
+        chat_service.openai_decision_service, "is_confidently_out_of_scope", slow_gate
     )
     monkeypatch.setattr(chat_context_service, "condense_question", rewrite)
     monkeypatch.setattr(chat_retrieval_service, "retrieve_for_chat", retrieve)

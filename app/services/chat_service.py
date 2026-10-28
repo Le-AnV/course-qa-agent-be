@@ -20,8 +20,8 @@ from app.services import (
     chat_context_service,
     chat_retrieval_service,
     course_service,
-    decision_service,
     history_service,
+    openai_decision_service,
     quick_response_service,
     rag_service,
     suggestion_service,
@@ -268,7 +268,7 @@ async def stream_chat(
                 + settings.chat_pre_retrieval_timeout_seconds
             )
             gate_task = asyncio.create_task(
-                decision_service.is_confidently_out_of_scope(
+                openai_decision_service.is_confidently_out_of_scope(
                     class_name=class_name,
                     class_description=class_description,
                     question=message,
