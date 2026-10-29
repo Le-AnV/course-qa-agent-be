@@ -146,7 +146,7 @@ async def generate_followup_questions(
             "suggest-questions-prompt",
             context=context_text,
             question=question,
-            answer=answer.strip()
+            answer=re.sub(r"\s*\[\d+\]", "", answer).strip()
             or (
                 "Not available yet - this suggestion is generated in parallel with "
                 "the answer. Base the questions on the Course Context and User Question."
