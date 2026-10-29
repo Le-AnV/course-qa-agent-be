@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import re
-from app.services import chat_service, decision_service, rag_service, chat_retrieval_service
+from app.services import chat_service, decision_service, rag_service
 
 
 def test_preprocess_student_query_code_only():
@@ -212,4 +211,10 @@ def test_determine_action_core():
         has_code=False, scope_decision=core_gate, decision_chunks=[],
         is_high_zone=False, is_mid_zone=False, is_low_zone=True, is_hw=False,
     ) == "web_search"
+    # Low with roadmap -> docs (never web search)
+    assert chat_service._determine_chat_action(
+        has_code=False, scope_decision=core_gate, decision_chunks=[],
+        is_high_zone=False, is_mid_zone=False, is_low_zone=True, is_hw=False,
+        has_roadmap=True,
+    ) == "docs"
 

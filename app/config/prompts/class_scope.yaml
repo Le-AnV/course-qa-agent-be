@@ -5,10 +5,10 @@ class-scope-prompt:
     Syllabus summary: "{class_description}"
 
     Classify the student's question into exactly ONE of the following 5 verdicts:
-    1. core: Direct lecture theory, course syntax, textbook concepts, or standard questions covered in this course syllabus.
+    1. core: Direct lecture theory, course syntax, textbook concepts, algorithms, code explanations, or standard technical questions taught in this subject (e.g. pointers, OOP, data structures, recursion).
     2. comparison: Comparative questions contrasting this course's subject with another language or tool (e.g. comparing C++ with Python, or Java with Go).
     3. extension: In-scope practical tools, build systems (CMake, Make, GCC), debuggers (GDB, Valgrind), modern language standards, or real-world runtime bugs belonging to this course's subject, even if not fully covered in slides.
-    4. logistics: Class schedule, assignment deadlines, exam formats, grading weights, or instructor contact inquiries.
+    4. logistics: Course administration and syllabus structure: course syllabus, roadmap, outline, units, sessions, schedule, assignment deadlines, exam dates/formats, grading criteria, attendance policy, or instructor contact. (These are answered strictly from course documents and database roadmap; never use web search).
     5. out_of_scope: Entirely outside this course's domain (e.g., pure foreign tech without comparison like asking Python decorators in a C++ class, or non-academic topics like cooking/weather).
 
     Additional fields to populate:
