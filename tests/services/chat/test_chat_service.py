@@ -81,6 +81,11 @@ def test_stream_chat_emits_tokens_citations_and_done(monkeypatch) -> None:
             yield SimpleNamespace(content="Neural networks ")
             yield SimpleNamespace(content="contain layers [1].")
 
+        async def ainvoke(self, messages):
+            return SimpleNamespace(
+                content='["How does backpropagation update weights?", "Which activation functions are common?"]'
+            )
+
     _patch_curriculum(monkeypatch)
 
     events = asyncio.run(
@@ -103,6 +108,7 @@ def test_stream_chat_emits_tokens_citations_and_done(monkeypatch) -> None:
         "token",
         "token",
         "citation",
+        "suggestions",
         "done",
     ]
     assert [data["stage"] for event, data in events if event == "progress"] == [
@@ -123,7 +129,12 @@ def test_stream_chat_emits_tokens_citations_and_done(monkeypatch) -> None:
         "indexes": [1],
         "highlights": ["A neural network contains connected layers."],
     }
-    assert events[7][1] == {
+    suggested = [
+        "How does backpropagation update weights?",
+        "Which activation functions are common?",
+    ]
+    assert events[7][1] == {"questions": suggested}
+    assert events[8][1] == {
         "source": "curriculum",
         "used_web_search": False,
         "threshold": 0.8,
@@ -131,8 +142,12 @@ def test_stream_chat_emits_tokens_citations_and_done(monkeypatch) -> None:
         "session_id": None,
         "user_message_id": None,
         "assistant_message_id": None,
-        "suggestions": [],
-        "suggested_questions": [],
+        "suggestions": suggested,
+        "suggested_questions": suggested,
+        "action": "docs",
+        "gate_verdict": "core",
+        "has_code": False,
+        "is_homework": False,
     }
     rendered_prompt = "\n".join(str(message.content) for message in captured_messages)
     assert "A neural network contains connected layers." in rendered_prompt
@@ -253,6 +268,8 @@ def test_stream_chat_uses_evidence_even_when_cosine_is_below_08(monkeypatch) -> 
         "retrieve_for_chat",
         lambda *args, **kwargs: decision,
     )
+    # Mid zone (0.45 <= score < 0.8) also searches the web; keep it offline.
+    monkeypatch.setattr(rag_service, "search_internet", lambda question: [])
     events = asyncio.run(
         _collect(
             stream_chat(
@@ -270,11 +287,14 @@ def test_stream_chat_uses_evidence_even_when_cosine_is_below_08(monkeypatch) -> 
         "progress",
         "progress",
         "progress",
+        "progress",
         "token",
         "citation",
+        "suggestions",
         "done",
     ]
-    assert events[-1][1]["source"] == rag_service.SOURCE_CURRICULUM
+    # The slide below 0.8 is still used as evidence for the answer.
+    assert events[-1][1]["source"] == "docs_plus_web"
     assert events[-1][1]["top_score"] == 0.774
 
 
@@ -340,7 +360,7 @@ def test_stream_chat_times_out_without_hanging(monkeypatch, caplog) -> None:
             {"message": "The answer timed out. Please try again."},
         ),
     ]
-    assert "timed out during grounded answer generation" in caplog.text
+    assert "timed out during docs answer generation" in caplog.text
 
 
 def _no_source_decision() -> rag_service.RetrievalDecision:
@@ -353,8 +373,8 @@ def _no_source_decision() -> rag_service.RetrievalDecision:
     )
 
 
-def test_stream_chat_does_not_search_web_or_call_model_without_evidence(monkeypatch) -> None:
-    """AI-61 answers only from class documents and fails closed without evidence."""
+def test_stream_chat_fails_closed_when_slides_and_web_have_no_evidence(monkeypatch) -> None:
+    """Low-zone CORE questions try the web; with no source at all the model is never called."""
 
     class ExplodingModel:
         async def astream(self, messages):
@@ -366,11 +386,13 @@ def test_stream_chat_does_not_search_web_or_call_model_without_evidence(monkeypa
         "retrieve_for_chat",
         lambda *args, **kwargs: _no_source_decision(),
     )
-    monkeypatch.setattr(
-        rag_service,
-        "search_internet",
-        lambda question: (_ for _ in ()).throw(AssertionError("AI-61 must not search the web")),
-    )
+    searched: list[str] = []
+
+    def empty_web_search(question: str) -> list[rag_service.WebResult]:
+        searched.append(question)
+        return []
+
+    monkeypatch.setattr(rag_service, "search_internet", empty_web_search)
 
     events = asyncio.run(
         _collect(
@@ -384,12 +406,13 @@ def test_stream_chat_does_not_search_web_or_call_model_without_evidence(monkeypa
         )
     )
 
-    assert [event for event, _ in events] == ["progress", "progress", "token", "done"]
+    assert [event for event, _ in events] == ["progress", "progress", "progress", "token", "done"]
     assert events[0][1] == {"stage": "searching", "message": "Checking class scope"}
     assert events[1][1] == {"stage": "searching", "message": "Searching class materials"}
-    assert events[2][1] == {"text": chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE}
-    assert events[3][1]["source"] == chat_retrieval_service.SOURCE_NONE
-    assert events[3][1]["used_web_search"] is False
+    assert events[2][1] == {"stage": "searching", "message": "Searching the web"}
+    assert events[3][1] == {"text": rag_service.NO_SOURCE_MESSAGE}
+    assert searched == ["What is a transformer?"]
+    assert events[4][1]["used_web_search"] is True
 
 
 def test_stream_chat_emits_suggestions_event_and_done(monkeypatch) -> None:

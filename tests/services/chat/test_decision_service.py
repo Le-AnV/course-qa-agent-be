@@ -8,7 +8,6 @@ import time
 from collections.abc import Generator
 from types import SimpleNamespace
 
-import httpx
 import pytest
 from pydantic import SecretStr
 

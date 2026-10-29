@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+
 import pytest
 from pydantic import SecretStr
 
@@ -179,7 +180,7 @@ def test_preprocess_student_query_pure_code():
     clean_q, code, has_code = decision_service.preprocess_student_query(msg)
     assert has_code is True
     assert "def add(a, b): return a + b" in code
-    assert clean_q == "Explain and debug the following code"
+    assert clean_q == ""  # chat_service substitutes its own default question
 
 
 def test_preprocess_student_query_normal_text():
@@ -196,8 +197,8 @@ def test_preprocess_student_query_normal_text():
 
 import uuid
 from unittest.mock import MagicMock
+
 from app.services import chat_retrieval_service, chat_service, rag_service
-from app.services.decision_service import ScopeVerdict
 
 
 def _make_retrieval_decision(score: float | None, source: str, cluster_count: int = 1) -> rag_service.RetrievalDecision:
@@ -242,10 +243,10 @@ async def _collect_events(stream):
         ("core", "high", 0.85, False, True, rag_service.SOURCE_CURRICULUM, False),
         # Row 3: CORE x High x Has Code -> CODE_HELP (curriculum)
         ("core", "high", 0.85, True, False, rag_service.SOURCE_CURRICULUM, False),
-        # Row 4: CORE x Mid x cluster>=1 -> DOCS (curriculum)
-        ("core", "mid", 0.50, False, False, rag_service.SOURCE_CURRICULUM, False),
-        # Row 5: CORE x Mid x cluster==0 -> WEB_SEARCH (internet)
-        ("core", "mid_low_cluster", 0.50, False, False, rag_service.SOURCE_INTERNET, True),
+        # Row 4: CORE x Mid x cluster>=1 -> DOCS_PLUS_WEB
+        ("core", "mid", 0.50, False, False, "docs_plus_web", True),
+        # Row 5: CORE x Mid x cluster==0 -> DOCS_PLUS_WEB
+        ("core", "mid_low_cluster", 0.50, False, False, "docs_plus_web", True),
         # Row 6: CORE x Low x No Code x No HW -> WEB_SEARCH (materials insufficient, fall back to web)
         ("core", "low", 0.20, False, False, rag_service.SOURCE_INTERNET, True),
         # Row 7: CORE x Low x No Code x Is HW -> DOCS_SOCRATIC (curriculum)
@@ -260,12 +261,12 @@ async def _collect_events(stream):
         ("comparison", "low", 0.20, False, False, "docs_plus_web", True),
         # Row 12: EXTENSION x High -> DOCS
         ("extension", "high", 0.85, False, False, rag_service.SOURCE_CURRICULUM, False),
-        # Row 13: EXTENSION x Mid -> WEB_SEARCH
-        ("extension", "mid", 0.50, False, False, rag_service.SOURCE_INTERNET, True),
+        # Row 13: EXTENSION x Mid -> DOCS_PLUS_WEB
+        ("extension", "mid", 0.50, False, False, "docs_plus_web", True),
         # Row 14: EXTENSION x Low -> WEB_SEARCH
         ("extension", "low", 0.20, False, False, rag_service.SOURCE_INTERNET, True),
-        # Row 15: LOGISTICS -> logistics
-        ("logistics", "low", 0.20, False, False, "logistics", False),
+        # Row 15: LOGISTICS -> docs (course materials only, no web, LMS reminder in prompt)
+        ("logistics", "low", 0.20, False, False, rag_service.SOURCE_CURRICULUM, False),
         # Row 16: OUT_OF_SCOPE (tech) -> reject
         ("out_of_scope_tech", "low", 0.10, False, False, rag_service.SOURCE_UNRELATED, False),
         # Row 17: OUT_OF_SCOPE (general) -> reject
@@ -365,10 +366,61 @@ def test_decision_truth_table_20_scenarios(
         )
     )
 
-    done_event = [data for evt, data in events if evt == "done"][0]
+    done_event = next(data for evt, data in events if evt == "done")
     assert done_event["source"] == expected_source, f"Expected source {expected_source}, got {done_event['source']}"
     assert done_event["used_web_search"] is expected_used_web, f"Expected used_web_search={expected_used_web}, got {done_event['used_web_search']}"
 
     # Critical Assertion: Low-zone fail-open MUST NOT burn SerpApi quota
     if verdict == "gate_error" and zone == "low":
         assert len(web_called) == 0, "Gate error in Low Zone must NOT call SerpApi!"
+
+
+def test_with_syllabus_prepends_description_for_overview_questions():
+    from app.services.chat_service import _with_syllabus
+
+    out = _with_syllabus("[1] Slide", "Course covers pointers and OOP")
+    assert out.startswith("Course syllabus summary")
+    assert "Course covers pointers and OOP" in out
+    assert out.endswith("[1] Slide")
+    assert _with_syllabus("[1] Slide", None) == "[1] Slide"
+    assert _with_syllabus("[1] Slide", "   ") == "[1] Slide"
+
+
+def test_logistics_routes_to_docs_without_web():
+    from app.services.chat_service import _determine_chat_action
+
+    gate = ScopeDecision(verdict="logistics", confidence=0.95)
+    kwargs = {"has_code": False, "scope_decision": gate, "is_high_zone": False,
+                  "is_mid_zone": False, "is_low_zone": True, "is_hw": False}
+    assert _determine_chat_action(decision_chunks=["chunk"], **kwargs) == "docs"
+    assert _determine_chat_action(decision_chunks=[], **kwargs) == "safe_fallback"
+
+
+def test_logistics_and_roadmap_strictly_never_web_search():
+    from app.services.chat_service import _determine_chat_action
+
+    # 1. Logistics questions (syllabus, schedule, units) never search web
+    log_gate = ScopeDecision(verdict="logistics", confidence=0.95)
+    kwargs = {
+        "has_code": False,
+        "scope_decision": log_gate,
+        "is_high_zone": False,
+        "is_mid_zone": False,
+        "is_low_zone": True,
+        "is_hw": False,
+    }
+    assert _determine_chat_action(decision_chunks=["chunk"], has_roadmap=False, **kwargs) == "docs"
+    assert _determine_chat_action(decision_chunks=[], has_roadmap=True, **kwargs) == "docs"
+    assert _determine_chat_action(decision_chunks=[], has_roadmap=False, **kwargs) == "safe_fallback"
+
+    # 2. Core questions with roadmap never search web even in low zone
+    core_gate = ScopeDecision(verdict="core", confidence=0.95)
+    kwargs_core = {
+        "has_code": False,
+        "scope_decision": core_gate,
+        "is_high_zone": False,
+        "is_mid_zone": False,
+        "is_low_zone": True,
+        "is_hw": False,
+    }
+    assert _determine_chat_action(decision_chunks=[], has_roadmap=True, **kwargs_core) == "docs"
