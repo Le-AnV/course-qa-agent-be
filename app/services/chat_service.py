@@ -475,17 +475,6 @@ async def stream_chat(
                     stage_started = time.monotonic()
                     logger.info("Starting grounded answer generation for class %s.", class_id)
                     answer_parts: list[str] = []
-                    # Prefetch suggestions while the answer streams so they
-                    # are ready around the same time as `done`.
-                    suggestion_task = asyncio.create_task(
-                        suggestion_service.generate_followup_questions(
-                            question=standalone_question,
-                            answer="",
-                            chunks=decision.chunks,
-                            model=model,
-                            db=db,
-                        )
-                    )
                     async for part in _answer_stream(db, model, messages):
                         if isinstance(part, gateway.StreamRestart):
                             answer_parts.clear()
@@ -497,6 +486,17 @@ async def stream_chat(
                         "Grounded answer generation completed for class %s in %.2fs.",
                         class_id,
                         time.monotonic() - stage_started,
+                    )
+                    # Start suggestions only once the answer is complete so
+                    # they can avoid repeating what it already states.
+                    suggestion_task = asyncio.create_task(
+                        suggestion_service.generate_followup_questions(
+                            question=standalone_question,
+                            answer="".join(answer_parts),
+                            chunks=decision.chunks,
+                            model=model,
+                            db=db,
+                        )
                     )
 
                     # Only pages the answer actually cites, one citation per

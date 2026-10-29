@@ -439,7 +439,7 @@ def test_stream_chat_emits_suggestions_event_and_done(monkeypatch) -> None:
     assert done_event["suggestions"] == []
 
 
-def test_stream_chat_prefetches_suggestions_while_the_answer_streams(monkeypatch) -> None:
+def test_stream_chat_generates_suggestions_after_the_answer_completes(monkeypatch) -> None:
     started = asyncio.Event()
     captured: dict = {}
 
@@ -455,8 +455,7 @@ def test_stream_chat_prefetches_suggestions_while_the_answer_streams(monkeypatch
 
     class Model:
         async def astream(self, messages):
-            # Would deadlock if suggestions were only started after the answer.
-            await asyncio.wait_for(started.wait(), timeout=1)
+            assert not started.is_set()
             yield SimpleNamespace(content="Answer [1].")
 
     events = asyncio.run(
@@ -473,5 +472,5 @@ def test_stream_chat_prefetches_suggestions_while_the_answer_streams(monkeypatch
 
     names = [event for event, _ in events]
     assert names.index("done") < names.index("suggestions")
-    assert captured["answer"] == ""
+    assert captured["answer"] == "Answer [1]."
     assert captured["question"] == "Explain neural networks."
