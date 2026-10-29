@@ -171,4 +171,4 @@ def test_generate_followup_questions_works_without_a_completed_answer():
     )
 
     assert questions == ["What is a gradient?", "Why use layers?"]
-    assert "still being" in captured["prompt"]
+    assert "Not available yet" in captured["prompt"]
