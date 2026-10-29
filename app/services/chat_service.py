@@ -930,7 +930,7 @@ async def stream_chat(
             else:  # safe_fallback
                 fallback_text = chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE
 
-            # Phase 2: Unified Execution (Generation & Concurrent Suggestions)
+            # Phase 2: Unified Execution (Generation & Follow-up Suggestions)
             if fallback_text is not None:
                 answer_parts.append(fallback_text)
                 yield _token(fallback_text)
@@ -939,7 +939,7 @@ async def stream_chat(
                     yield _progress("reading", reading_message)
                 yield _progress("drafting", "Synthesizing answer")
 
-                # Launch suggestions task concurrently for ALL actions
+                # Prepare suggestion context for all answer actions.
                 code_fallback_chunks = (
                     [
                         rag_service.ScoredChunk(
@@ -972,16 +972,6 @@ async def stream_chat(
                     if (not clean_message and has_code and student_code)
                     else standalone_question
                 )
-                suggestion_task = asyncio.create_task(
-                    suggestion_service.generate_followup_questions(
-                        question=suggestion_question,
-                        answer="",
-                        chunks=chunks_for_suggestions,
-                        history=chat_context_service.format_history_context(context_history),
-                        model=model,
-                        db=db,
-                    )
-                )
 
                 stage = f"{action} answer generation"
                 stage_started = time.monotonic()
@@ -999,6 +989,18 @@ async def stream_chat(
                     stage,
                     class_id,
                     time.monotonic() - stage_started,
+                )
+
+                # Use the completed answer to avoid repeating its content.
+                suggestion_task = asyncio.create_task(
+                    suggestion_service.generate_followup_questions(
+                        question=suggestion_question,
+                        answer="".join(answer_parts),
+                        chunks=chunks_for_suggestions,
+                        history=chat_context_service.format_history_context(context_history),
+                        model=model,
+                        db=db,
+                    )
                 )
 
             # Phase 3: Unified Post-Processing (Citations with highlights)

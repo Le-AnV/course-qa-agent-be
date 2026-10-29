@@ -178,7 +178,7 @@ async def generate_followup_questions(
             context=context_text,
             history=history or "(No previous conversation)",
             question=cleaned_q,
-            answer=answer.strip()
+            answer=re.sub(r"\s*\[\d+\]", "", answer).strip()
             or (
                 "Not available yet - this suggestion is generated in parallel with "
                 "the answer. Base the questions on the Course Context and User Question."

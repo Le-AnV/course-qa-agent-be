@@ -41,6 +41,10 @@ def test_parse_json_questions_malformed():
 def test_generate_followup_questions_success():
     class FakeLLM:
         async def ainvoke(self, messages):
+            user_prompt = str(messages[1].content)
+            assert "interconnected layers." in user_prompt
+            assert "[7]" not in user_prompt
+            assert "Previously discussed: activation functions." in user_prompt
             return MagicMock(
                 content='["What is backpropagation?", "How to choose a learning rate?"]'
             )
@@ -56,7 +60,8 @@ def test_generate_followup_questions_success():
     questions = asyncio.run(
         suggestion_service.generate_followup_questions(
             question="What is a neural network?",
-            answer="A neural network is a computational model composed of interconnected layers.",
+            answer="A neural network is a computational model composed of interconnected layers [7].",
+            history="Previously discussed: activation functions.",
             chunks=chunks,
             model=FakeLLM(),
         )
@@ -171,4 +176,4 @@ def test_generate_followup_questions_works_without_a_completed_answer():
     )
 
     assert questions == ["What is a gradient?", "Why use layers?"]
-    assert "still being" in captured["prompt"]
+    assert "Not available yet" in captured["prompt"]

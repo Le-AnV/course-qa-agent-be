@@ -424,8 +424,8 @@ def test_stream_chat_emits_suggestions_event_and_done(monkeypatch) -> None:
     assert "suggestions" in event_names
     assert "done" in event_names
 
-    # `done` must not wait for suggestion generation.
-    assert event_names.index("done") < event_names.index("suggestions")
+    # The unified pipeline includes suggestions in the final metadata.
+    assert event_names.index("suggestions") < event_names.index("done")
 
     suggestions_event = next(data for event, data in events if event == "suggestions")
     assert suggestions_event == {
@@ -436,10 +436,10 @@ def test_stream_chat_emits_suggestions_event_and_done(monkeypatch) -> None:
     }
 
     done_event = next(data for event, data in events if event == "done")
-    assert done_event["suggestions"] == []
+    assert done_event["suggestions"] == suggestions_event["questions"]
 
 
-def test_stream_chat_prefetches_suggestions_while_the_answer_streams(monkeypatch) -> None:
+def test_stream_chat_generates_suggestions_after_the_answer_completes(monkeypatch) -> None:
     started = asyncio.Event()
     captured: dict = {}
 
@@ -455,8 +455,7 @@ def test_stream_chat_prefetches_suggestions_while_the_answer_streams(monkeypatch
 
     class Model:
         async def astream(self, messages):
-            # Would deadlock if suggestions were only started after the answer.
-            await asyncio.wait_for(started.wait(), timeout=1)
+            assert not started.is_set()
             yield SimpleNamespace(content="Answer [1].")
 
     events = asyncio.run(
@@ -472,6 +471,7 @@ def test_stream_chat_prefetches_suggestions_while_the_answer_streams(monkeypatch
     )
 
     names = [event for event, _ in events]
-    assert names.index("done") < names.index("suggestions")
-    assert captured["answer"] == ""
+    assert names.index("suggestions") < names.index("done")
+    assert captured["answer"] == "Answer [1]."
     assert captured["question"] == "Explain neural networks."
+    assert captured["history"] == chat_service.chat_context_service.format_history_context([])
