@@ -36,7 +36,7 @@ def _disable_scope_gate_for_existing_chat_tests(monkeypatch) -> None:
         return False
 
     monkeypatch.setattr(
-        chat_service.openai_decision_service,
+        chat_service.decision_service,
         "is_confidently_out_of_scope",
         in_scope,
     )
@@ -148,7 +148,7 @@ def test_confident_out_of_scope_skips_retrieval(monkeypatch) -> None:
         return True
 
     monkeypatch.setattr(
-        chat_service.openai_decision_service,
+        chat_service.decision_service,
         "is_confidently_out_of_scope",
         out_of_scope,
     )
@@ -424,8 +424,8 @@ def test_stream_chat_emits_suggestions_event_and_done(monkeypatch) -> None:
     assert "suggestions" in event_names
     assert "done" in event_names
 
-    # `done` must not wait for suggestion generation.
-    assert event_names.index("done") < event_names.index("suggestions")
+    # The unified pipeline includes suggestions in the final metadata.
+    assert event_names.index("suggestions") < event_names.index("done")
 
     suggestions_event = next(data for event, data in events if event == "suggestions")
     assert suggestions_event == {
@@ -436,7 +436,7 @@ def test_stream_chat_emits_suggestions_event_and_done(monkeypatch) -> None:
     }
 
     done_event = next(data for event, data in events if event == "done")
-    assert done_event["suggestions"] == []
+    assert done_event["suggestions"] == suggestions_event["questions"]
 
 
 def test_stream_chat_generates_suggestions_after_the_answer_completes(monkeypatch) -> None:
@@ -471,6 +471,7 @@ def test_stream_chat_generates_suggestions_after_the_answer_completes(monkeypatc
     )
 
     names = [event for event, _ in events]
-    assert names.index("done") < names.index("suggestions")
+    assert names.index("suggestions") < names.index("done")
     assert captured["answer"] == "Answer [1]."
     assert captured["question"] == "Explain neural networks."
+    assert captured["history"] == chat_service.chat_context_service.format_history_context([])

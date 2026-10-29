@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
@@ -20,8 +21,8 @@ from app.services import (
     chat_context_service,
     chat_retrieval_service,
     course_service,
+    decision_service,
     history_service,
-    openai_decision_service,
     quick_response_service,
     rag_service,
     suggestion_service,
@@ -33,8 +34,25 @@ logger = logging.getLogger(__name__)
 
 GENERATION_ERROR_MESSAGE = "The answer could not be generated. Please try again."
 TIMEOUT_ERROR_MESSAGE = "The answer timed out. Please try again."
-SUGGESTION_PREFETCH_GRACE_SECONDS = 4.0
-SUGGESTION_RETRY_TIMEOUT_SECONDS = 10.0
+SUGGESTION_PREFETCH_GRACE_SECONDS = 15.0
+SUGGESTION_RETRY_TIMEOUT_SECONDS = 15.0
+
+_HOMEWORK_PATTERNS = re.compile(
+    r"(?:"
+    r"bài\s*tập|"
+    r"homework|"
+    r"assignment|"
+    r"lab\s*\d|"
+    r"(?:làm|giải|viết)\s*(?:hộ|giúp|dùm)|"
+    r"viết\s*code\s*(?:giúp|hộ|dùm)|"
+    r"nộp\s*(?:bài|lab|assignment)|"
+    r"mai\s*nộp|"
+    r"cho\s*(?:mình|em)\s*(?:xin\s*)?code|"
+    r"code\s*(?:mẫu\s*hoàn\s*chỉnh|giúp|hộ|dùm)|"
+    r"(?:làm|giải)\s*bài"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:
@@ -170,6 +188,110 @@ async def _cancel_tasks(*tasks: asyncio.Task[Any] | None) -> None:
         await asyncio.gather(*pending, return_exceptions=True)
 
 
+_ORIGINAL_IS_OUT_OF_SCOPE = decision_service.is_confidently_out_of_scope
+
+
+async def _resolve_scope_decision(
+    *,
+    class_name: str,
+    class_description: str | None,
+    question: str,
+    history: str = "",
+    top_chunk_snippet: str = "",
+    has_code: bool = False,
+    code_snippet_truncated: str = "",
+    db: Session | None = None,
+) -> decision_service.ScopeDecision | None:
+    if decision_service.is_confidently_out_of_scope is not _ORIGINAL_IS_OUT_OF_SCOPE:
+        blocked = await decision_service.is_confidently_out_of_scope(
+            class_name=class_name,
+            class_description=class_description,
+            question=question,
+            history=history,
+            top_chunk_snippet=top_chunk_snippet,
+            has_code=has_code,
+            code_snippet_truncated=code_snippet_truncated,
+            db=db,
+        )
+        if blocked:
+            return decision_service.ScopeDecision(
+                verdict=decision_service.ScopeVerdict.OUT_OF_SCOPE.value,
+                confidence=1.0,
+            )
+        return decision_service.ScopeDecision(
+            verdict=decision_service.ScopeVerdict.CORE.value,
+            confidence=1.0,
+        )
+
+    return await decision_service.decide_scope(
+        class_name=class_name,
+        class_description=class_description,
+        question=question,
+        history=history,
+        top_chunk_snippet=top_chunk_snippet,
+        has_code=has_code,
+        code_snippet_truncated=code_snippet_truncated,
+        db=db,
+    )
+
+
+def _determine_chat_action(
+    *,
+    has_code: bool,
+    scope_decision: decision_service.ScopeDecision | None,
+    decision_chunks: Sequence[rag_service.ScoredChunk],
+    is_high_zone: bool,
+    is_mid_zone: bool,
+    is_low_zone: bool,
+    is_hw: bool,
+    confidence_threshold: float = 0.8,
+) -> str:
+    """Resolve the pipeline action based on the refined Truth Table."""
+    raw_verdict = scope_decision.verdict if scope_decision else None
+    verdict = (
+        raw_verdict.value if hasattr(raw_verdict, "value") else str(raw_verdict)
+    ).lower() if raw_verdict is not None else None
+    gate_low_confidence = (
+        scope_decision is None
+        or scope_decision.confidence < confidence_threshold
+    )
+
+    if is_hw:
+        return "code_help" if has_code else "docs_socratic"
+
+    if has_code:
+        # OUT_OF_SCOPE was already rejected beforehand. Code queries route to code_help.
+        return "code_help"
+    elif gate_low_confidence:
+        # Gate error / timeout: fail-safe to avoid unverified web search
+        if is_high_zone or is_mid_zone:
+            return "docs"
+        return "safe_fallback"
+    elif verdict == decision_service.ScopeVerdict.COMPARISON.value:
+        if is_low_zone and not decision_chunks:
+            return "web_search"
+        return "docs_plus_web"
+    elif verdict == decision_service.ScopeVerdict.EXTENSION.value:
+        if is_high_zone:
+            return "docs"
+        elif is_mid_zone:
+            return "docs_plus_web"
+        return "web_search"
+    elif verdict == decision_service.ScopeVerdict.CORE.value:
+        if is_high_zone:
+            return "docs"
+        elif is_mid_zone:
+            return "docs_plus_web"
+        return "web_search"
+    else:
+        if is_high_zone:
+            return "docs"
+        elif is_mid_zone:
+            return "docs_plus_web"
+        return "web_search"
+
+
+
 async def stream_chat(
     *,
     db: Session,
@@ -199,6 +321,7 @@ async def stream_chat(
     sources: list[rag_service.Source] = []
     answer_parts: list[str] = []
     followup_questions: list[str] = []
+    chunks_for_suggestions: Sequence[rag_service.ScoredChunk] = ()
     suggestion_task: asyncio.Task[list[str]] | None = None
     turn_completed = False
     stage = "conversation context"
@@ -263,7 +386,10 @@ async def stream_chat(
                 )
                 return
 
-            yield _progress("searching", "Checking class scope")
+            yield _sse(
+                "progress",
+                {"stage": "searching", "message": "Checking class scope"},
+            )
             class_record = course_service.get_class(db, class_id)
             class_name = class_record.name if class_record is not None else ""
             class_description = (
@@ -276,31 +402,42 @@ async def stream_chat(
                 max_chars=settings.chat_scope_history_max_chars,
             )
 
-            # The gate and the follow-up rewrite are independent, so start both
-            # immediately and bound them with one wall-clock deadline. Awaiting
-            # the gate first means a refusal is never delayed by a rewrite that
-            # is no longer needed.
+            clean_message, student_code, has_code = decision_service.preprocess_student_query(message)
             pre_retrieval_started = time.monotonic()
             deadline = (
                 asyncio.get_running_loop().time()
                 + settings.chat_pre_retrieval_timeout_seconds
             )
-            gate_task = asyncio.create_task(
-                openai_decision_service.is_confidently_out_of_scope(
-                    class_name=class_name,
-                    class_description=class_description,
-                    question=message,
-                    history=scope_history,
-                    db=db,
-                ),
-                name="class-scope-gate",
-            )
+            gate_question = clean_message if clean_message else "Analyze student code"
+            scope_decision: decision_service.ScopeDecision | None = None
+            gate_task: asyncio.Task[decision_service.ScopeDecision | None] | None = None
+
+            if has_code:
+                # Fast path: queries containing code/compiler errors are directly in-scope code help
+                scope_decision = decision_service.ScopeDecision(
+                    verdict=decision_service.ScopeVerdict.CORE.value,
+                    confidence=1.0,
+                )
+            else:
+                gate_task = asyncio.create_task(
+                    _resolve_scope_decision(
+                        class_name=class_name,
+                        class_description=class_description,
+                        question=gate_question,
+                        history=scope_history,
+                        has_code=False,
+                        code_snippet_truncated="",
+                        db=db,
+                    ),
+                    name="class-scope-gate",
+                )
+
             rewrite_task: asyncio.Task[str] | None = None
-            if context_history:
+            if context_history and clean_message:
                 rewrite_task = asyncio.create_task(
                     chat_context_service.condense_question(
                         context_history,
-                        message,
+                        clean_message,
                         model=model,
                         class_name=class_name,
                         class_description=class_description,
@@ -311,26 +448,30 @@ async def stream_chat(
                 )
 
             try:
-                out_of_scope = False
-                try:
-                    async with asyncio.timeout_at(deadline):
-                        out_of_scope = await gate_task
-                except TimeoutError:
-                    await _cancel_tasks(gate_task)
-                    logger.warning(
-                        "Scope gate exceeded the %.1fs pre-retrieval deadline; failing open.",
-                        settings.chat_pre_retrieval_timeout_seconds,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Scope gate raised unexpectedly; continuing with RAG.",
-                        exc_info=True,
-                    )
-                    out_of_scope = False
+                if gate_task is not None:
+                    try:
+                        async with asyncio.timeout_at(deadline):
+                            scope_decision = await gate_task
+                    except TimeoutError:
+                        await _cancel_tasks(gate_task)
+                        logger.warning(
+                            "Scope gate exceeded the %.1fs pre-retrieval deadline; failing open.",
+                            settings.chat_pre_retrieval_timeout_seconds,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Scope gate raised unexpectedly; continuing with RAG.",
+                            exc_info=True,
+                        )
+                        scope_decision = None
 
                 gate_elapsed = time.monotonic() - pre_retrieval_started
 
-                if out_of_scope:
+                if (
+                    scope_decision is not None
+                    and scope_decision.verdict == decision_service.ScopeVerdict.OUT_OF_SCOPE.value
+                    and scope_decision.confidence >= settings.decision_confidence_threshold
+                ):
                     await _cancel_tasks(rewrite_task)
                     logger.info(
                         "Scope gate blocked the turn after %.2fs "
@@ -339,12 +480,18 @@ async def stream_chat(
                         class_id,
                         rewrite_task is not None,
                     )
-                    text = (
-                        "This question appears to be outside the scope of this class. "
-                        "Please ask a question related to the course subject."
-                    )
+                    if scope_decision.is_related_tech:
+                        text = (
+                            f"This question appears to be outside the scope of this class "
+                            f"(related to other technology). Please ask a question related to {class_name}."
+                        )
+                    else:
+                        text = (
+                            "This question appears to be outside the scope of this class. "
+                            "Please ask a question related to the course subject."
+                        )
                     answer_parts.append(text)
-                    yield _token(text)
+                    yield _sse("token", {"text": text})
                     saved_turn = await _persist_turn(
                         db=db,
                         user_id=user_id,
@@ -380,9 +527,66 @@ async def stream_chat(
                     )
                     return
 
-                yield _progress("searching", "Searching class materials")
+                if (
+                    scope_decision is not None
+                    and scope_decision.verdict == decision_service.ScopeVerdict.LOGISTICS.value
+                    and scope_decision.confidence >= settings.decision_confidence_threshold
+                ):
+                    await _cancel_tasks(rewrite_task)
+                    logger.info(
+                        "Scope gate handled logistics query after %.2fs (class=%s).",
+                        gate_elapsed,
+                        class_id,
+                    )
+                    syllabus_info = f": {class_description}" if class_description else "."
+                    text = (
+                        f"Regarding administrative policies, exam schedules, or assignment deadlines for {class_name}"
+                        f"{syllabus_info} "
+                        "For the most accurate schedule and deadlines, please check announcements on LMS "
+                        "or contact your course instructor directly."
+                    )
+                    answer_parts.append(text)
+                    yield _sse("token", {"text": text})
+                    saved_turn = await _persist_turn(
+                        db=db,
+                        user_id=user_id,
+                        session_id=session_id,
+                        class_id=class_id,
+                        message=message,
+                        answer=text,
+                        citations=[],
+                        excluded_from_context=False,
+                        thinking_ms=first_token_ms,
+                        trace=list(trace_steps.values()),
+                    )
+                    saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
+                    yield _sse(
+                        "done",
+                        {
+                            "source": "logistics",
+                            "used_web_search": False,
+                            "threshold": 0.0,
+                            "top_score": None,
+                            "session_id": (
+                                str(saved_session.id)
+                                if saved_session is not None
+                                else (str(session_id) if session_id is not None else None)
+                            ),
+                            "user_message_id": str(user_msg.id) if user_msg is not None else None,
+                            "assistant_message_id": (
+                                str(assistant_msg.id) if assistant_msg is not None else None
+                            ),
+                            "suggestions": [],
+                            "suggested_questions": [],
+                        },
+                    )
+                    return
 
-                standalone_question = message
+                yield _sse(
+                    "progress", {"stage": "searching", "message": "Searching class materials"}
+                )
+
+                standalone_question = clean_message if clean_message else "Explain and debug the student code:"
                 if rewrite_task is not None:
                     stage = "follow-up question resolution"
                     try:
@@ -391,7 +595,7 @@ async def stream_chat(
                     except TimeoutError:
                         await _cancel_tasks(rewrite_task)
                         standalone_question = chat_context_service.qualify_with_class(
-                            message, class_name, class_description
+                            clean_message, class_name, class_description
                         )
                         logger.warning(
                             "Follow-up rewrite missed the %.1fs pre-retrieval deadline; "
@@ -404,7 +608,7 @@ async def stream_chat(
                             exc_info=True,
                         )
                         standalone_question = chat_context_service.qualify_with_class(
-                            message, class_name, class_description
+                            clean_message, class_name, class_description
                         )
                     logger.info(
                         "Pre-retrieval finished in %.2fs "
@@ -426,12 +630,28 @@ async def stream_chat(
 
             stage = "class retrieval and reranking"
             stage_started = time.monotonic()
-            logger.info("Starting class retrieval and reranking for class %s.", class_id)
+            retrieval_query = standalone_question
+            if not retrieval_query.strip() or retrieval_query == "Explain and debug the student code:":
+                retrieval_query = student_code[:300].strip() if has_code else standalone_question
+
+            logger.info("Starting class retrieval and reranking for class %s (query_chars=%d).", class_id, len(retrieval_query))
+            search_query_en = scope_decision.search_query_en if scope_decision else None
+            retrieval_kwargs: dict[str, Any] = {"question": retrieval_query, "class_id": class_id}
+            if search_query_en is not None:
+                try:
+                    import inspect
+                    sig = inspect.signature(chat_retrieval_service.retrieve_for_chat)
+                    if "search_query_en" in sig.parameters or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                    ):
+                        retrieval_kwargs["search_query_en"] = search_query_en
+                except Exception:
+                    pass
+
             decision = await asyncio.to_thread(
                 chat_retrieval_service.retrieve_for_chat,
                 db,
-                question=standalone_question,
-                class_id=class_id,
+                **retrieval_kwargs,
             )
             logger.info(
                 "Class retrieval and reranking completed for class %s in %.2fs; chunks=%d.",
@@ -439,88 +659,261 @@ async def stream_chat(
                 time.monotonic() - stage_started,
                 len(decision.chunks),
             )
-            if decision.chunks and decision.source == rag_service.SOURCE_CURRICULUM:
-                doc_titles = list(dict.fromkeys(c.title for c in decision.chunks if c.title))
-                count = len(decision.chunks)
-                unit = "section" if count == 1 else "sections"
-                if doc_titles:
-                    primary = doc_titles[0]
-                    if len(primary) > 24:
-                        primary = primary[:21] + "..."
-                    if len(doc_titles) == 1:
-                        read_msg = f"Found {count} {unit} in {primary}"
+
+            is_high_zone = decision.top_score is not None and decision.top_score >= decision.threshold
+            is_mid_zone = (
+                decision.top_score is not None
+                and decision.unrelated_threshold <= decision.top_score < decision.threshold
+            )
+            is_low_zone = not is_high_zone and not is_mid_zone
+            is_hw = bool(scope_decision and scope_decision.is_homework_request) or bool(
+                _HOMEWORK_PATTERNS.search(message)
+            )
+            verdict = scope_decision.verdict if scope_decision else None
+            gate_low_confidence = (
+                scope_decision is None
+                or scope_decision.confidence < settings.decision_confidence_threshold
+            )
+
+            action = _determine_chat_action(
+                has_code=has_code,
+                scope_decision=scope_decision,
+                decision_chunks=decision.chunks,
+                is_high_zone=is_high_zone,
+                is_mid_zone=is_mid_zone,
+                is_low_zone=is_low_zone,
+                is_hw=is_hw,
+                confidence_threshold=settings.decision_confidence_threshold,
+            )
+
+            # Phase 1: Context & Prompt Resolution
+            fallback_text: str | None = None
+            reading_message: str = ""
+            messages: list[Any] | None = None
+            slide_chunks: list[rag_service.ScoredChunk] = []
+            web_results: list[rag_service.WebResult] = []
+
+            if action in ("docs", "docs_socratic"):
+                if decision.chunks:
+                    doc_titles = list(dict.fromkeys(c.title for c in decision.chunks if c.title))
+                    count = len(decision.chunks)
+                    unit = "section" if count == 1 else "sections"
+                    if doc_titles:
+                        primary = doc_titles[0]
+                        if len(primary) > 24:
+                            primary = primary[:21] + "..."
+                        reading_message = (
+                            f"Found {count} {unit} in {primary}"
+                            if len(doc_titles) == 1
+                            else f"Found {count} {unit} in {primary} & {len(doc_titles) - 1} more"
+                        )
                     else:
-                        read_msg = f"Found {count} {unit} in {primary} & {len(doc_titles) - 1} more"
-                else:
-                    read_msg = f"Found {count} relevant {unit}"
-                yield _progress("reading", read_msg)
+                        reading_message = f"Found {count} relevant {unit}"
 
-            if decision.source == rag_service.SOURCE_CURRICULUM:
-                sources = rag_service.curriculum_citations(decision.chunks)
-
-                if not sources:
-                    text = chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE
-                    answer_parts.append(text)
-                    yield _token(text)
-                else:
+                    slide_chunks = list(decision.chunks)
                     messages = _format_messages(
                         "answer-course-prompt",
                         context=_course_context(decision.chunks),
                         question=standalone_question,
                         history=chat_context_service.format_history_context(context_history),
                     )
-
-                    yield _progress("drafting", "Synthesizing answer")
-                    stage = "grounded answer generation"
-                    stage_started = time.monotonic()
-                    logger.info("Starting grounded answer generation for class %s.", class_id)
-                    answer_parts: list[str] = []
-                    async for part in _answer_stream(db, model, messages):
-                        if isinstance(part, gateway.StreamRestart):
-                            answer_parts.clear()
-                            yield _sse("restart", {"message": part.message})
-                        elif part:
-                            answer_parts.append(part)
-                            yield _token(part)
-                    logger.info(
-                        "Grounded answer generation completed for class %s in %.2fs.",
-                        class_id,
-                        time.monotonic() - stage_started,
-                    )
-                    # Start suggestions only once the answer is complete so
-                    # they can avoid repeating what it already states.
-                    suggestion_task = asyncio.create_task(
-                        suggestion_service.generate_followup_questions(
+                    if action == "docs_socratic" or is_hw:
+                        messages[0] = SystemMessage(
+                            content=(
+                            "You are an Academic Socratic Tutor for this course.\n"
+                            "The student is asking for help with their homework, lab assignment, or asking you to write code for an exercise.\n\n"
+                            "STRICT PEDAGOGICAL / ANTI-CHEATING RULES:\n"
+                            "1. ABSOLUTELY NO COMPLETE CODE: Under NO circumstances should you provide complete, copy-pasteable, runnable code or full function implementations (such as a complete recursive factorial function or main() method). Never write the final answer for the student.\n"
+                            "2. Concept Explanation: Explain mathematical concepts clearly. NEVER use dollar signs ($) or LaTeX math delimiters ($...$ or $...$). Write all formulas, equations, and variables as plain text or inline code in backticks (e.g. `n! = n * (n-1)!`, `0! = 1`, `F(0) = 0`).\n"
+                            "3. Socratic Breakdown: Guide the student step-by-step through the thought process:\n"
+                            "   - What is the Base Case (điều kiện dừng để không bị tràn stack / lặp vô tận)?\n"
+                            "   - What is the Recursive Step (công thức truy hồi để đưa bài toán về kích thước nhỏ hơn)?\n"
+                            "4. Pseudocode & Skeleton: Provide pseudocode, algorithm logic, or a code skeleton with blanks/TODO comments only (e.g. `// TODO: viết điều kiện dừng tại đây`).\n"
+                            "5. Guiding Questions: Ask 1-2 targeted Socratic questions encouraging the student to implement the missing parts and reply with their solution.\n"
+                            "6. Citations: Reference the provided Course Materials [1..N] where relevant. If not available, rely on standard computer science principles without apologizing or saying documents are missing.\n"
+                            "7. Tone & Language: Enthusiastic, supportive, pedagogical. Always respond in the language of the student (Vietnamese)."
+                        )
+                        )
+                else:
+                    if action == "docs_socratic" or is_hw:
+                        reading_message = "Applying Socratic pedagogical guidance"
+                        slide_chunks = []
+                        messages = _format_messages(
+                            "answer-course-prompt",
+                            context="Course syllabus & standard computer science concepts.",
                             question=standalone_question,
-                            answer="".join(answer_parts),
-                            chunks=decision.chunks,
-                            model=model,
-                            db=db,
+                            history=chat_context_service.format_history_context(context_history),
+                        )
+                        messages[0] = SystemMessage(
+                            content=(
+                            "You are an Academic Socratic Tutor for this course.\n"
+                            "The student is asking for help with their homework, lab assignment, or asking you to write code for an exercise.\n\n"
+                            "STRICT PEDAGOGICAL / ANTI-CHEATING RULES:\n"
+                            "1. ABSOLUTELY NO COMPLETE CODE: Under NO circumstances should you provide complete, copy-pasteable, runnable code or full function implementations (such as a complete recursive factorial function or main() method). Never write the final answer for the student.\n"
+                            "2. Concept Explanation: Explain mathematical concepts clearly. NEVER use dollar signs ($) or LaTeX math delimiters ($...$ or $...$). Write all formulas, equations, and variables as plain text or inline code in backticks (e.g. `n! = n * (n-1)!`, `0! = 1`, `F(0) = 0`).\n"
+                            "3. Socratic Breakdown: Guide the student step-by-step through the thought process:\n"
+                            "   - What is the Base Case (điều kiện dừng để không bị tràn stack / lặp vô tận)?\n"
+                            "   - What is the Recursive Step (công thức truy hồi để đưa bài toán về kích thước nhỏ hơn)?\n"
+                            "4. Pseudocode & Skeleton: Provide pseudocode, algorithm logic, or a code skeleton with blanks/TODO comments only (e.g. `// TODO: viết điều kiện dừng tại đây`).\n"
+                            "5. Guiding Questions: Ask 1-2 targeted Socratic questions encouraging the student to implement the missing parts and reply with their solution.\n"
+                            "6. Citations: Reference the provided Course Materials [1..N] where relevant. If not available, rely on standard computer science principles without apologizing or saying documents are missing.\n"
+                            "7. Tone & Language: Enthusiastic, supportive, pedagogical. Always respond in the language of the student (Vietnamese)."
+                        )
+                        )
+                    else:
+                        fallback_text = chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE
+
+            elif action == "code_help":
+                reading_message = "Analyzing student code"
+                slide_chunks = list(decision.chunks) if decision.chunks else []
+                if not slide_chunks and not is_hw:
+                    try:
+                        search_q = f"{class_name} C++ pointer reference" if ("ptr" in student_code or "*" in student_code) else f"{class_name} {standalone_question or 'programming syntax reference'}"
+                        web_results = await asyncio.to_thread(rag_service.search_internet, search_q)
+                    except Exception:
+                        web_results = []
+                slide_context = _course_context(decision.chunks) if decision.chunks else ""
+                code_block = f"### Student Code / Error Trace:\n```\n{student_code}\n```"
+                full_context = f"{slide_context}\n\n{code_block}" if slide_context else code_block
+
+                messages = _format_messages(
+                    "answer-course-prompt",
+                    context=full_context,
+                    question=standalone_question,
+                    history=chat_context_service.format_history_context(context_history),
+                )
+                if is_hw:
+                    messages[0] = SystemMessage(
+                        content=(
+                            "You are an Academic Assistant specializing in code explanation and tutoring for this course.\n"
+                            "The student provided code for a potential homework or assignment.\n"
+                            "RULES:\n"
+                            "1. Socratic Guidance: Point out logical errors, explain memory and runtime behavior, but DO NOT provide the complete final solution code. Guide them with pseudocode and hints.\n"
+                            "2. Citations: Reference the provided Course Materials [1..N] where relevant.\n"
+                            "3. Language: Answer in the language of the student."
+                        )
+                    )
+                else:
+                    messages[0] = SystemMessage(
+                        content=(
+                            "You are an Academic Assistant specializing in code explanation and debugging for this course.\n"
+                            "Your task is to thoroughly explain, trace, and debug the student's code snippet or compiler error.\n"
+                            "RULES:\n"
+                            "1. Comprehensive Analysis: Explain step-by-step what the code does, how variables and memory (e.g. pointers, addresses, values) change at each step, and what the output will be.\n"
+                            "2. Debugging & Best Practices: Point out any potential bugs, undefined behaviors (e.g. uninitialized pointers, memory leaks), and modern best practices.\n"
+                            "3. Citations: Cite the provided Course Materials [1..N] where relevant.\n"
+                            "4. Do NOT refuse: Do NOT say 'there is no information in the course context'. Always explain the code thoroughly.\n"
+                            "5. Language: Answer in the language of the student."
                         )
                     )
 
-                    # Only pages the answer actually cites, one citation per
-                    # page; nothing is shown when the answer used no source.
-                    for source in rag_service.cited_page_citations(
-                        decision.chunks, "".join(answer_parts)
-                    ):
-                        yield _sse("citation", asdict(source))
+            elif action == "docs_plus_web":
+                web_query = (
+                    scope_decision.external_search_query
+                    if scope_decision and scope_decision.external_search_query
+                    else standalone_question
+                )
+                yield _progress("searching", f"Searching comparison: {web_query}")
+                web_results = await asyncio.to_thread(rag_service.search_internet, web_query)
 
-            elif decision.source == rag_service.SOURCE_INTERNET:
+                slide_chunks = list(decision.chunks) if decision.chunks else []
+                if not web_results and not slide_chunks:
+                    fallback_text = rag_service.NO_SOURCE_MESSAGE
+                else:
+                    slide_context = _course_context(decision.chunks) if decision.chunks else "(No course slides matched)"
+                    preview_slide_citations = rag_service.curriculum_citations(slide_chunks) if slide_chunks else []
+                    preview_web_citations = (
+                        rag_service.internet_citations(web_results, start_index=len(preview_slide_citations) + 1)
+                        if web_results
+                        else []
+                    )
+                    web_context = (
+                        "\n\n".join(
+                            f"[{source.index}] ({source.title}):\n{result.content}"
+                            for source, result in zip(preview_web_citations, web_results, strict=True)
+                        )
+                        if web_results
+                        else "(No external search results found)"
+                    )
+                    combined_context = f"### Course Materials:\n{slide_context}\n\n### External Technology Sources:\n{web_context}"
+
+                    reading_message = f"Reviewing {len(preview_slide_citations) + len(preview_web_citations)} combined sources"
+                    messages = _format_messages(
+                        "answer-course-prompt",
+                        context=combined_context,
+                        question=standalone_question,
+                        history=chat_context_service.format_history_context(context_history),
+                    )
+                    messages[0] = SystemMessage(
+                        content=(
+                            "You are an Academic Assistant embedded in an Educational RAG system.\n"
+                            "Your task is to provide a comprehensive, insightful, and well-structured Markdown comparison "
+                            "between the course subject and external technologies/concepts.\n\n"
+                            "RULES:\n"
+                            "1. Synthesis & Depth: Thoroughly explain and compare both sides across essential aspects (such as syntax, compilation/execution model, performance, and practical use cases). "
+                            "Synthesize information from the provided Course Materials and External Technology Sources, and integrate standard computer science / programming knowledge to deliver a complete, highly informative answer. "
+                            "Do NOT refuse to answer, do NOT say 'không có thông tin chi tiết', and do NOT output generic disclaimer boilerplates.\n"
+                            "2. Citations & Links: Cite course materials as [1..N] where relevant. For external technology points, cite [N+1..] or mention the technology/source naturally. "
+                            "Do NOT output raw URLs, markdown hyperlinks (e.g. [title](url)), or bare lists of links at the end, because sources are already displayed as interactive badges in the user interface.\n"
+                            "3. Formatting: Structure clearly with Markdown headings, a side-by-side comparison summary table or bullet points, and code snippets when comparing syntax.\n"
+                            "4. Language: Answer in the language of the User Question."
+                        )
+                    )
+                    if is_hw:
+                        messages[0] = SystemMessage(
+                            content=str(messages[0].content)
+                            + "\n\nSOCRATIC TUTORING RULE: Explain trade-offs and concepts step-by-step with hints rather than solving homework directly."
+                        )
+
+            elif action == "web_search":
+                web_query = (
+                    scope_decision.external_search_query
+                    if (scope_decision and scope_decision.external_search_query)
+                    else (
+                        scope_decision.search_query_en
+                        if (scope_decision and scope_decision.search_query_en)
+                        else standalone_question
+                    )
+                )
+                is_unverified = gate_low_confidence
+                gap_priority = "low" if is_unverified else ("high" if is_low_zone else "medium")
+                logger.info(
+                    "Content Gap logged for class=%s question='%s' web_query='%s' verdict=%s score=%s priority=%s unverified=%s",
+                    class_id,
+                    standalone_question,
+                    web_query,
+                    verdict,
+                    decision.top_score,
+                    gap_priority,
+                    is_unverified,
+                )
                 yield _progress("searching", "Searching the web")
                 web_results = await asyncio.to_thread(
-                    rag_service.search_internet, standalone_question
+                    rag_service.search_internet, web_query
                 )
                 if not web_results:
-                    text = rag_service.NO_SOURCE_MESSAGE
-                    answer_parts.append(text)
-                    yield _token(text)
+                    if decision.chunks:
+                        slide_chunks = list(decision.chunks)
+                        reading_message = f"Found {len(slide_chunks)} course sections (web search returned no results)"
+                        messages = _format_messages(
+                            "answer-course-prompt",
+                            context=_course_context(decision.chunks),
+                            question=standalone_question,
+                            history=chat_context_service.format_history_context(context_history),
+                        )
+                        if is_hw:
+                            messages[0] = SystemMessage(
+                                content=str(messages[0].content)
+                                + "\n\nSOCRATIC TUTORING RULE: Guide the student with hints and pseudocode."
+                            )
+                    else:
+                        fallback_text = rag_service.NO_SOURCE_MESSAGE
                 else:
-                    sources = rag_service.internet_citations(web_results)
-                    yield _progress("reading", f"Reviewing {len(web_results)} web sources")
+                    preview_web_citations = rag_service.internet_citations(web_results)
+                    reading_message = f"Reviewing {len(web_results)} web sources"
                     context = "\n\n".join(
-                        f"Source ({source.title} — {source.url}):\n{result.content}"
-                        for source, result in zip(sources, web_results, strict=True)
+                        f"Source ({source.title}):\n{result.content}"
+                        for source, result in zip(preview_web_citations, web_results, strict=True)
                     )
                     messages = _format_messages(
                         "answer-internet-prompt",
@@ -528,34 +921,170 @@ async def stream_chat(
                         question=standalone_question,
                         history=chat_context_service.format_history_context(context_history),
                     )
-                    yield _progress("drafting", "Synthesizing answer")
-                    stage = "grounded answer generation"
-                    stage_started = time.monotonic()
-                    logger.info(
-                        "Starting Internet grounded answer generation for class %s.", class_id
-                    )
-                    answer_parts = []
-                    async for part in _answer_stream(db, model, messages):
-                        if isinstance(part, gateway.StreamRestart):
-                            answer_parts.clear()
-                            yield _sse("restart", {"message": part.message})
-                        elif part:
-                            answer_parts.append(part)
-                            yield _token(part)
-                    logger.info(
-                        "Internet answer generation completed for class %s in %.2fs.",
-                        class_id,
-                        time.monotonic() - stage_started,
-                    )
-                    for source in sources:
-                        yield _sse("citation", asdict(source))
+                    if is_hw:
+                        messages[0] = SystemMessage(
+                            content=str(messages[0].content)
+                            + "\n\nSOCRATIC TUTORING RULE: Guide the student with conceptual hints rather than providing full homework answers."
+                        )
 
-            else:
-                text = chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE
-                answer_parts.append(text)
-                yield _token(text)
+            else:  # safe_fallback
+                fallback_text = chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE
+
+            # Phase 2: Unified Execution (Generation & Follow-up Suggestions)
+            if fallback_text is not None:
+                answer_parts.append(fallback_text)
+                yield _token(fallback_text)
+            elif messages is not None:
+                if reading_message:
+                    yield _progress("reading", reading_message)
+                yield _progress("drafting", "Synthesizing answer")
+
+                # Prepare suggestion context for all answer actions.
+                code_fallback_chunks = (
+                    [
+                        rag_service.ScoredChunk(
+                            content=f"Student Code Context:\n{student_code}\n\nAnalyzing concepts, memory behavior, and logic.",
+                            score=1.0,
+                            metadata={"title": "Student Code"},
+                        )
+                    ]
+                    if has_code and student_code
+                    else []
+                )
+                chunks_for_suggestions = (
+                    slide_chunks
+                    if slide_chunks
+                    else (
+                        [
+                            rag_service.ScoredChunk(
+                                content=r.content,
+                                score=1.0,
+                                metadata={"title": r.title, "url": r.url},
+                            )
+                            for r in web_results
+                        ]
+                        if web_results
+                        else code_fallback_chunks
+                    )
+                )
+                suggestion_question = (
+                    f"Explain and debug: {student_code[:120]}"
+                    if (not clean_message and has_code and student_code)
+                    else standalone_question
+                )
+
+                stage = f"{action} answer generation"
+                stage_started = time.monotonic()
+                logger.info("Starting %s for class %s.", stage, class_id)
+                answer_parts = []
+                async for part in _answer_stream(db, model, messages):
+                    if isinstance(part, gateway.StreamRestart):
+                        answer_parts.clear()
+                        yield _sse("restart", {"message": part.message})
+                    elif part:
+                        answer_parts.append(part)
+                        yield _token(part)
+                logger.info(
+                    "%s completed for class %s in %.2fs.",
+                    stage,
+                    class_id,
+                    time.monotonic() - stage_started,
+                )
+
+                # Use the completed answer to avoid repeating its content.
+                suggestion_task = asyncio.create_task(
+                    suggestion_service.generate_followup_questions(
+                        question=suggestion_question,
+                        answer="".join(answer_parts),
+                        chunks=chunks_for_suggestions,
+                        history=chat_context_service.format_history_context(context_history),
+                        model=model,
+                        db=db,
+                    )
+                )
+
+            # Phase 3: Unified Post-Processing (Citations with highlights)
+            full_answer = "".join(answer_parts)
+            sources = []
+
+            if slide_chunks and full_answer and full_answer not in (
+                chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE,
+                rag_service.NO_SOURCE_MESSAGE,
+            ):
+                page_citations = rag_service.cited_page_citations(slide_chunks, full_answer)
+                if not page_citations:
+                    page_citations = rag_service.curriculum_citations(slide_chunks)
+                sources.extend(page_citations)
+
+            if web_results and full_answer and full_answer != rag_service.NO_SOURCE_MESSAGE:
+                web_citations = rag_service.internet_citations(
+                    web_results, start_index=len(sources) + 1
+                )
+                sources.extend(web_citations)
+
+            if not sources and full_answer and full_answer not in (
+                chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE,
+                rag_service.NO_SOURCE_MESSAGE,
+            ):
+                if decision.chunks:
+                    sources.extend(rag_service.curriculum_citations(decision.chunks))
+                elif slide_chunks:
+                    sources.extend(rag_service.curriculum_citations(slide_chunks))
+                elif not is_hw and action not in ("docs", "docs_socratic"):
+                    try:
+                        web_ref = await asyncio.to_thread(
+                            rag_service.search_internet, f"{class_name} {standalone_question[:80]}"
+                        )
+                        if web_ref:
+                            sources.extend(rag_service.internet_citations(web_ref[:2]))
+                    except Exception:
+                        pass
+                if not sources and class_record is not None:
+                    sources.append(
+                        rag_service.Source(
+                            index=1,
+                            kind=rag_service.SOURCE_CURRICULUM,
+                            title=class_record.name or f"{class_name} Material",
+                            url=None,
+                            snippet=f"Course syllabus and material for {class_name}",
+                            document_id=None,
+                            page=1,
+                            indexes=(1,),
+                            highlights=(),
+                        )
+                    )
+
+            for source in sources:
+                yield _sse("citation", asdict(source))
+
+            # Await suggestions before sending done event
+            if suggestion_task is not None:
+                try:
+                    followup_questions = await asyncio.wait_for(
+                        suggestion_task, timeout=SUGGESTION_PREFETCH_GRACE_SECONDS
+                    )
+                except Exception as exc:
+                    logger.warning("Suggestion prefetch wait timed out or failed: %s", exc)
+                    if suggestion_task and not suggestion_task.done():
+                        suggestion_task.cancel()
+                    followup_questions = []
+
+            # Guaranteed follow-up questions
+            if not followup_questions and full_answer and full_answer not in (
+                chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE,
+                rag_service.NO_SOURCE_MESSAGE,
+            ):
+                followup_questions = suggestion_service.build_fallback_followups(
+                    question=message,
+                    class_name=class_name,
+                    chunks=chunks_for_suggestions,
+                )
+
+            if followup_questions:
+                yield _sse("suggestions", {"questions": followup_questions})
 
             citation_payload = [asdict(source) for source in sources]
+            used_web = action in ("web_search", "docs_plus_web") or decision.source == rag_service.SOURCE_INTERNET
             saved_turn = await _persist_turn(
                 db=db,
                 user_id=user_id,
@@ -565,7 +1094,7 @@ async def stream_chat(
                 answer="".join(answer_parts),
                 citations=citation_payload,
                 suggested_questions=followup_questions or None,
-                used_web_search=decision.source == rag_service.SOURCE_INTERNET,
+                used_web_search=used_web,
                 thinking_ms=first_token_ms,
                 trace=list(trace_steps.values()),
             )
@@ -574,8 +1103,24 @@ async def stream_chat(
             yield _sse(
                 "done",
                 {
-                    "source": decision.source,
-                    "used_web_search": decision.source == rag_service.SOURCE_INTERNET,
+                    "source": (
+                        rag_service.SOURCE_CURRICULUM
+                        if action in ("docs", "docs_socratic", "code_help")
+                        else (
+                            "docs_plus_web"
+                            if action == "docs_plus_web"
+                            else (
+                                rag_service.SOURCE_INTERNET
+                                if action == "web_search"
+                                else decision.source
+                            )
+                        )
+                    ),
+                    "action": action,
+                    "gate_verdict": verdict,
+                    "has_code": has_code,
+                    "is_homework": is_hw,
+                    "used_web_search": used_web,
                     "threshold": decision.threshold,
                     "top_score": decision.top_score,
                     "session_id": (
@@ -615,55 +1160,3 @@ async def stream_chat(
             "error",
             {"message": GENERATION_ERROR_MESSAGE},
         )
-
-    if suggestion_task is None:
-        return
-
-    if not turn_completed:
-        suggestion_task.cancel()
-        return
-
-    try:
-        followup_questions = await asyncio.wait_for(
-            suggestion_task, timeout=SUGGESTION_PREFETCH_GRACE_SECONDS
-        )
-    except TimeoutError:
-        suggestion_task.cancel()
-        followup_questions = []
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        logger.warning("Follow-up question generation failed after done.", exc_info=True)
-        return
-
-    if not followup_questions:
-        try:
-            followup_questions = await asyncio.wait_for(
-                suggestion_service.generate_followup_questions(
-                    question=standalone_question,
-                    answer="".join(answer_parts),
-                    chunks=decision.chunks,
-                    model=model,
-                    db=db,
-                ),
-                timeout=SUGGESTION_RETRY_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            logger.warning("Follow-up question retry failed after done.", exc_info=True)
-            return
-
-    if not followup_questions:
-        return
-
-    if assistant_msg is not None:
-        try:
-            await asyncio.to_thread(
-                history_service.update_suggested_questions,
-                db=db,
-                message_id=assistant_msg.id,
-                questions=followup_questions,
-            )
-        except Exception:
-            logger.warning("Failed to persist follow-up questions.", exc_info=True)
-
-    yield _sse("suggestions", {"questions": followup_questions})

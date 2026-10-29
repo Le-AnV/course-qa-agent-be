@@ -88,3 +88,27 @@ def test_fail_fast_skips_rerank_when_top_candidate_below_unrelated_threshold(
     assert decision.chunks == ()
     assert decision.top_score == 0.42
 
+
+def test_retrieval_returns_early_on_empty_or_whitespace_question(monkeypatch) -> None:
+    """When question is empty or whitespace, retrieval exits immediately without querying vector DB."""
+    called = False
+
+    def fake_retrieve(*a, **k):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(rag_service, "retrieve_class_chunks", fake_retrieve)
+    monkeypatch.setattr(rag_service, "get_retrieval_threshold", lambda db: 0.8)
+    monkeypatch.setattr(rag_service, "get_unrelated_threshold", lambda db: 0.3)
+
+    decision = chat_retrieval_service.retrieve_for_chat(
+        object(), question="   ", class_id="class-a"
+    )
+
+    assert not called
+    assert decision.source == chat_retrieval_service.SOURCE_NONE
+    assert decision.chunks == ()
+    assert decision.top_score is None
+
+

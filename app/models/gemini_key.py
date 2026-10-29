@@ -34,6 +34,12 @@ class GeminiApiKey(Base):
         String(20), nullable=False, default=GEMINI_KEY_ACTIVE, index=True
     )
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    daily_requests: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    max_daily_requests: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1500, server_default="1500"
+    )
     cooldown_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
