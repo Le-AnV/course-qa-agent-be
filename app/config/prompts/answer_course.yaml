@@ -18,7 +18,7 @@ answer-course-prompt:
        - Every citation in the new answer must point to the Retrieved Context provided in this request.
     4. Source priority: For course administration (pass criteria, learning outcomes), the syllabus is the source of truth. For concepts and technical topics, use slides, textbooks, and documentation.
     5. Language: Answer in the language of the question. Keep technical terms, code, and course codes in their original form.
-    6. Explanations: Start with a short definition or summary, then break details into bullets or sub-sections. Include code (fenced, with a language tag) or formulas (LaTeX) when they appear in the chunks.
+    6. Explanations & Code: Start with a short definition or summary, then break details into clear sections. When providing code examples, write clean, complete, and idiomatic code with clear comments (NEVER use meaningless single-letter placeholders like a, b, c, d). Include fenced code blocks with language tags. NEVER use LaTeX dollar signs ($...$ or $$...$$). Write all math formulas, variables, and expressions as plain text or inline code in backticks (e.g. `F(0) = 0`, `0! = 1`, `n! = n * (n - 1)!`).
 
     OUTPUT FORMAT
     - Markdown only. Start directly with the answer, no greetings or filler.
@@ -37,4 +37,4 @@ answer-course-prompt:
 
     User Question: {question}
 
-    Answer strictly from the Retrieved Context above, in the language of the User Question.
+    Answer strictly from the Retrieved Context above, in the language of the User Question. Never use LaTeX dollar signs ($...$); use plain text or backticks for formulas.

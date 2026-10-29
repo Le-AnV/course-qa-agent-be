@@ -345,6 +345,7 @@ class GeminiKeyCreate(BaseModel):
     account_label: str | None = Field(default=None, max_length=255)
     project_label: str | None = Field(default=None, max_length=255)
     priority: int = Field(default=100, ge=0, le=1000)
+    max_daily_requests: int = Field(default=1500, ge=1, le=100000)
 
 
 class GeminiKeyUpdate(BaseModel):
@@ -352,6 +353,7 @@ class GeminiKeyUpdate(BaseModel):
     account_label: str | None = Field(default=None, max_length=255)
     project_label: str | None = Field(default=None, max_length=255)
     priority: int | None = Field(default=None, ge=0, le=1000)
+    max_daily_requests: int | None = Field(default=None, ge=1, le=100000)
     # Admin can pause/resume; invalid keys are detected by the gateway.
     status: Literal["active", "paused"] | None = None
 
@@ -364,6 +366,8 @@ class GeminiKeyRead(BaseModel):
     masked_key: str
     status: str
     priority: int
+    daily_requests: int = 0
+    max_daily_requests: int = 1500
     available_models: list[str] = []
     cooldown_until: datetime | None = None
     last_error: str = ""
@@ -377,6 +381,7 @@ class GeminiKeysRead(BaseModel):
     active_count: int = 0
     env_configured: bool = False
     auto_switch: bool = True
+    next_reset_at: datetime | None = None
 
 
 class GeminiModelConfigRead(BaseModel):
@@ -471,5 +476,6 @@ class RetrievalTestResponse(BaseModel):
     matched_document: str | None = None
     matched_snippet: str | None = None
     source: str = "unrelated"
+    search_query_en: str | None = None
 
 

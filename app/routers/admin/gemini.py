@@ -35,6 +35,8 @@ def _read(key: GeminiApiKey) -> GeminiKeyRead:
         masked_key=gemini_key_service.masked_key(key),
         status=gemini_key_service.effective_status(key),
         priority=key.priority,
+        daily_requests=getattr(key, "daily_requests", 0) or 0,
+        max_daily_requests=getattr(key, "max_daily_requests", 1500) or 1500,
         available_models=list(key.available_models or []),
         cooldown_until=key.cooldown_until,
         last_error=key.last_error,
@@ -67,6 +69,7 @@ def list_gemini_keys(db: Session = Depends(get_db), _=Depends(require_admin)):
         ),
         env_configured=settings.google_api_key is not None,
         auto_switch=gemini_key_service.get_auto_switch(db),
+        next_reset_at=gemini_key_service.next_reset_at(),
     )
 
 
@@ -99,6 +102,7 @@ def create_gemini_key(
             account_label=payload.account_label,
             project_label=payload.project_label,
             priority=payload.priority,
+            max_daily_requests=payload.max_daily_requests,
         )
     except gemini_key_service.GeminiKeyError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
@@ -117,7 +121,7 @@ def update_gemini_key(
     key = _load(db, key_id)
     try:
         fields = payload.model_fields_set
-        if fields & {"name", "account_label", "project_label", "priority"}:
+        if fields & {"name", "account_label", "project_label", "priority", "max_daily_requests"}:
             account_label = payload.account_label
             if "account_label" in fields and account_label is None:
                 account_label = ""
@@ -131,6 +135,7 @@ def update_gemini_key(
                 account_label=account_label,
                 project_label=project_label,
                 priority=payload.priority,
+                max_daily_requests=payload.max_daily_requests,
             )
         if payload.status is not None:
             key = gemini_key_service.set_status(db, key, payload.status)

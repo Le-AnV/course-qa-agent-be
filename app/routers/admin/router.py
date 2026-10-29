@@ -15,7 +15,6 @@ from app.models.course import Class, Enrollment
 from app.models.email_outbox import EmailOutbox
 from app.models.import_job import ROW_FAILED, ImportBatch, ImportRow
 from app.models.user import User
-from app.routers.admin.decisions import router as decisions_router
 from app.routers.admin.gemini import router as gemini_router
 from app.schemas.admin import (
     AdminSettingsRead,
@@ -66,7 +65,6 @@ from app.services.system_health_service import build_health
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 router.include_router(gemini_router)
-router.include_router(decisions_router)
 
 
 def _class_to_read(db: Session, section: Class) -> ClassRead:
@@ -579,7 +577,7 @@ def update_retrieval_config(
 
 
 @router.post("/retrieval-config/test", response_model=RetrievalTestResponse)
-def test_retrieval_query(
+async def test_retrieval_query(
     payload: RetrievalTestRequest,
     db: Session = Depends(get_db),
     _=Depends(require_admin),
@@ -600,12 +598,33 @@ def test_retrieval_query(
             matched_document=None,
             matched_snippet=None,
             source="none",
+            search_query_en=None,
         )
+
+    search_query_en = None
+    try:
+        from app.models.course import ClassInfo
+        from app.services import decision_service
+
+        info = db.query(ClassInfo).filter(ClassInfo.class_id == target_class.id).first()
+        class_description = info.description if info else None
+
+        scope_decision = await decision_service.decide_scope(
+            class_name=target_class.name or target_class.code,
+            class_description=class_description,
+            question=payload.question,
+            db=db,
+        )
+        if scope_decision and scope_decision.search_query_en:
+            search_query_en = scope_decision.search_query_en
+    except Exception:
+        pass
 
     decision = chat_retrieval_service.retrieve_for_chat(
         db,
         question=payload.question,
         class_id=target_class.id,
+        search_query_en=search_query_en,
     )
     top_chunk = decision.chunks[0] if decision.chunks else None
     return RetrievalTestResponse(
@@ -616,6 +635,7 @@ def test_retrieval_query(
         matched_document=top_chunk.title if top_chunk else None,
         matched_snippet=top_chunk.content[:240] if top_chunk else None,
         source=decision.source,
+        search_query_en=search_query_en,
     )
 
 

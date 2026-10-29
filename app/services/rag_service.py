@@ -148,6 +148,8 @@ class RetrievalDecision:
     source: str
     chunks: tuple[ScoredChunk, ...] = ()
     unrelated_threshold: float = DEFAULT_UNRELATED_THRESHOLD
+    cluster_count: int = 0
+    margin: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -416,12 +418,38 @@ def _serpapi_web_results(
     """Map a SerpApi ``organic_results`` response to the T19 web-result contract."""
 
     web_results: list[WebResult] = []
+
+    # Extract Google featured snippet / direct answer box if available
+    answer_box = data.get("answer_box") or {}
+    if isinstance(answer_box, dict) and answer_box:
+        ab_title = str(answer_box.get("title") or "Google Quick Answer")
+        ab_link = str(answer_box.get("link") or "")
+        ab_snippet = str(
+            answer_box.get("snippet")
+            or answer_box.get("answer")
+            or ""
+        ).strip()
+        if ab_snippet and ab_link:
+            jump_url = jump_builder(ab_link, ab_snippet) if jump_builder is not None else ab_link
+            web_results.append(WebResult(title=ab_title, url=jump_url, content=ab_snippet))
+
     for item in data.get("organic_results") or []:
         if len(web_results) >= SERPAPI_FETCH_RESULTS:
             break
         title = str(item.get("title") or "Web Source")
         raw_url = str(item.get("link") or "")
-        content = str(item.get("snippet") or "").strip()
+        snippet = str(item.get("snippet") or "").strip()
+
+        rich_snippet = item.get("rich_snippet")
+        content_parts = [snippet] if snippet else []
+        if isinstance(rich_snippet, dict):
+            for val in rich_snippet.values():
+                if isinstance(val, dict):
+                    for sub_k, sub_v in val.items():
+                        if isinstance(sub_v, str) and sub_v.strip():
+                            content_parts.append(f"{sub_k}: {sub_v.strip()}")
+        content = " ".join(content_parts).strip()
+
         if not raw_url:
             continue
         jump_url = jump_builder(raw_url, content) if jump_builder is not None else raw_url
@@ -575,6 +603,7 @@ def curriculum_citations(chunks: Sequence[ScoredChunk]) -> list[Source]:
             snippet=chunk.content[:CITATION_SNIPPET_LENGTH],
             document_id=chunk.document_id or None,
             page=chunk.page,
+            highlights=(chunk.content,),
         )
         for index, chunk in enumerate(chunks, start=1)
     ]
@@ -629,7 +658,7 @@ def cited_page_citations(
     return sources[:max_citations]
 
 
-def internet_citations(results: Sequence[WebResult]) -> list[Source]:
+def internet_citations(results: Sequence[WebResult], *, start_index: int = 1) -> list[Source]:
     """Build E5 citations from the Internet agent results (separate label)."""
 
     return [
@@ -640,7 +669,7 @@ def internet_citations(results: Sequence[WebResult]) -> list[Source]:
             url=result.url,
             snippet=result.content[:CITATION_SNIPPET_LENGTH],
         )
-        for index, result in enumerate(results, start=1)
+        for index, result in enumerate(results, start=start_index)
     ]
 
 
