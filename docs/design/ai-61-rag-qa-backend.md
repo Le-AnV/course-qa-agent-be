@@ -50,11 +50,13 @@ The class gate only stops a question when the decision service returns `out_of_s
 
 ## Class scope gate
 
-`is_confidently_out_of_scope()` sends the class name, optional class description, current question, and bounded recent conversation to the OpenAI Decisions endpoint (`POST https://api.openai.com/v1/decisions`) with the `gpt-6-luna` model. The model answers with a choice (`in_scope` or `out_of_scope`) and `confidence`. Recent conversation is included to resolve short follow-up wording; it does not broaden the class subject. Credentials stay server-side and are never returned to the client.
+`is_confidently_out_of_scope()` sends the class name, optional class description, current question, and bounded recent conversation to the configured decision provider with `DECISION_MODEL`. Gemini is the default (`DECISION_PROVIDER=gemini`, native `google-genai` structured output using a Gemini key).  In both cases the model answers with a JSON `verdict` (`in_scope` or `out_of_scope`) and `confidence`. Recent conversation is included to resolve short follow-up wording; it does not broaden the class subject. Credentials stay server-side and are never returned to the client.
 
-Keys come from the admin-managed OpenAI pool (`openai_api_keys`, managed at `/admin/settings`) first; `OPENAI_API_KEY` in the backend `.env` is used only when no pool key is healthy. One attempt tries at most three keys in priority order. A rejected key is marked invalid, a rate-limited or failing key cools down, and the next healthy key is tried.
+Keys come from the admin-managed pools first (`gemini_api_keys`, managed at `/admin/settings`); `GEMINI_API_KEY` in the backend `.env` are only used when no pool key is healthy. `DECISION_KEY_ATTEMPTS` (3) bounds how many pool keys one attempt may try in priority order. A rejected key is marked invalid, a rate-limited or failing key cools down, and the next healthy key is tried. The gate has its own model-level fallback and cooldown (see below) on top of key rotation.
 
-The HTTP call uses an 8s total timeout and a 3s connect timeout. Only an `out_of_scope` choice with confidence `>= 0.8` stops processing. Missing credentials, API errors, malformed payloads, unknown choices, and lower-confidence results fail open and continue through the existing retrieval flow. A confident rejection returns a fixed out-of-scope answer before document retrieval or Internet search. There is no model-level fallback: after the healthy pool keys and the environment fallback are exhausted, the gate fails open.
+`DECISION_TIMEOUT_SECONDS` (12s), `DECISION_MAX_OUTPUT_TOKENS` (200) bound the call. Only an `out_of_scope` verdict with confidence `>= DECISION_CONFIDENCE_THRESHOLD` (0.8) stops processing. Missing credentials, provider errors, malformed payloads, unknown verdicts, and lower-confidence results fail open and continue through the existing retrieval flow. A confident rejection returns a fixed out-of-scope answer before document retrieval or Internet search.
+
+A transient Gemini `503 UNAVAILABLE` or `504 DEADLINE_EXCEEDED` must not disable the gate for every turn. When `DECISION_FALLBACK_ENABLED=true` (default), the primary attempt uses the budget left after reserving `DECISION_FALLBACK_TIMEOUT_SECONDS` (6s) inside `DECISION_TIMEOUT_SECONDS`; if it fails, `DECISION_FALLBACK_MODEL` (`models/gemini-flash-lite-latest`) is tried once with the reserved budget. A failing primary is then skipped for `DECISION_COOLDOWN_SECONDS` (60s), so later turns call the fallback directly instead of paying the same timeout again. Both attempts failing still fail open. The Gemini SDK enforces a 10s minimum manual HTTP deadline, so the transport deadline is never set below that; `asyncio.wait_for` still enforces the shorter per-attempt budget.
 
 ## Retrieval and reranking
 
@@ -127,9 +129,9 @@ When there are no valid citations, the service skips answer generation. Retrieva
 | Class-scoped retrieval and reranking orchestration | `app/services/chat_retrieval_service.py` |
 | Cross Encoder loading and scoring | `app/services/reranker_service.py` |
 | SSE orchestration, prompt formatting, generation and citations | `app/services/chat_service.py` |
-| Pre-retrieval class scope gate | `app/services/openai_decision_service.py`, key pool via `app/services/openai_key_service.py`, `OPENAI_API_KEY` fallback in `app/config/config.py` |
-| Scope decision prompt | Inline in `app/services/openai_decision_service.py` |
-| Scope decision configuration | `OPENAI_API_KEY` in `app/config/config.py` and `.env.example` |
+| Pre-retrieval class scope gate | `app/services/decision_service.py`, key pools via `app/services/gemini_key_service.py`, `GEMINI_API_KEY` fallback in `app/config/config.py` |
+| Scope decision prompt | `app/config/prompts/class_scope.yaml` (`class-scope-prompt`) |
+| Scope decision configuration | `DECISION_*` settings in `app/config/config.py` and `.env.example` |
 | Qdrant retrieval and live-document guard | `app/services/rag_service.py` and `app/services/vector_store/qdrant_store.py` |
 | Prompt contract | `app/config/prompts/answer_course.yaml` (`answer-course-prompt`) |
 | Reranker model configuration | `app/config/config.py`, `.env.example` |
@@ -147,4 +149,4 @@ uv run ruff check .
 
 For a manual check, start the backend with PostgreSQL and Qdrant available, sign in as a class member, and submit a question whose answer is present in an indexed class document. Confirm the response is streamed, citations point to that class's documents, opening a citation serves the source file, and a question with no matching evidence receives the no-evidence message without an LLM-generated answer.
 
-For the class scope gate, add at least one key under Settings > OpenAI key pool (Decisions) or configure `OPENAI_API_KEY`, then test a clearly in-scope question and a clearly out-of-scope question. Confirm the latter receives the fixed scope response and does not emit `Searching class materials` or `Searching the web`. Also verify that with no healthy key and no environment fallback, or an unavailable provider, the existing RAG flow continues. Follow-up suggestions are emitted only after a grounded answer from class documents.
+For the class scope gate, add at least one key under Settings > Gemini key pool or configure `GEMINI_API_KEY`, then test a clearly in-scope question and a clearly out-of-scope question. Confirm the latter receives the fixed scope response and does not emit `Searching class materials` or `Searching the web`. Also verify that with no healthy key and no environment fallback, or an unavailable provider, the existing RAG flow continues. Follow-up suggestions are emitted only after a grounded answer from class documents.

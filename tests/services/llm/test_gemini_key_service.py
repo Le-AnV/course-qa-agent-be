@@ -354,11 +354,7 @@ def test_gateway_restarts_on_the_next_key_after_a_mid_stream_limit(
     assert chunks[0] == "partial"
     assert isinstance(chunks[1], gateway.StreamRestart)
     assert chunks[2:] == ["complete answer"]
-    assert calls == [
-        "AIzaSyPartial3333",
-        "AIzaSyRecovery4444",
-        "AIzaSyRecovery4444",
-    ]
+    assert calls == ["AIzaSyPartial3333", "AIzaSyRecovery4444"]
     assert first.cooldown_until is not None
     assert second.last_used_at is not None
 

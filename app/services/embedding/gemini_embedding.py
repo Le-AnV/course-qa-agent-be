@@ -29,8 +29,11 @@ _RETRY_DELAY_PATTERNS = (
 )
 
 
-def _always_retry(_error: BaseException) -> bool:
-    """Retry every provider failure: 429s are per-minute limits, not a dead key."""
+def _always_retry(error: BaseException) -> bool:
+    """Retry provider failures unless it's a hard per-day quota exhaustion."""
+    msg = str(error).lower()
+    if "per day limit exceeded" in msg or "requests per day" in msg:
+        return False
     return True
 
 

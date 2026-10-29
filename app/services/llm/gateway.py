@@ -17,10 +17,10 @@ from app.services.llm.provider import get_llm_model
 
 logger = logging.getLogger(__name__)
 
-PRIMARY_FIRST_CHUNK_TIMEOUT_SECONDS = 8.0
-RETRY_FIRST_CHUNK_TIMEOUT_SECONDS = 8.0
+PRIMARY_FIRST_CHUNK_TIMEOUT_SECONDS = 35.0
+RETRY_FIRST_CHUNK_TIMEOUT_SECONDS = 30.0
 FIRST_CHUNK_TIMEOUT_SECONDS = PRIMARY_FIRST_CHUNK_TIMEOUT_SECONDS
-FIRST_TOKEN_BUDGET_SECONDS = 20.0
+FIRST_TOKEN_BUDGET_SECONDS = 90.0
 DEFAULT_INVOKE_TIMEOUT_SECONDS = 60.0
 
 # Model id -> key id that last produced an answer. Sticky routing avoids
@@ -197,17 +197,6 @@ async def astream_chat(
                 _open_stream(primary, current_model, messages, attempt_timeout)
             )
             tasks[primary_task] = primary
-            if key_switch:
-                secondary = _select_key(
-                    db, current_model, excluded | {primary.key_id}
-                )
-                if secondary is not None:
-                    secondary_task = asyncio.create_task(
-                        _open_stream(
-                            secondary, current_model, messages, attempt_timeout
-                        )
-                    )
-                    tasks[secondary_task] = secondary
 
             done, pending = await asyncio.wait(
                 set(tasks),

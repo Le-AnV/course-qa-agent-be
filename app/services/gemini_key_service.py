@@ -34,7 +34,7 @@ STATUSES = (STATUS_ACTIVE, STATUS_PAUSED, STATUS_INVALID)
 
 CHAT_MODEL_CONFIG_KEY = "gemini_chat_model"
 AUTO_SWITCH_CONFIG_KEY = "gemini_auto_switch"
-FALLBACK_CHAT_MODEL = "models/gemini-3.1-flash-lite"
+FALLBACK_CHAT_MODEL = "models/gemini-3.5-flash-lite"
 PACIFIC = ZoneInfo("America/Los_Angeles")
 DEFAULT_COOLDOWN_SECONDS = 60.0
 QUOTA_EXHAUSTED_COOLDOWN_SECONDS = 86_400.0
@@ -77,6 +77,11 @@ def _next_day_start(value: datetime) -> datetime:
     local = value.astimezone(PACIFIC)
     start = local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     return start.astimezone(UTC)
+
+
+def next_reset_at(now: datetime | None = None) -> datetime:
+    """Return the next midnight Pacific Time (Google AI Studio daily quota reset) in UTC."""
+    return _next_day_start(_now(now))
 
 
 def model_id(model: str) -> str:
@@ -129,6 +134,7 @@ def create_key(
     account_label: str | None = None,
     project_label: str | None = None,
     priority: int = 100,
+    max_daily_requests: int = 1500,
 ) -> GeminiApiKey:
     """Validate, encrypt, and persist a new Gemini key."""
 
@@ -156,6 +162,8 @@ def create_key(
         available_models=models,
         status=STATUS_ACTIVE,
         priority=priority,
+        daily_requests=0,
+        max_daily_requests=max_daily_requests,
     )
     db.add(key)
     db.commit()
@@ -171,8 +179,33 @@ def update_key(
     account_label: str | None = None,
     project_label: str | None = None,
     priority: int | None = None,
+    max_daily_requests: int | None = None,
 ) -> GeminiApiKey:
     """Update non-secret metadata."""
+
+    if name is not None:
+        cleaned = name.strip()
+        if not cleaned:
+            raise GeminiKeyError("Key name is required.")
+        duplicate = (
+            db.query(GeminiApiKey)
+            .filter(GeminiApiKey.name == cleaned, GeminiApiKey.id != key.id)
+            .first()
+        )
+        if duplicate:
+            raise GeminiKeyError(f"A Gemini key named '{cleaned}' already exists.")
+        key.name = cleaned
+    if account_label is not None:
+        key.account_label = account_label.strip() or None
+    if project_label is not None:
+        key.project_label = project_label.strip() or None
+    if priority is not None:
+        key.priority = priority
+    if max_daily_requests is not None:
+        key.max_daily_requests = max_daily_requests
+    db.commit()
+    db.refresh(key)
+    return key
 
     if name is not None:
         cleaned = name.strip()
@@ -238,10 +271,29 @@ def effective_status(key: GeminiApiKey, *, now: datetime | None = None) -> str:
     return STATUS_ACTIVE
 
 
+def _check_and_reset_daily_quota(key: GeminiApiKey, now: datetime) -> bool:
+    """Reset daily_requests if last_used_at is from a previous calendar day (in Pacific Time)."""
+    if key.last_used_at is not None:
+        last = _utc(key.last_used_at)
+        if last is not None:
+            now_pt = now.astimezone(PACIFIC)
+            last_pt = last.astimezone(PACIFIC)
+            if now_pt.date() > last_pt.date() or (now - last).total_seconds() >= 86400:
+                key.daily_requests = 0
+                if key.cooldown_until is not None and "Daily quota limit" in (key.last_error or ""):
+                    key.cooldown_until = None
+                    key.last_error = ""
+                return True
+    return False
+
+
 def touch_key(db: Session, key: GeminiApiKey, *, now: datetime | None = None) -> None:
     """Mark a successful use and clear an expired cooldown/error."""
 
-    key.last_used_at = _now(now)
+    current = _now(now)
+    _check_and_reset_daily_quota(key, current)
+    key.daily_requests = (getattr(key, "daily_requests", 0) or 0) + 1
+    key.last_used_at = current
     key.cooldown_until = None
     key.last_error = ""
     db.commit()
@@ -262,7 +314,11 @@ def select_key(
     exclude_ids: set[uuid.UUID] | None = None,
     preferred_id: uuid.UUID | None = None,
 ) -> GeminiApiKey | None:
-    """Choose the highest-priority healthy key that can serve ``model``."""
+    """Choose the highest-priority healthy key that can serve ``model``.
+
+    Uses sequential failover: sticks to the highest-priority active key until its
+    daily quota is exhausted or rate limit cooldown is active, then falls over to the next key.
+    """
 
     current = _now(now)
     excluded = exclude_ids or set()
@@ -276,6 +332,9 @@ def select_key(
     for key in candidates:
         if key.id in excluded:
             continue
+        if _check_and_reset_daily_quota(key, current):
+            db.commit()
+
         cooldown = _utc(key.cooldown_until)
         if cooldown is not None and cooldown > current:
             continue

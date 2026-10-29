@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import logging
+import math
 import os
 import threading
 import time
@@ -18,6 +20,11 @@ MAX_SEQUENCE_LENGTH = 512
 _model_lock = threading.Lock()
 _loaded_model: tuple[Any, Any, Any] | None = None
 logger = logging.getLogger(__name__)
+
+
+def _sigmoid(x: float) -> float:
+    """Calibrate unbounded Cross Encoder logits into a [0, 1] probability."""
+    return 1.0 / (1.0 + math.exp(-max(min(x, 20.0), -20.0)))
 
 
 def _load_model() -> tuple[Any, Any, Any]:
@@ -57,15 +64,40 @@ def warm_up() -> None:
         logger.warning("Failed to warm up the Cross Encoder model.", exc_info=True)
 
 
-def rerank_chunks(
+def score_text_pair(text_a: str, text_b: str) -> float:
+    """Compute calibrated semantic relevance in [0, 1] between two texts using Cross Encoder."""
+
+    if not text_a.strip() or not text_b.strip():
+        return 0.0
+
+    try:
+        tokenizer, model, device = _load_model()
+        import torch
+
+        encoded = tokenizer(
+            [(text_a, text_b)],
+            padding=True,
+            truncation=True,
+            max_length=MAX_SEQUENCE_LENGTH,
+            return_tensors="pt",
+        )
+        encoded = {key: value.to(device) for key, value in encoded.items()}
+        with torch.inference_mode():
+            raw_logit = model(**encoded).logits.squeeze(-1).detach().cpu().tolist()
+            logit = raw_logit[0] if isinstance(raw_logit, list) else float(raw_logit)
+        return _sigmoid(logit)
+    except Exception:
+        logger.warning("Cross Encoder pairwise scoring failed; returning fallback 0.5", exc_info=True)
+        return 0.5
+
+
+def rerank_all(
     question: str,
     chunks: list[ScoredChunk],
-    *,
-    top_k: int = RERANK_TOP_K,
 ) -> list[ScoredChunk]:
-    """Return the most relevant chunks ranked by Cross Encoder logits."""
+    """Return all candidate chunks ranked and calibrated by Cross Encoder."""
 
-    if not chunks or top_k <= 0:
+    if not chunks:
         return []
 
     tokenizer, model, device = _load_model()
@@ -80,7 +112,50 @@ def rerank_chunks(
     )
     encoded = {key: value.to(device) for key, value in encoded.items()}
     with torch.inference_mode():
-        logits = model(**encoded).logits.squeeze(-1).detach().cpu().tolist()
+        raw_logits = model(**encoded).logits.squeeze(-1).detach().cpu().tolist()
+
+    logits: list[float]
+    if isinstance(raw_logits, list):
+        logits = [float(l) for l in raw_logits]
+    else:
+        logits = [float(raw_logits)]
 
     ranked = sorted(zip(chunks, logits, strict=True), key=lambda item: item[1], reverse=True)
-    return [chunk for chunk, _score in ranked[:top_k]]
+    return [
+        ScoredChunk(
+            content=chunk.content,
+            score=_sigmoid(logit),
+            metadata=chunk.metadata,
+        )
+        for chunk, logit in ranked
+    ]
+
+
+def rerank_chunks(
+    question: str,
+    chunks: list[ScoredChunk],
+    *,
+    top_k: int = RERANK_TOP_K,
+) -> list[ScoredChunk]:
+    """Return the most relevant chunks ranked and calibrated by Cross Encoder."""
+
+    if not chunks or top_k <= 0:
+        return []
+    return rerank_all(question, chunks)[:top_k]
+
+
+def count_clusters(chunks: Sequence[ScoredChunk], threshold: float) -> int:
+    """Count how many candidate chunks meet or exceed the cluster threshold."""
+
+    return sum(1 for chunk in chunks if chunk.score is not None and chunk.score >= threshold)
+
+
+def calculate_margin(chunks: Sequence[ScoredChunk]) -> float:
+    """Calculate the score difference between top 1 and top 2 chunk."""
+
+    if not chunks or chunks[0].score is None:
+        return 0.0
+    if len(chunks) == 1 or chunks[1].score is None:
+        return float(chunks[0].score)
+    return max(0.0, float(chunks[0].score) - float(chunks[1].score))
+

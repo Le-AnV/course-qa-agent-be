@@ -141,7 +141,7 @@ DEFAULT_BLOCKED_WEB_DOMAINS: list[str] = [
 ]
 
 # Number of ranked web results kept for citation after reputation filtering
-SERPAPI_MAX_RESULTS: int = int(os.getenv("SERPAPI_MAX_RESULTS", "5"))
+SERPAPI_MAX_RESULTS: int = int(os.getenv("SERPAPI_MAX_RESULTS", "3"))
 
 # Google results requested before filtering (a wider net keeps 5 good hits)
 SERPAPI_FETCH_RESULTS: int = int(os.getenv("SERPAPI_FETCH_RESULTS", "10"))
