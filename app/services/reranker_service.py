@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 import logging
 import math
 import os
 import threading
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from app.config import settings

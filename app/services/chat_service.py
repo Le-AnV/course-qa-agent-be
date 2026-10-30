@@ -665,7 +665,7 @@ async def stream_chat(
                     ):
                         retrieval_kwargs["search_query_en"] = search_query_en
                 except Exception:
-                    pass
+                    logger.debug("Could not pass search_query_en to retrieve_for_chat", exc_info=True)
 
             decision = await asyncio.to_thread(
                 chat_retrieval_service.retrieve_for_chat,
@@ -831,7 +831,8 @@ async def stream_chat(
                     try:
                         search_q = f"{class_name} C++ pointer reference" if ("ptr" in student_code or "*" in student_code) else f"{class_name} {standalone_question or 'programming syntax reference'}"
                         web_results = await asyncio.to_thread(rag_service.search_internet, search_q)
-                    except Exception:
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Web search for code help failed: %s", exc)
                         web_results = []
                 slide_context = _course_context(decision.chunks) if decision.chunks else ""
                 code_block = f"### Student Code / Error Trace:\n```\n{student_code}\n```"
@@ -1098,8 +1099,8 @@ async def stream_chat(
                         )
                         if web_ref:
                             sources.extend(rag_service.internet_citations(web_ref[:2]))
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Web reference search failed: %s", exc)
                 if not sources and class_record is not None:
                     sources.append(
                         rag_service.Source(
@@ -1124,7 +1125,7 @@ async def stream_chat(
                     followup_questions = await asyncio.wait_for(
                         suggestion_task, timeout=SUGGESTION_PREFETCH_GRACE_SECONDS
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.warning("Suggestion prefetch wait timed out or failed: %s", exc)
                     if suggestion_task and not suggestion_task.done():
                         suggestion_task.cancel()
