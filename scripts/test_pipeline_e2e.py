@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+
 import httpx
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -101,27 +102,27 @@ async def test_scenarios():
                             try:
                                 payload = json.loads(data_str)
                                 answer_tokens.append(payload.get("text", ""))
-                            except Exception:
+                            except (AttributeError, TypeError, ValueError):
                                 answer_tokens.append(data_str)
                         elif current_event == "citation":
                             try:
                                 payload = json.loads(data_str)
                                 citations.append(payload)
-                            except Exception:
+                            except (AttributeError, TypeError, ValueError):
                                 citations.append(data_str)
                         elif current_event == "suggestions":
                             try:
                                 payload = json.loads(data_str)
                                 suggestions.extend(payload.get("questions", []))
-                            except Exception:
+                            except (AttributeError, TypeError, ValueError):
                                 suggestions.append(data_str)
                         elif current_event == "done":
                             print("[Done Event Received]")
                             try:
                                 payload = json.loads(data_str)
                                 action = payload.get("action")
-                            except Exception:
-                                pass
+                            except (AttributeError, TypeError, ValueError):
+                                action = None
 
             full_answer = "".join(answer_tokens).strip()
             print(f"Action: {action}")
