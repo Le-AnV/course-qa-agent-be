@@ -99,6 +99,7 @@ def test_search_internet_drops_blocked_sites_and_sorts_by_tier(monkeypatch) -> N
 
     monkeypatch.setattr(settings, "serpapi_api_key", "test-key")
     monkeypatch.setattr(rag_service, "_get_search_client", lambda: FakeClient())
+    monkeypatch.setattr(rag_service, "SERPAPI_MAX_RESULTS", 5)
 
     results = rag_service.search_internet("JavaScript closures")
 
@@ -135,4 +136,4 @@ def test_search_internet_keeps_at_most_five_results(monkeypatch) -> None:
     monkeypatch.setattr(settings, "serpapi_api_key", "test-key")
     monkeypatch.setattr(rag_service, "_get_search_client", lambda: FakeClient())
 
-    assert len(rag_service.search_internet("python email")) == 5
+    assert len(rag_service.search_internet("python email")) == search_config.SERPAPI_MAX_RESULTS
