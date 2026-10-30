@@ -101,3 +101,32 @@ def test_markdown_chunker_metadata_override_safety():
     assert chunks[0].metadata["file_name"] == "test.pptx"
 
 
+def test_markdown_chunker_locates_page_across_leading_page_break():
+    markdown = "\n\n<!-- page break -->\n\nC++ Tutorial \n\nThis is page two content.\n"
+    chunks = markdown_chunker(markdown, metadata={"file_name": "cpp_tutorial.pdf"})
+
+    target = next(c for c in chunks if "This is page two content." in c.page_content)
+    assert target.metadata["page_number"] == 2
+
+
+def test_markdown_chunker_locates_page_for_unstripped_deep_header():
+    markdown = (
+        "Page one body text.\n\n<!-- page break -->\n\n"
+        "# Copyright Page\n"
+        "###### \uf0e3 Copyright 2025 by Tutorials Point (I) Pvt. Ltd.  \nAll rights reserved.\n"
+    )
+    chunks = markdown_chunker(markdown, metadata={"file_name": "cpp_tutorial.pdf"})
+
+    target = next(c for c in chunks if "Copyright 2025" in c.page_content)
+    assert target.metadata["page_number"] == 2
+
+
+def test_markdown_chunker_advances_past_duplicate_chunk_text_across_pages():
+    body = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda"
+    markdown = f"# One\n{body}\n\n<!-- page break -->\n\n# Two\n{body}\n"
+    chunks = markdown_chunker(markdown, metadata={"file_name": "duplicate.pdf"})
+
+    second = next(c for c in chunks if c.metadata.get("Header 1") == "Two")
+    assert second.metadata["page_number"] == 2
+
+
