@@ -23,6 +23,7 @@ from app.routers.class_config import router as class_config_router
 from app.routers.documents import router as documents_router
 from app.routers.history import router as history_router
 from app.routers.student.router import router as student_router
+from app.routers.tickets import router as tickets_router
 from app.services import reranker_service
 from app.services.document_service import fail_stale_processing
 from app.services.system_health_service import build_health
@@ -82,6 +83,7 @@ app.include_router(documents_router)
 app.include_router(history_router)
 app.include_router(student_router)
 app.include_router(citations_router)
+app.include_router(tickets_router)
 
 
 
