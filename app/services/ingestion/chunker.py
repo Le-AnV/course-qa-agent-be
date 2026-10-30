@@ -1,6 +1,7 @@
 """Document splitter and chunker module."""
 
 import re
+import unicodedata
 
 from langchain_core.documents import Document
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
@@ -21,6 +22,42 @@ def _get_deepest_header(metadata: dict) -> str | None:
         or metadata.get("Header 2")
         or metadata.get("Header 1")
     )
+
+
+_LEADING_MARKER_RE = re.compile(
+    r"(?:(?:<!--\s*(?:page\s*break|Slide\s*number:\s*\d+)\s*-->)\s*)+",
+    re.IGNORECASE,
+)
+
+
+def _is_separator(char: str) -> bool:
+    """Treat whitespace and control/private-use glyphs as match separators."""
+    return char.isspace() or unicodedata.category(char).startswith("C")
+
+
+def _normalize_text(text: str) -> str:
+    """Collapse whitespace and control glyphs so splitter output can be matched."""
+    mapped = "".join(" " if _is_separator(char) else char for char in text)
+    return " ".join(mapped.split())
+
+
+def _normalize_with_offsets(text: str) -> tuple[str, list[int]]:
+    """Collapse separator runs and map each normalized character to its raw offset."""
+    chars: list[str] = []
+    offsets: list[int] = []
+    in_space = False
+    for position, char in enumerate(text):
+        if _is_separator(char):
+            if in_space:
+                continue
+            chars.append(" ")
+            offsets.append(position)
+            in_space = True
+        else:
+            chars.append(char)
+            offsets.append(position)
+            in_space = False
+    return "".join(chars), offsets
 
 
 def markdown_chunker(
@@ -60,6 +97,8 @@ def markdown_chunker(
     ]
 
     search_start = 0
+    normalized_markdown, raw_offsets = _normalize_with_offsets(markdown)
+    normalized_start = 0
 
     for chunk in chunks:
         # 1. Clean markdown styling inside extracted header metadata
@@ -70,22 +109,33 @@ def markdown_chunker(
         # 2. Inherit base document metadata (base metadata first, chunk metadata overrides)
         chunk.metadata = {**meta, **chunk.metadata}
 
-        # 3. Locate chunk start position in original markdown text
-        snippet = chunk.page_content[:50].strip()
-        idx = markdown.find(snippet, search_start) if snippet else search_start
-        if idx != -1:
+        # 3. Locate chunk start position in original markdown text. The header
+        # splitter re-renders line breaks and marker spacing, so match on a
+        # whitespace-normalized copy and map back to raw offsets; advance the
+        # cursor past the previous match to skip duplicated boilerplate.
+        snippet = _normalize_text(chunk.page_content)[:50].strip()
+        normalized_idx = (
+            normalized_markdown.find(snippet, normalized_start) if snippet else -1
+        )
+        if normalized_idx != -1:
+            idx = raw_offsets[normalized_idx]
             search_start = idx
+            normalized_start = normalized_idx + len(snippet)
         else:
             idx = search_start
 
         # 4. Resolve locator & pagination based on structural markers
         deepest_header = _get_deepest_header(chunk.metadata)
+        locator_position = idx
+        leading_marker = _LEADING_MARKER_RE.match(markdown, idx)
+        if leading_marker:
+            locator_position = leading_marker.end()
 
         if slide_matches:
             # PowerPoint presentations track slide numbers
             current_slide = 1
             for sm in slide_matches:
-                if sm.start() <= idx:
+                if sm.start() <= locator_position:
                     current_slide = int(sm.group(1))
                 else:
                     break
@@ -94,7 +144,7 @@ def markdown_chunker(
             chunk.metadata["locator"] = f"Slide {current_slide}"
         elif page_breaks:
             # Paginated documents (PDF, Word) track physical page breaks
-            page_num = 1 + sum(1 for pb in page_breaks if pb < idx)
+            page_num = 1 + sum(1 for pb in page_breaks if pb < locator_position)
             chunk.metadata["page_number"] = page_num
             chunk.metadata["locator"] = f"Page {page_num}"
         else:
