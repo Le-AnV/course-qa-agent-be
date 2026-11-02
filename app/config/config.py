@@ -240,7 +240,7 @@ class Settings(BaseSettings):
     chunk_size: int = Field(default=800, validation_alias="CHUNK_SIZE")
     chunk_overlap: int = Field(default=120, validation_alias="CHUNK_OVERLAP")
     separators: list[str] = Field(
-        default=["\n\n", "\n", ". ", "? ", "! "],
+        default=["\n\n", "\n", ". ", "? ", "! ", "; ", " ", ""],
         validation_alias="SEPARATORS",
     )
     headers_to_split_on: list[tuple[str, str]] = Field(

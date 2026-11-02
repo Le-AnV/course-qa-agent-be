@@ -33,6 +33,7 @@ from app.config import search_config, settings
 from app.core.prompt_manager import get_prompt_manager
 from app.models.system_config import SystemConfig
 from app.services import citation_service, document_service
+from app.services.ingestion.chunker import build_chunk_context
 
 logger = logging.getLogger(__name__)
 
@@ -552,13 +553,14 @@ def answer_question(
             context=context,
             question=cleaned,
         )
+        answer = text or _source_only_answer(sources)
         return QaAnswer(
-            answer=text or _source_only_answer(sources),
+            answer=answer,
             source=SOURCE_CURRICULUM,
             used_web_search=False,
             threshold=decision.threshold,
             top_score=decision.top_score,
-            citations=tuple(sources),
+            citations=tuple(cited_page_citations(decision.chunks, answer, question=cleaned)),
         )
 
     searcher = internet_search or search_internet
@@ -582,18 +584,20 @@ def answer_question(
         context=context,
         question=cleaned,
     )
+    answer = text or _source_only_answer(sources)
+    used = cited_markers(answer)
     return QaAnswer(
-        answer=text or _source_only_answer(sources),
+        answer=answer,
         source=SOURCE_INTERNET,
         used_web_search=True,
         threshold=decision.threshold,
         top_score=decision.top_score,
-        citations=tuple(sources),
+        citations=tuple(source for source in sources if source.index in used),
     )
 
 
 def curriculum_citations(chunks: Sequence[ScoredChunk]) -> list[Source]:
-    """Build E5 citations from the curriculum chunks used for an answer."""
+    """Build provisional source labels; final passages require answer markers."""
 
     return [
         Source(
@@ -603,7 +607,6 @@ def curriculum_citations(chunks: Sequence[ScoredChunk]) -> list[Source]:
             snippet=chunk.content[:CITATION_SNIPPET_LENGTH],
             document_id=chunk.document_id or None,
             page=chunk.page,
-            highlights=(chunk.content,),
         )
         for index, chunk in enumerate(chunks, start=1)
     ]
@@ -612,16 +615,15 @@ def curriculum_citations(chunks: Sequence[ScoredChunk]) -> list[Source]:
 def cited_markers(answer: str) -> set[int]:
     """Return the ``[n]`` / ``[n, m]`` source markers the answer actually uses."""
 
-    markers: set[int] = set()
-    for group in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", answer):
-        markers.update(int(part) for part in group.split(","))
-    return markers
+    return citation_service.cited_markers(answer)
 
 
 def cited_page_citations(
     chunks: Sequence[ScoredChunk],
     answer: str,
     max_citations: int = 3,
+    *,
+    question: str = "",
 ) -> list[Source]:
     """Citations for only the pages whose passages the answer referenced.
 
@@ -630,29 +632,31 @@ def cited_page_citations(
     that page. An answer without markers (greeting, "not covered") yields no
     citations at all.
     """
-    _, verified_markers = citation_service.verify_citations(answer, chunks)
-    used = set(verified_markers) if verified_markers else cited_markers(answer)
+    passages = citation_service.extract_cited_passages(answer, chunks, question=question)
 
     grouped: dict[tuple[str, int | None], list[tuple[int, ScoredChunk]]] = {}
     for index, chunk in enumerate(chunks, start=1):
-        if index not in used:
+        if index not in passages:
             continue
         grouped.setdefault((chunk.document_id, chunk.page), []).append((index, chunk))
 
     sources: list[Source] = []
     for position, ((document_id, page), members) in enumerate(grouped.items(), start=1):
         first = members[0][1]
-        best_sentence = citation_service.extract_best_sentence(first.content, answer)
+        highlights = tuple(dict.fromkeys(
+            passage for index, _chunk in members for passage in passages[index]
+        ))
+        preview = highlights[0] if highlights else citation_service.extract_best_sentence(first.content)
         sources.append(
             Source(
                 index=position,
                 kind=SOURCE_CURRICULUM,
                 title=first.title,
-                snippet=(best_sentence or first.content)[:CITATION_SNIPPET_LENGTH],
+                snippet=preview[:CITATION_SNIPPET_LENGTH],
                 document_id=document_id or None,
                 page=page,
                 indexes=tuple(index for index, _ in members),
-                highlights=tuple(chunk.content for _, chunk in members),
+                highlights=highlights,
             )
         )
     return sources[:max_citations]
@@ -678,7 +682,8 @@ def internet_citations(results: Sequence[WebResult], *, start_index: int = 1) ->
 
 def _curriculum_context_line(index: int, chunk: ScoredChunk) -> str:
     locator = f", page {chunk.page}" if chunk.page is not None else ""
-    return f"[{index}] {chunk.title}{locator}\n{chunk.content}"
+    content = build_chunk_context(chunk.content, chunk.metadata)
+    return f"[{index}] {chunk.title}{locator}\n{content}"
 
 
 def _no_source_answer(decision: RetrievalDecision) -> QaAnswer:

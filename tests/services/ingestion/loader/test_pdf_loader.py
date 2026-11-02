@@ -27,6 +27,30 @@ def test_pdf_loader_success(tmp_path: Path):
         assert "img_0.png" in result["images"]
 
 
+def test_pdf_loader_with_page_chunks(tmp_path: Path):
+    fake_pdf = tmp_path / "multipage.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4 dummy")
+
+    chunks_data = [
+        {"metadata": {"page": 2}, "text": ""},
+        {"metadata": {"page": 5}, "text": "Page 5 content"},
+        {"metadata": {"page": 9}, "text": "Page 9 content"},
+    ]
+
+    with (
+        patch("pymupdf4llm.to_markdown", return_value=chunks_data),
+        patch(
+            "app.services.ingestion.loader.pdf_loader.extract_raw_embedded_images",
+            return_value={},
+        ),
+    ):
+        result = pdf_loader(fake_pdf, extract_images=False)
+        assert "<!-- Page number: 2 -->" in result["markdown"]
+        assert "<!-- Page number: 5 -->" in result["markdown"]
+        assert "<!-- Page number: 9 -->" in result["markdown"]
+        assert "Page 5 content" in result["markdown"]
+        assert "Page 9 content" in result["markdown"]
+
 
 def test_pdf_loader_without_extract_images(tmp_path: Path):
     fake_pdf = tmp_path / "test.pdf"

@@ -3,128 +3,111 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Sequence
 from pathlib import Path
 
 import pymupdf
 
-NGRAM = 3
-MIN_MATCH_RUN = 4
-MAX_SENTENCE_EXPANSION_WORDS = 25
-SENTENCE_TERMINATORS = (".", "!", "?", ";", "。", "！", "？")
+from app.services.ingestion.chunker import _fenced_ranges
+from app.services.ingestion.cleaner import _protect, _restore, _strip_emphasis
+
+_TOKEN_PATTERN = re.compile(r"\w+(?:\.\w+)*|[^\w\s]")
 
 
 def _norm(word: str) -> str:
-    return re.sub(r"\W+", "", word).lower()
+    return unicodedata.normalize("NFC", word).replace("\u00ad", "")
 
 
 def _tokens(text: str) -> list[str]:
-    """Normalized words of a passage; markdown markers and punctuation vanish."""
-    return [token for token in (_norm(word) for word in text.split()) if token]
-
-
-def _ngrams(tokens: Sequence[str]) -> set[tuple[str, ...]]:
-    return {tuple(tokens[i : i + NGRAM]) for i in range(len(tokens) - NGRAM + 1)}
-
-
-def _is_sentence_end(text: str) -> bool:
-    """Check if word text ends with sentence-terminating punctuation."""
-    clean = text.strip()
-    return bool(clean and clean[-1] in SENTENCE_TERMINATORS)
+    """Normalize source formatting without discarding signs, operators, or identifiers."""
+    text = text.strip()
+    fences = _fenced_ranges(text)
+    if fences:
+        tokens: list[str] = []
+        cursor = 0
+        for start, end in fences:
+            tokens.extend(_tokens(text[cursor:start]))
+            lines = text[start:end].splitlines()
+            opening = re.match(r"`{3,}|~{3,}", lines[0].lstrip())[0]
+            body = lines[1:]
+            if body and re.fullmatch(rf"{re.escape(opening[0])}{{{len(opening)},}}", body[-1].strip()):
+                body.pop()
+            tokens.extend(_TOKEN_PATTERN.findall(_norm("\n".join(body))))
+            cursor = end
+        tokens.extend(_tokens(text[cursor:]))
+        return tokens
+    text, blocks = _protect(text)
+    # PDF extraction adds these formatting tags; they are not visible source text.
+    text = re.sub(r"</?(?:u|mark|sup|sub)>", "", text)
+    text = re.sub(r"(?m)^[ \t]*(?:#{1,6}[ \t]+|[-+*][ \t]+)", "", text)
+    text = _strip_emphasis(text)
+    if text.startswith("|") and text.endswith("|"):
+        text = " ".join(re.split(r"(?<!\\)\|", text[1:-1])).replace(r"\|", "|")
+    text = _restore(text, blocks).replace("`", "")
+    return _TOKEN_PATTERN.findall(_norm(text))
 
 
 def _compute_page_rects(
     page: pymupdf.Page,
     passages: Sequence[str],
 ) -> list[pymupdf.Rect]:
-    """Compute highlight bounding boxes for passages with sentence expansion and noise filtering."""
+    """Match each full passage at one unique position, without sentence expansion."""
     if not passages:
         return []
 
-    grams: set[tuple[str, ...]] = set()
-    max_passage_len = 0
-    for passage in passages:
-        toks = _tokens(passage)
-        if toks:
-            max_passage_len = max(max_passage_len, len(toks))
-            grams |= _ngrams(toks)
-
-    if not grams:
-        return []
-
-    words = page.get_text("words")  # (x0, y0, x1, y1, text, block, line, n)
+    words = page.get_text("words", sort=True)  # (x0, y0, x1, y1, text, block, line, n)
     if not words:
         return []
 
-    normalized = [_norm(word[4]) for word in words]
-    total_words = len(words)
-    raw_marked = [False] * total_words
+    variants: list[tuple[list[str], list[tuple[int, ...]]]] = []
+    for dehyphenate in (False, True):
+        tokens: list[str] = []
+        spans: list[tuple[int, ...]] = []
+        index = 0
+        while index < len(words):
+            text = _norm(words[index][4])
+            indexes = (index,)
+            if text in {"•", "·", "\uf0b7"} and words[index][7] == 0:
+                index += 1
+                continue
+            if (
+                dehyphenate and index + 1 < len(words)
+                and len(text) > 1 and text.endswith("-") and text[-2].isalpha()
+                and words[index][5] == words[index + 1][5]
+                and words[index][6] != words[index + 1][6]
+                and words[index + 1][4][0].islower()
+            ):
+                text = text[:-1] + _norm(words[index + 1][4])
+                indexes = (index, index + 1)
+                index += 1
+            parts = _TOKEN_PATTERN.findall(text)
+            tokens.extend(parts)
+            spans.extend([indexes] * len(parts))
+            index += 1
+        variants.append((tokens, spans))
 
-    # 1. Match n-grams
-    for start in range(total_words - NGRAM + 1):
-        if tuple(normalized[start : start + NGRAM]) in grams:
-            for offset in range(NGRAM):
-                raw_marked[start + offset] = True
-
-    # 2. Bridge 1-2 word gaps within a passage
-    for index in range(1, total_words - 1):
-        if not raw_marked[index] and raw_marked[index - 1] and raw_marked[index + 1]:
-            raw_marked[index] = True
-
-    # 3. Filter isolated false positives (e.g. random 3-word verb phrases)
-    # If the original passage was substantial, ignore isolated runs shorter than MIN_MATCH_RUN
-    effective_min_run = min(MIN_MATCH_RUN, max_passage_len) if max_passage_len > 0 else MIN_MATCH_RUN
-    filtered_marked = [False] * total_words
-
-    i = 0
-    valid_runs: list[tuple[int, int]] = []
-    while i < total_words:
-        if raw_marked[i]:
-            run_start = i
-            while i < total_words and raw_marked[i]:
-                i += 1
-            run_end = i
-            if (run_end - run_start) >= effective_min_run:
-                valid_runs.append((run_start, run_end))
-        else:
-            i += 1
-
-    if not valid_runs:
-        return []
-
-    # 4. Expand valid runs to coherent sentence boundaries so users see full meaningful assertions
-    for run_start, run_end in valid_runs:
-        block_idx = words[run_start][5]
-
-        # Expand backwards to start of sentence or block
-        sent_start = run_start
-        expansion_count = 0
-        while sent_start > 0 and expansion_count < MAX_SENTENCE_EXPANSION_WORDS:
-            prev_word = words[sent_start - 1]
-            if prev_word[5] != block_idx:  # Crossed block boundary
-                break
-            if _is_sentence_end(prev_word[4]):  # Hit end of preceding sentence
-                break
-            sent_start -= 1
-            expansion_count += 1
-
-        # Expand forward to end of sentence or block
-        sent_end = run_end
-        expansion_count = 0
-        while sent_end < total_words and expansion_count < MAX_SENTENCE_EXPANSION_WORDS:
-            curr_word = words[sent_end - 1]
-            if _is_sentence_end(curr_word[4]):  # Finished current sentence
-                break
-            if sent_end < total_words and words[sent_end][5] != block_idx:
-                break
-            sent_end += 1
-            expansion_count += 1
-
-        for idx in range(sent_start, sent_end):
-            filtered_marked[idx] = True
-
-    rects = [pymupdf.Rect(word[:4]) for word, hit in zip(words, filtered_marked, strict=True) if hit]
-    return rects
+    selected_words: set[int] = set()
+    for passage in passages:
+        expected = _tokens(passage)
+        if not expected:
+            continue
+        matches: set[tuple[int, ...]] = set()
+        for tokens, spans in variants:
+            for start in range(len(tokens) - len(expected) + 1):
+                if tokens[start:start + len(expected)] == expected:
+                    end = start + len(expected)
+                    if (
+                        (start > 0 and spans[start - 1] == spans[start])
+                        or (end < len(spans) and spans[end - 1] == spans[end])
+                    ):
+                        continue
+                    matches.add(tuple(sorted({
+                        index for span in spans[start:end] for index in span
+                    })))
+        if len(matches) == 1:
+            selected_words.update(next(iter(matches)))
+    return [pymupdf.Rect(words[index][:4]) for index in sorted(selected_words)]
 
 
 def get_highlight_rects(

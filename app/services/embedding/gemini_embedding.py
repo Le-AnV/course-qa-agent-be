@@ -32,7 +32,7 @@ _RETRY_DELAY_PATTERNS = (
 def _always_retry(error: BaseException) -> bool:
     """Retry provider failures unless it's a hard per-day quota exhaustion."""
     msg = str(error).lower()
-    return not ("per day limit exceeded" in msg or "requests per day" in msg)
+    return "per day limit exceeded" not in msg and "requests per day" not in msg
 
 
 def _retry_delay_seconds(error: BaseException) -> float | None:

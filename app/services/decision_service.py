@@ -250,9 +250,7 @@ def _parse_decision(content: str) -> ScopeDecision:
         raise ValueError(f"Scope decision is not valid JSON: {content!r}") from exc
 
     if not isinstance(payload, dict):
-        raise ValueError(  # noqa: TRY004 - payload content error, callers catch ValueError
-            f"Scope decision is not a JSON object: {content!r}"
-        )
+        raise TypeError(f"Scope decision is not a JSON object: {content!r}")
 
     # Robust normalization before validation
     try:

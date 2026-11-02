@@ -1,8 +1,10 @@
 """Markdown cleaner for ingestion pipelines.
 
 Normalizes Markdown extracted from PDF, Word, PowerPoint, and text loaders before
-chunking and embedding. Code, math, and HTML comments (locators such as
-`<!-- Slide number: 1 -->` or `<!-- page break -->`) are protected and restored untouched.
+chunking and embedding. Headings get standard spacing and inline emphasis is
+stripped from heading text only; body emphasis is preserved. Code, math, and
+HTML comments (locators such as `<!-- Slide number: 1 -->` or `<!-- page break -->`)
+are protected and restored untouched.
 """
 
 import re
@@ -52,8 +54,31 @@ _LINE_WRAP = re.compile(
 )
 
 _HEADING = re.compile(r"^(#{1,6})(?=[^\s#])", re.MULTILINE)  # Standardizes "##Title" -> "## Title"
+_HEADING_LINE = re.compile(r"^(#{1,6}[ \t]+)(.*)$", re.MULTILINE)
+
+# Inline emphasis inside headings only. Underscores inside words (snake_case_name) are kept.
+_EMPHASIS_PATTERNS = (
+    re.compile(r"\*\*(.+?)\*\*"),
+    re.compile(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])"),
+    re.compile(r"(?<!\w)__(.+?)__(?!\w)"),
+    re.compile(r"(?<!\w)_(?!\s)(.+?)(?<!\s)_(?!\w)"),
+    re.compile(r"~~(.+?)~~"),
+)
+
 _TRAILING_WS = re.compile(r"[ \t]+$", re.MULTILINE)
 _BLANK_LINES = re.compile(r"\n{3,}")
+
+
+def _strip_emphasis(text: str) -> str:
+    """Remove inline Markdown emphasis and collapse whitespace."""
+    for pattern in _EMPHASIS_PATTERNS:
+        text = pattern.sub(r"\1", text)
+    return " ".join(text.split())
+
+
+def _clean_heading_line(match: re.Match) -> str:
+    """Normalize the text of a single Markdown heading."""
+    return f"{match.group(1)}{_strip_emphasis(match.group(2))}"
 
 
 def _protect(text: str) -> tuple[str, list[str]]:
@@ -85,7 +110,8 @@ def clean_markdown(
     3. Invisible character cleanup and Unicode NFC normalization (essential for Vietnamese diacritics).
     4. Stripping of isolated page numbers and custom watermark lines.
     5. Repair of soft-hyphenated words and optional rejoining of soft line wraps.
-    6. Markdown syntax standardization (heading spacing, trailing whitespace, blank line collapse).
+    6. Markdown syntax standardization (heading spacing, heading emphasis, trailing whitespace,
+       blank line collapse).
     7. Single-pass restoration of protected blocks.
 
     Args:
@@ -127,8 +153,9 @@ def clean_markdown(
     if rejoin_line_wraps:
         text = _LINE_WRAP.sub(r"\1 ", text)
 
-    # 6. Normalize Markdown syntax (heading spacing, trailing whitespace, consecutive newlines).
+    # 6. Normalize Markdown syntax (heading spacing/emphasis, trailing whitespace, newlines).
     text = _HEADING.sub(r"\1 ", text)
+    text = _HEADING_LINE.sub(_clean_heading_line, text)
     text = _TRAILING_WS.sub("", text)
     text = _BLANK_LINES.sub("\n\n", text).strip()
 
