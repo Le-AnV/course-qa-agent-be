@@ -105,7 +105,7 @@ def process_document(db: Session, document_id: uuid.UUID | str) -> None:
             return
         document_service.supersede_older_versions(db, current)
         if roadmap is not None and getattr(current, "status", None) == document_service.STATUS_INDEXED:
-            document_service.save_syllabus_roadmap(db, current, roadmap)
+            document_service.replace_syllabus_roadmap(db, current, roadmap)
     except Exception as error:
         db.rollback()
         if vector_write_started:

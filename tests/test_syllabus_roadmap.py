@@ -65,6 +65,10 @@ def test_ingestion_service_extracts_and_saves_syllabus_roadmap(monkeypatch, tmp_
     def mock_activate(_db, rec):
         rec.status = "indexed"
 
+    found = MagicMock(return_value=[])
+    retired = MagicMock()
+    monkeypatch.setattr(document_service, "find_previous_syllabus_documents", found)
+    monkeypatch.setattr(document_service, "retire_previous_syllabus_documents", retired)
     monkeypatch.setattr(document_service, "supersede_older_versions", mock_activate)
     monkeypatch.setattr(document_service, "save_syllabus_roadmap", mock_save)
     monkeypatch.setattr(ingestion_service, "QdrantStore", lambda embeddings: qdrant)
@@ -73,6 +77,8 @@ def test_ingestion_service_extracts_and_saves_syllabus_roadmap(monkeypatch, tmp_
     ingestion_service.process_document(db, doc_id)
 
     assert record.status == "indexed"
+    found.assert_called_once_with(db, record)
+    retired.assert_called_once_with(db, [])
     assert "roadmap" in saved_roadmap
     roadmap_data = saved_roadmap["roadmap"]
     assert roadmap_data.topic_outline is not None
@@ -346,5 +352,172 @@ def test_reupload_syllabus_replaces_previous_roadmap_cleanly():
     assert len(units) == 2
     assert units[0].unit_title == "New Unit 1"
     assert units[1].unit_title == "New Unit 2"
+
+    db.close()
+
+
+def test_new_syllabus_retires_previous_document_and_purges_vectors(monkeypatch):
+    engine = _test_engine()
+    TestingSession = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    db = TestingSession()
+
+    class_id = uuid.uuid4()
+    trainer_id = uuid.uuid4()
+    old_doc = Document(
+        id=uuid.uuid4(),
+        class_id=class_id,
+        uploaded_by=trainer_id,
+        file_name="old_syllabus.xlsx",
+        file_type=".xlsx",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        status="indexed",
+        version=1,
+    )
+    new_doc = Document(
+        id=uuid.uuid4(),
+        class_id=class_id,
+        uploaded_by=trainer_id,
+        file_name="new_syllabus.xlsx",
+        file_type=".xlsx",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        status="indexed",
+        version=1,
+    )
+    db.add_all([old_doc, new_doc])
+    db.commit()
+
+    from app.services.ingestion.syllabus_parser import (
+        ParsedSyllabusUnit,
+        SyllabusRoadmapData,
+    )
+
+    old_roadmap = SyllabusRoadmapData(
+        topic_outline="Old outline",
+        units=[
+            ParsedSyllabusUnit(
+                unit_number=1,
+                unit_title="Old Unit 1",
+                description=None,
+                content="Old content",
+            )
+        ],
+    )
+    document_service.save_syllabus_roadmap(db, old_doc, old_roadmap)
+
+    purged: list[str] = []
+    monkeypatch.setattr(
+        document_service,
+        "purge_document_vectors",
+        lambda document_id: purged.append(str(document_id)) or 11,
+    )
+
+    new_roadmap = SyllabusRoadmapData(
+        topic_outline="New outline",
+        units=[
+            ParsedSyllabusUnit(
+                unit_number=1,
+                unit_title="New Unit 1",
+                description="Fresh",
+                content="New content",
+            )
+        ],
+    )
+    document_service.replace_syllabus_roadmap(db, new_doc, new_roadmap)
+
+    db.refresh(old_doc)
+    assert old_doc.status == "replaced"
+    assert purged == [str(old_doc.id)]
+
+    doc, outline, units = document_service.get_class_syllabus_roadmap(db, class_id)
+    assert doc.id == new_doc.id
+    assert outline == "New outline"
+    assert [unit.unit_title for unit in units] == ["New Unit 1"]
+
+    db.close()
+
+
+def test_replace_syllabus_roadmap_keeps_old_syllabus_when_save_fails(monkeypatch):
+    engine = _test_engine()
+    TestingSession = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    db = TestingSession()
+
+    class_id = uuid.uuid4()
+    trainer_id = uuid.uuid4()
+    old_doc = Document(
+        id=uuid.uuid4(),
+        class_id=class_id,
+        uploaded_by=trainer_id,
+        file_name="old_syllabus.xlsx",
+        file_type=".xlsx",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        status="indexed",
+        version=1,
+    )
+    new_doc = Document(
+        id=uuid.uuid4(),
+        class_id=class_id,
+        uploaded_by=trainer_id,
+        file_name="new_syllabus.xlsx",
+        file_type=".xlsx",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        status="indexed",
+        version=1,
+    )
+    db.add_all([old_doc, new_doc])
+    db.commit()
+
+    from app.services.ingestion.syllabus_parser import (
+        ParsedSyllabusUnit,
+        SyllabusRoadmapData,
+    )
+
+    old_roadmap = SyllabusRoadmapData(
+        topic_outline="Old outline",
+        units=[
+            ParsedSyllabusUnit(
+                unit_number=1,
+                unit_title="Old Unit 1",
+                description=None,
+                content="Old content",
+            )
+        ],
+    )
+    document_service.save_syllabus_roadmap(db, old_doc, old_roadmap)
+
+    def fail_save(_db, _record, _roadmap):
+        raise RuntimeError("database unavailable")
+
+    purge = MagicMock()
+    monkeypatch.setattr(document_service, "save_syllabus_roadmap", fail_save)
+    monkeypatch.setattr(document_service, "purge_document_vectors", purge)
+
+    try:
+        document_service.replace_syllabus_roadmap(
+            db,
+            new_doc,
+            SyllabusRoadmapData(
+                topic_outline="New outline",
+                units=[
+                    ParsedSyllabusUnit(
+                        unit_number=1,
+                        unit_title="New Unit 1",
+                        description=None,
+                        content="New content",
+                    )
+                ],
+            ),
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("save failure should propagate")
+
+    db.refresh(old_doc)
+    assert old_doc.status == "indexed"
+    purge.assert_not_called()
+    doc, outline, units = document_service.get_class_syllabus_roadmap(db, class_id)
+    assert doc.id == old_doc.id
+    assert outline == "Old outline"
+    assert [unit.unit_title for unit in units] == ["Old Unit 1"]
 
     db.close()

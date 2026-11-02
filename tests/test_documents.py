@@ -650,6 +650,33 @@ def test_delete_pending_document_skips_vector_purge(
     assert not Path(record.storage_path).exists()
 
 
+def test_delete_failed_document_purges_stale_vectors(
+    db_session, client, trainer_headers, monkeypatch
+):
+    """A failed retry can leave partial chunks behind: delete must purge them."""
+    teacher = db_session.query(User).filter(User.email == "teacher@academic.edu.vn").first()
+    class_a = db_session.query(Class).filter(Class.code == "CS101-A").first()
+    record = document_service.create_document(
+        db_session, "failed.pdf", b"%PDF-f", class_a.id, teacher
+    )
+    record.status = "failed"
+    db_session.commit()
+
+    purged_ids: list[str] = []
+
+    def fake_purge(document_id):
+        purged_ids.append(str(document_id))
+        return 3
+
+    monkeypatch.setattr(document_service, "purge_document_vectors", fake_purge)
+
+    response = client.delete(f"/api/documents/{record.id}?confirm=true", headers=trainer_headers)
+    assert response.status_code == 200
+    assert response.json()["purged_chunks"] == 3
+    assert purged_ids == [str(record.id)]
+    assert document_service.get_document(db_session, record.id) is None
+
+
 def test_delete_is_refused_when_qdrant_is_unreachable(
     db_session, client, trainer_headers, monkeypatch
 ):

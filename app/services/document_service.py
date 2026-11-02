@@ -60,7 +60,8 @@ VALID_STATUSES = frozenset(
 )
 
 # Statuses whose chunks can exist in Qdrant; delete/replace must purge them.
-VECTOR_BACKED_STATUSES = frozenset({STATUS_PROCESSING, STATUS_INDEXED})
+# ``failed`` is included because a failed retry can leave partial vectors behind.
+VECTOR_BACKED_STATUSES = frozenset({STATUS_PROCESSING, STATUS_INDEXED, STATUS_FAILED})
 
 
 class VectorPurgeError(RuntimeError):
@@ -463,6 +464,78 @@ def supersede_older_versions(db: Session, record: Document) -> int:
     return purged
 
 
+def find_previous_syllabus_documents(db: Session, record: Document) -> list[Document]:
+    """Return other syllabus documents in the class before the roadmap is replaced."""
+
+    previous_ids = [
+        row[0]
+        for row in (
+            db.query(SyllabusUnit.document_id)
+            .filter(
+                SyllabusUnit.class_id == record.class_id,
+                SyllabusUnit.document_id != record.id,
+            )
+            .distinct()
+            .all()
+        )
+    ]
+    if not previous_ids:
+        return []
+    return (
+        db.query(Document)
+        .filter(
+            Document.id.in_(previous_ids),
+            Document.id != record.id,
+        )
+        .all()
+    )
+
+
+def retire_previous_syllabus_documents(db: Session, previous_docs: list[Document]) -> int:
+    """Retire old syllabus docs after the new roadmap is safely committed.
+
+    Purge failures are logged but do not block the new syllabus: the old row is
+    still marked ``replaced`` so retrieval cannot cite stale points.
+    """
+
+    if not previous_docs:
+        return 0
+
+    purged = 0
+    for previous in previous_docs:
+        if previous.status not in {STATUS_PENDING, STATUS_REJECTED}:
+            try:
+                purged += purge_document_vectors(previous.id)
+            except VectorPurgeError:
+                logger.exception("Could not purge superseded syllabus vectors for %s", previous.id)
+
+    paths: list[Path] = []
+    for previous in previous_docs:
+        if previous.storage_path:
+            try:
+                paths.append(document_path(previous))
+            except FileNotFoundError:
+                pass
+        previous.status = STATUS_REPLACED
+        previous.failure_reason = None
+    db.commit()
+
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove superseded syllabus file %s", path, exc_info=True)
+    return purged
+
+
+def supersede_previous_syllabus_documents(db: Session, record: Document) -> int:
+    """Retire every other syllabus document in the class (one active syllabus)."""
+
+    return retire_previous_syllabus_documents(
+        db, find_previous_syllabus_documents(db, record)
+    )
+
+
 def get_document(db: Session, document_id: uuid.UUID | str) -> Document | None:
     try:
         doc_uuid = uuid.UUID(str(document_id))
@@ -539,7 +612,9 @@ def delete_document(db: Session, record: Document) -> int:
         source_path = None
 
     purged = 0
-    if record.status in VECTOR_BACKED_STATUSES:
+    # A pending/rejected file was never processed, but failed/replaced rows can
+    # still own stale points from an interrupted run, so purge them too.
+    if record.status not in {STATUS_PENDING, STATUS_REJECTED}:
         purged = purge_document_vectors(record.id)
     db.delete(record)
     db.commit()
@@ -675,6 +750,21 @@ def save_syllabus_roadmap(
         db.add(row)
         created.append(row)
     db.commit()
+    return created
+
+
+def replace_syllabus_roadmap(
+    db: Session, record: Document, roadmap: SyllabusRoadmapData
+) -> list[SyllabusUnit]:
+    """Save the new roadmap first, then retire the previous syllabus documents.
+
+    Ordering is deliberate: if saving the new roadmap fails, the old syllabus
+    stays indexed and active instead of leaving the class without a syllabus.
+    """
+
+    previous_docs = find_previous_syllabus_documents(db, record)
+    created = save_syllabus_roadmap(db, record, roadmap)
+    retire_previous_syllabus_documents(db, previous_docs)
     return created
 
 
