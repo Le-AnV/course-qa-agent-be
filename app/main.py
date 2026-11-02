@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +23,7 @@ from app.routers.class_config import router as class_config_router
 from app.routers.documents import router as documents_router
 from app.routers.history import router as history_router
 from app.routers.student.router import router as student_router
+from app.routers.tickets import router as tickets_router
 from app.services import reranker_service
 from app.services.document_service import fail_stale_processing
 from app.services.system_health_service import build_health
@@ -53,7 +54,32 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(reranker_service.warm_up)
     except Exception:
         logger.warning("Cross Encoder warm-up failed; will load on demand.", exc_info=True)
-    yield
+    expiration_task = asyncio.create_task(_expire_tickets_periodically())
+    try:
+        yield
+    finally:
+        expiration_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await expiration_task
+
+
+def _expire_tickets_once() -> int:
+    from app.services.ticket_service import expire_open_tickets
+
+    session_local = get_session_local(settings.database_url)
+    with session_local() as db:
+        return expire_open_tickets(db)
+
+
+async def _expire_tickets_periodically() -> None:
+    while True:
+        await asyncio.sleep(60)
+        try:
+            expired = await asyncio.to_thread(_expire_tickets_once)
+            if expired:
+                logger.info("Expired %s unanswered tickets after three days.", expired)
+        except Exception:
+            logger.warning("Ticket expiration pass failed; will retry.", exc_info=True)
 
 
 app = FastAPI(title="Course QA Agent API", version="0.1.0", lifespan=lifespan)
@@ -82,6 +108,7 @@ app.include_router(documents_router)
 app.include_router(history_router)
 app.include_router(student_router)
 app.include_router(citations_router)
+app.include_router(tickets_router)
 
 
 
