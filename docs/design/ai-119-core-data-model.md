@@ -55,7 +55,7 @@
 | `document.approval_status` | `PENDING`, `APPROVED`, `REJECTED` |
 | `document.processing_status` | `NOT_STARTED`, `PROCESSING`, `DONE`, `FAILED` |
 | `document_chunk.embedding_status` | `NOT_STARTED`, `PROCESSING`, `DONE`, `FAILED` |
-| `ticket.status` | `OPEN`, `IN_PROGRESS`, `RESOLVED`, `CLOSED` |
+| `ticket.status` | `OPEN`, `ANSWERED`, `RESOLVED`, `EXPIRED` |
 | `chat_message.role` | `USER`, `ASSISTANT`, `SYSTEM` |
 
 Initial supported file types: `PDF`, `DOCX`, `MD`, `TXT`, `PPT`, `PPTX`, `XLSX`, `XLS`.
