@@ -95,6 +95,22 @@ def test_clean_markdown_preserves_currency():
     assert "$10 and $20" in cleaned
 
 
+def test_clean_markdown_strips_emphasis_from_headings_only():
+    raw = """# **Bold Title**
+## *Italic Section*
+### snake_case_name
+#### ~~Strike~~
+Body keeps **bold** and _italic_ text.
+"""
+    cleaned = clean_markdown(raw)
+
+    assert "# Bold Title" in cleaned
+    assert "## Italic Section" in cleaned
+    assert "### snake_case_name" in cleaned
+    assert "#### Strike" in cleaned
+    assert "Body keeps **bold** and _italic_ text." in cleaned
+
+
 def test_clean_markdown_pipeline_and_alias():
     raw = """##Overview
 

@@ -52,16 +52,24 @@ def pdf_loader(file_path: str | Path, extract_images: bool = True) -> dict[str, 
     # Convert PDF to structured Markdown (with font-size-based headings #, ##, etc.)
     pages = pymupdf4llm.to_markdown(str(path), page_chunks=True)
     if isinstance(pages, list):
-        markdown_pages = [p.get("text", "") for p in pages if isinstance(p, dict)]
-        markdown_content = "\n\n<!-- page break -->\n\n".join(markdown_pages)
+        markdown_pages = []
+        has_text = False
+        for idx, p in enumerate(pages, start=1):
+            if isinstance(p, dict):
+                page_num = p.get("metadata", {}).get("page", idx)
+                text = p.get("text", "")
+                has_text = has_text or bool(text.strip())
+                markdown_pages.append(f"<!-- Page number: {page_num} -->\n{text}")
+        markdown_content = "\n\n".join(markdown_pages)
     else:
         markdown_content = str(pages)
+        has_text = bool(markdown_content.strip())
 
     images: dict[str, Image.Image] = {}
     if extract_images:
         images = extract_raw_embedded_images(str(path))
 
-    if not markdown_content.strip() and not images:
+    if not has_text and not images:
         raise ValueError(f"PDF file '{path.name}' is empty or contains no readable text/images.")
 
     metadata = {
@@ -71,7 +79,6 @@ def pdf_loader(file_path: str | Path, extract_images: bool = True) -> dict[str, 
         "type": "pdf",
         "loader": "pymupdf4llm",
     }
-
 
     return {
         "markdown": markdown_content,
