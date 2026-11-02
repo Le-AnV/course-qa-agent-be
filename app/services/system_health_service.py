@@ -88,9 +88,16 @@ def _check_qdrant(config: Settings) -> ComponentHealth:
 
 
 def _has_active_key(db: Session) -> bool:
-    return (
-        db.query(GeminiApiKey).filter(GeminiApiKey.status == GEMINI_KEY_ACTIVE).count() > 0
-    )
+    try:
+        return (
+            db.query(GeminiApiKey)
+            .filter(GeminiApiKey.status == GEMINI_KEY_ACTIVE)
+            .count()
+            > 0
+        )
+    except Exception:  # noqa: BLE001 - health must stay available when the DB is down
+        logger.warning("Health check: Gemini key table unreachable")
+        return False
 
 
 def _check_llm_config(config: Settings) -> ComponentHealth:
