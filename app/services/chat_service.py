@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 GENERATION_ERROR_MESSAGE = "The answer could not be generated. Please try again."
 TIMEOUT_ERROR_MESSAGE = "The answer timed out. Please try again."
-SUGGESTION_PREFETCH_GRACE_SECONDS = 15.0
+SUGGESTION_PREFETCH_GRACE_SECONDS = 4.0
 SUGGESTION_RETRY_TIMEOUT_SECONDS = 15.0
 
 
@@ -153,13 +153,10 @@ def _course_context(
 ) -> str:
     """Build numbered context matching the citation indexes."""
 
-    lines: list[str] = []
-
-    for index, chunk in enumerate(chunks, start=1):
-        locator = f", page {chunk.page}" if chunk.page is not None else ""
-        lines.append(f"[{index}] {chunk.title}{locator}\n{chunk.content}")
-
-    return "\n\n".join(lines)
+    return "\n\n".join(
+        rag_service._curriculum_context_line(index, chunk)
+        for index, chunk in enumerate(chunks, start=1)
+    )
 
 
 def _with_syllabus(

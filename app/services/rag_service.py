@@ -33,6 +33,7 @@ from app.config import search_config, settings
 from app.core.prompt_manager import get_prompt_manager
 from app.models.system_config import SystemConfig
 from app.services import citation_service, document_service
+from app.services.ingestion.chunker import build_chunk_context
 
 logger = logging.getLogger(__name__)
 
@@ -678,7 +679,8 @@ def internet_citations(results: Sequence[WebResult], *, start_index: int = 1) ->
 
 def _curriculum_context_line(index: int, chunk: ScoredChunk) -> str:
     locator = f", page {chunk.page}" if chunk.page is not None else ""
-    return f"[{index}] {chunk.title}{locator}\n{chunk.content}"
+    content = build_chunk_context(chunk.content, chunk.metadata)
+    return f"[{index}] {chunk.title}{locator}\n{content}"
 
 
 def _no_source_answer(decision: RetrievalDecision) -> QaAnswer:

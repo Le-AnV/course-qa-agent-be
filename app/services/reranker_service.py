@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from app.config import settings
+from app.services.ingestion.chunker import build_chunk_context
 from app.services.rag_service import ScoredChunk
 
 RERANK_CANDIDATES = 10
@@ -104,7 +105,7 @@ def rerank_all(
     import torch
 
     encoded = tokenizer(
-        [(question, chunk.content) for chunk in chunks],
+        [(question, build_chunk_context(chunk.content, chunk.metadata)) for chunk in chunks],
         padding=True,
         truncation=True,
         max_length=MAX_SEQUENCE_LENGTH,
