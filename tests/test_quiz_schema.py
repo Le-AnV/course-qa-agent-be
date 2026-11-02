@@ -349,6 +349,7 @@ def test_check_constraint_option_label_and_unique(db_session):
 def test_alembic_quiz_migration_upgrade_and_downgrade(tmp_path):
 
     from alembic.config import Config
+    from sqlalchemy import create_engine, text
 
     from alembic import command
 
@@ -356,12 +357,18 @@ def test_alembic_quiz_migration_upgrade_and_downgrade(tmp_path):
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{test_db}")
 
-    # Upgrade to head (includes 0032_quiz_schema)
+    # 0001 creates today's metadata, so start from the revision just before
+    # the quiz schema with only the tables that 0032/0033 reference.
+    engine = create_engine(f"sqlite:///{test_db}")
+    with engine.begin() as conn:
+        conn.execute(text('CREATE TABLE "class" (id CHAR(32) PRIMARY KEY)'))
+        conn.execute(text('CREATE TABLE "user" (id CHAR(32) PRIMARY KEY)'))
+        conn.execute(text('CREATE TABLE "ticket" (id CHAR(32) PRIMARY KEY)'))
+    engine.dispose()
+
+    command.stamp(cfg, "0031_ticket_lifecycle")
+    # Apply 0032_quiz_schema and 0033_ticket_reopened_at.
     command.upgrade(cfg, "head")
-
-    # Downgrade back 1 step
     command.downgrade(cfg, "-1")
-
-    # Upgrade to head once more
     command.upgrade(cfg, "head")
 
