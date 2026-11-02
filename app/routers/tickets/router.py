@@ -14,6 +14,7 @@ from app.schemas.tickets import (
     TicketReplyCreate,
     TicketReplyRead,
     TicketStatus,
+    TicketThreadRead,
 )
 from app.services import ticket_service
 from app.services.user_service import role_name_of
@@ -59,11 +60,41 @@ def create_ticket(
         student=user,
         class_id=payload.class_id,
         question=payload.question,
+        original_question=payload.original_question,
         agent_answer=payload.agent_answer,
         details=payload.details,
     )
     if ticket is None:
         raise HTTPException(status_code=403, detail="You are not an active member of this class.")
+    return TicketRead.model_validate(ticket)
+
+
+@router.get("/{ticket_id}", response_model=TicketThreadRead)
+def get_ticket(
+    ticket_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> TicketThreadRead:
+    _require_student(user)
+    ticket = ticket_service.get_student_ticket(db, ticket_id=ticket_id, student_id=user.id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="Ticket not found.")
+    return TicketThreadRead.model_validate(ticket)
+
+
+@router.post("/{ticket_id}/resolve", response_model=TicketRead)
+def resolve_ticket(
+    ticket_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> TicketRead:
+    _require_student(user)
+    existing = ticket_service.get_student_ticket(db, ticket_id=ticket_id, student_id=user.id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Ticket not found.")
+    ticket = ticket_service.resolve_student_ticket(db, ticket_id=ticket_id, student_id=user.id)
+    if ticket is None:
+        raise HTTPException(status_code=409, detail="Only an answered ticket can be resolved.")
     return TicketRead.model_validate(ticket)
 
 
@@ -74,13 +105,27 @@ def add_ticket_reply(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> TicketReplyRead:
-    _require_student(user)
-    reply = ticket_service.add_student_reply(
-        db,
-        ticket_id=ticket_id,
-        student_id=user.id,
-        message=payload.message,
-    )
+    role = role_name_of(user)
+    if role == "STUDENT":
+        existing = ticket_service.get_student_ticket(db, ticket_id=ticket_id, student_id=user.id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Ticket not found.")
+        if existing.status != "OPEN":
+            raise HTTPException(status_code=409, detail="Only open tickets can receive follow-up messages.")
+        reply = ticket_service.add_student_reply(
+            db, ticket_id=ticket_id, student_id=user.id, message=payload.message,
+        )
+    elif role == "TRAINER":
+        try:
+            reply = ticket_service.add_trainer_reply(
+                db, ticket_id=ticket_id, trainer_id=user.id, message=payload.message,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        if reply is None:
+            raise HTTPException(status_code=409, detail="Only open tickets can be answered.")
+    else:
+        raise HTTPException(status_code=403, detail="Only students and assigned trainers can reply.")
     if reply is None:
-        raise HTTPException(status_code=404, detail="Ticket not found.")
+        raise HTTPException(status_code=409, detail="Only open tickets can receive follow-up messages.")
     return TicketReplyRead.model_validate(reply)

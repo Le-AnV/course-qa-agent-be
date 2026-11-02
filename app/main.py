@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,7 +54,32 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(reranker_service.warm_up)
     except Exception:
         logger.warning("Cross Encoder warm-up failed; will load on demand.", exc_info=True)
-    yield
+    expiration_task = asyncio.create_task(_expire_tickets_periodically())
+    try:
+        yield
+    finally:
+        expiration_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await expiration_task
+
+
+def _expire_tickets_once() -> int:
+    from app.services.ticket_service import expire_open_tickets
+
+    session_local = get_session_local(settings.database_url)
+    with session_local() as db:
+        return expire_open_tickets(db)
+
+
+async def _expire_tickets_periodically() -> None:
+    while True:
+        await asyncio.sleep(60)
+        try:
+            expired = await asyncio.to_thread(_expire_tickets_once)
+            if expired:
+                logger.info("Expired %s unanswered tickets after three days.", expired)
+        except Exception:
+            logger.warning("Ticket expiration pass failed; will retry.", exc_info=True)
 
 
 app = FastAPI(title="Course QA Agent API", version="0.1.0", lifespan=lifespan)

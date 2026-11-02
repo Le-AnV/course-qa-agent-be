@@ -13,7 +13,7 @@ class Ticket(Base):
     __tablename__ = "ticket"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('OPEN', 'ANSWERED', 'RESOLVED')",
+            "status IN ('OPEN', 'ANSWERED', 'RESOLVED', 'EXPIRED')",
             name="ck_ticket_status",
         ),
     )
@@ -26,6 +26,7 @@ class Ticket(Base):
         Uuid, ForeignKey("user.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     question: Mapped[str] = mapped_column(Text, nullable=False)
+    original_question: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="OPEN", server_default="OPEN"

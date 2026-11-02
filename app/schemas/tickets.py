@@ -8,12 +8,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-TicketStatus = Literal["OPEN", "ANSWERED", "RESOLVED"]
+TicketStatus = Literal["OPEN", "ANSWERED", "RESOLVED", "EXPIRED"]
 
 
 class TicketCreate(BaseModel):
     class_id: uuid.UUID
     question: str = Field(min_length=1, max_length=10000)
+    original_question: str | None = Field(default=None, max_length=10000)
     agent_answer: str | None = Field(default=None, max_length=10000)
     details: str | None = Field(default=None, max_length=10000)
 
@@ -25,7 +26,7 @@ class TicketCreate(BaseModel):
             raise ValueError("Question must not be empty.")
         return cleaned
 
-    @field_validator("details", "agent_answer")
+    @field_validator("details", "agent_answer", "original_question")
     @classmethod
     def normalize_details(cls, value: str | None) -> str | None:
         if value is None:
@@ -62,15 +63,21 @@ class TicketRead(BaseModel):
     class_id: uuid.UUID
     student_id: uuid.UUID
     question: str
+    original_question: str | None = None
     agent_answer: str | None = None
     status: TicketStatus
     created_at: datetime
+
+
+class TicketThreadRead(TicketRead):
+    replies: list[TicketReplyRead] = Field(default_factory=list)
 
 
 class TicketInboxItem(TicketRead):
     student_name: str
     class_name: str
     class_code: str
+    replies: list[TicketReplyRead] = Field(default_factory=list)
 
 
 class TicketListResponse(BaseModel):

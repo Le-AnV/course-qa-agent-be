@@ -156,6 +156,34 @@ def test_student_can_create_open_ticket_and_add_follow_up(
     assert all(reply.user_id == db_session.info["student_id"] for reply in saved.replies)
 
 
+def test_trainer_answer_requires_student_confirmation_to_resolve(client, db_session):
+    created = client.post("/api/tickets", headers=_headers(db_session.info["student_id"]), json={
+        "class_id": str(db_session.info["class_id"]), "question": "Please explain this.",
+    })
+    ticket_id = created.json()["id"]
+    trainer_headers = _headers(db_session.info["trainer_id"], "trainer")
+    student_headers = _headers(db_session.info["student_id"])
+
+    reply = client.post(f"/api/tickets/{ticket_id}/replies", headers=trainer_headers,
+                        json={"message": "Here is the explanation."})
+    assert reply.status_code == 201
+    assert client.get(f"/api/tickets/{ticket_id}", headers=student_headers).json()["status"] == "ANSWERED"
+    assert client.post(f"/api/tickets/{ticket_id}/resolve", headers=student_headers).json()["status"] == "RESOLVED"
+
+
+def test_old_open_tickets_expire_in_trainer_inbox(client, db_session):
+    from datetime import UTC, datetime, timedelta
+
+    ticket = Ticket(class_id=db_session.info["class_id"], student_id=db_session.info["student_id"],
+                    question="Old question?", created_at=datetime.now(UTC) - timedelta(days=4))
+    db_session.add(ticket)
+    db_session.commit()
+
+    response = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
+    assert response.status_code == 200
+    assert response.json()["items"][0]["status"] == "EXPIRED"
+
+
 def test_student_cannot_create_ticket_for_unenrolled_class(
     client: TestClient, db_session: Session
 ) -> None:
@@ -170,24 +198,29 @@ def test_student_cannot_create_ticket_for_unenrolled_class(
 
 def test_student_question_and_selected_agent_answer_are_stored_separately(client, db_session):
     question = "Could you explain why this condition is needed?"
+    original_question = "What does list comprehension mean?"
     excerpt = "Only items matching the condition are included."
     response = client.post("/api/tickets", headers=_headers(db_session.info["student_id"]), json={
         "class_id": str(db_session.info["class_id"]),
         "question": question,
+        "original_question": original_question,
         "agent_answer": excerpt,
     })
     assert response.status_code == 201
     ticket = response.json()
     assert ticket["question"] == question
+    assert ticket["original_question"] == original_question
     assert ticket["agent_answer"] == excerpt
     db_session.expire_all()
     saved = db_session.get(Ticket, uuid.UUID(ticket["id"]))
     assert saved.question == question
+    assert saved.original_question == original_question
     assert saved.agent_answer == excerpt
     assert saved.replies == []
     inbox = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
     assert inbox.status_code == 200
     assert inbox.json()["items"][0]["question"] == question
+    assert inbox.json()["items"][0]["original_question"] == original_question
     assert inbox.json()["items"][0]["agent_answer"] == excerpt
 
 
@@ -277,8 +310,8 @@ def test_blank_question_and_follow_up_are_rejected(client, db_session):
                        json={"message": "  "}).status_code == 422
     assert client.post(f"/api/tickets/{created['id']}/replies",
                        headers=_headers(db_session.info["trainer_id"], "trainer"),
-                       json={"message": "Wrong role"}).status_code == 403
-    assert db_session.query(TicketReply).count() == 0
+                       json={"message": "Teacher answer"}).status_code == 201
+    assert db_session.query(TicketReply).count() == 1
 
 
 @pytest.fixture()
@@ -301,7 +334,7 @@ def inbox(db_session):
         ticket = Ticket(id=uuid.UUID(int=index+1), class_id=db_session.info[
             "other_class_id" if index == 3 else "class_id"],
             student_id=db_session.info["student_id"], question=f"Question {index}", status=state,
-            created_at=datetime(2026, 10, 1, tzinfo=UTC) + timedelta(minutes=min(index, 3)))
+            created_at=datetime(2026, 11, 1, tzinfo=UTC) + timedelta(minutes=min(index, 3)))
         db_session.add(ticket)
         items.append(ticket)
     private_ticket = Ticket(class_id=foreign_class.id, student_id=db_session.info["other_student_id"],
