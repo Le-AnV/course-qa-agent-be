@@ -30,7 +30,7 @@ def test_highlights_only_the_cited_passage_on_the_cited_page(tmp_path) -> None:
     source = tmp_path / "lesson.pdf"
     _make_pdf(source)
 
-    result = highlight_pdf(source, 2, ["**Water** evaporates, then condenses into clouds."])
+    result = highlight_pdf(source, 2, ["**Water** evaporates then condenses into clouds."])
 
     assert _highlight_count(result, 1) == 1
     assert _highlight_count(result, 0) == 0
@@ -78,8 +78,5 @@ def test_filters_isolated_three_word_random_matches(tmp_path) -> None:
     # Passage is about quantum mechanics, and happens to end with "is used to describe"
     passage = "Quantum mechanics governs particle behavior at nanoscale and is used to describe atoms."
     rects = get_highlight_rects(source, 1, [passage])
-    # Must highlight line 2 (y around 140), and NOT line 1 (y around 72)
-    assert len(rects) > 0
-    # All highlighted rects should be for the quantum mechanics block (y >= 130)
-    for r in rects:
-        assert r["y0"] >= 120
+    # A matching prefix cannot justify highlighting a quote absent from the page.
+    assert rects == []

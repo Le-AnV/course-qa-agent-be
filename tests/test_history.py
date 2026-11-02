@@ -464,6 +464,8 @@ def test_message_citations_survive_history_reload(client: TestClient, db_session
         "snippet": "The deadline is Friday.",
         "document_id": "doc-1",
         "page": 2,
+        "indexes": [1, 3],
+        "highlights": ["The deadline is Friday. " + "Preserve the complete source passage. " * 12],
     }
     append_res = client.post(
         f"/api/history/sessions/{session_id}/messages",
