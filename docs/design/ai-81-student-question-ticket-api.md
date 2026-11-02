@@ -1,55 +1,115 @@
-# AI-81 — Student question ticket API design
+# AI-81 — Student question ticket lifecycle
 
 ## Purpose and scope
 
-Allow an authenticated student to explicitly send a question to a trainer for a class in which the student is actively enrolled. The ticket preserves the student's question and optional excerpt from the assistant answer. The student may add details as an initial reply or add a follow-up reply later. The system never creates a ticket automatically.
+An authenticated student can explicitly send a question to the teacher assigned
+to an active class in which the student is enrolled. The ticket keeps the
+student's submitted question, the original chat question, and the assistant's
+answer when provided. Chat messages do not create tickets automatically.
 
-Ticket reply notifications, a student ticket history/list page, trainer answers, resolution and reopening are separate work and are outside this contract.
+The ticket lifecycle includes student follow-ups, a trainer reply, student
+confirmation, and automatic expiration of unanswered tickets. The trainer
+inbox presentation is handled by the companion AI-83 frontend task.
 
 ## Data model
 
-- `Ticket`: UUID `id`, `class_id`, `student_id`, `question`, nullable `agent_answer`, `status`, `created_at`.
-- New tickets start as `OPEN`. Allowed lifecycle values are `OPEN`, `ANSWERED`, and `RESOLVED`; lifecycle transitions are outside AI-81.
-- `TicketReply`: UUID `id`, `ticket_id`, `user_id`, `message`, `created_at`. Replies preserve initial details and later student follow-ups.
-- Deleting a ticket cascades its replies. Class and student references are protected from deletion.
+- `ticket`: UUID `id`, `class_id`, `student_id`, `question`, nullable
+  `original_question`, nullable `agent_answer`, `status`, and `created_at`.
+- `ticket_reply`: UUID `id`, `ticket_id`, `user_id`, `message`, and
+  `created_at`. Student details and follow-ups and trainer replies are stored
+  here.
+- Deleting a ticket cascades its replies. Class and student references are
+  protected from deletion.
+- Status values are `OPEN`, `ANSWERED`, `RESOLVED`, and `EXPIRED`.
+
+## Lifecycle
+
+| Status | Transition |
+|---|---|
+| `OPEN` | A student creates the ticket. Student follow-ups leave it open. An unanswered ticket becomes `EXPIRED` three days after creation. |
+| `ANSWERED` | The assigned trainer replies to an open ticket. |
+| `RESOLVED` | The student confirms the trainer's answer resolved the question. Only answered tickets can be resolved. |
+| `EXPIRED` | The system expires an open ticket after three days without a trainer reply. Expired tickets cannot receive replies or be resolved. |
+
+Expiration runs in a background task every 60 seconds and is also checked when
+ticket lists, ticket details, or replies are accessed.
 
 ## API contract
 
-All routes require the existing authenticated-user dependency. JSON is used for request and response bodies. UUIDs are serialized as strings; timestamps are ISO-8601.
+All routes require authentication. UUIDs are serialized as strings and
+timestamps as ISO-8601.
 
 ### `POST /api/tickets`
 
-Student explicitly creates a ticket.
+Students create a ticket for an active class in which they have an active
+enrollment. `student_id` is derived from the authenticated user.
 
 Request:
 
 ```json
 {
   "class_id": "<class UUID>",
-  "question": "<student-authored question>",
-  "agent_answer": "<optional answer excerpt>",
-  "details": "<optional initial detail>"
+  "question": "<question sent to the teacher>",
+  "original_question": "<optional original chat question>",
+  "agent_answer": "<optional assistant answer>",
+  "details": "<optional student context>"
 }
 ```
 
-`question` is required, trimmed, and 1–10,000 characters. `agent_answer` and `details` are optional, trimmed, and at most 10,000 characters. An empty optional string is treated as absent.
+`class_id` and `question` are required. Text fields are trimmed and limited to
+10,000 characters; `question` must not be empty. Empty optional text is treated
+as absent. Optional `details` is stored as the first ticket reply.
 
-Return `201 Created` with the ticket ID, class, student, question, optional answer excerpt, `OPEN` status, and creation time. A caller without the student role receives `403`. A missing/inactive class or a student without active enrollment receives `403`. Invalid payloads receive FastAPI validation errors.
+Returns `201 Created` with the ticket ID, class and student IDs, question,
+optional original question and assistant answer, `OPEN` status, and creation
+time. A caller without the student role, an inactive or missing class, or a
+student without active enrollment receives `403`. Invalid request data receives
+a validation error.
+
+### `GET /api/tickets/{ticket_id}`
+
+The student who owns the ticket reads its details and replies. A different
+student or unknown ticket ID receives `404`; users with another role receive
+`403`.
 
 ### `POST /api/tickets/{ticket_id}/replies`
 
-The owning student adds a detail/follow-up message. Request: `{ "message": "..." }`; message is trimmed and 1–10,000 characters. Return `201 Created` with reply ID, ticket ID, author ID, message, and timestamp. A non-student receives `403`; a ticket not owned by the student returns `404` to avoid disclosing another student's ticket.
+Students may add a follow-up to their own `OPEN` ticket. A trainer assigned to
+the ticket's class may reply to an `OPEN` ticket; the trainer reply changes its
+status to `ANSWERED`.
 
-## Authorization and transaction rules
+Request: `{ "message": "<reply>" }`. The message is trimmed, must not be empty,
+and is limited to 10,000 characters. Returns `201 Created` with the reply ID,
+ticket ID, author ID, message, and timestamp. A non-assigned trainer receives
+`403`; an unauthorized student ticket lookup returns `404`; a ticket that
+cannot receive a reply returns `409`.
 
-- Derive student identity from the authenticated user; never accept `student_id` from the request.
-- Verify active class and active enrollment on creation.
-- Restrict reply reads/writes to the ticket owner. Reply creation does not change ticket status.
-- Persist ticket and optional initial reply in one database transaction.
-- The student must explicitly submit the form; rendering an answer or giving negative feedback alone has no server-side effect.
+### `POST /api/tickets/{ticket_id}/resolve`
 
-## Compatibility and verification
+The owning student confirms an `ANSWERED` ticket and changes its status to
+`RESOLVED`. A ticket not found for that student returns `404`; a ticket that is
+not `ANSWERED` returns `409`.
 
-The nullable `agent_answer` field preserves compatibility with clients that only send a question. Migration 0029 adds it after the ticket table migration; existing tickets remain valid.
+### `GET /api/tickets`
 
-Tests should cover successful creation and follow-up, role and enrollment authorization, inactive/missing class, ownership isolation, input validation, and persistence of optional fields. The implementation's focused command is `uv run pytest tests/tickets -q`.
+Trainers list tickets only for their assigned classes. Optional query
+parameters are `class_id`, `status`, `page` (default `1`), and `page_size`
+(default `20`, maximum `100`). Results are ordered newest first and returned
+with `items`, `total`, `page`, and `page_size`. Filtering by a class not
+assigned to the trainer returns `403`.
+
+## Database migrations
+
+- `0028_student_tickets` creates `ticket` and `ticket_reply`.
+- `0029_ticket_agent_answer` adds the optional assistant answer.
+- `0030_ticket_original_question` adds the optional original chat question.
+- `0031_ticket_lifecycle` allows the `EXPIRED` status and normalizes existing
+  expired statuses to `OPEN` when downgraded.
+
+## Verification
+
+Focused backend tests:
+
+```powershell
+uv run pytest tests/tickets/test_ticket_router.py tests/tickets/test_migration.py -q
+```
