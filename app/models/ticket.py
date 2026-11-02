@@ -31,6 +31,10 @@ class Ticket(Base):
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="OPEN", server_default="OPEN"
     )
+    # Starts a fresh expiration window when a resolved ticket is reopened.
+    reopened_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

@@ -77,7 +77,7 @@ async def _expire_tickets_periodically() -> None:
         try:
             expired = await asyncio.to_thread(_expire_tickets_once)
             if expired:
-                logger.info("Expired %s unanswered tickets after three days.", expired)
+                logger.info("Expired %s unanswered tickets after seven days.", expired)
         except Exception:
             logger.warning("Ticket expiration pass failed; will retry.", exc_info=True)
 

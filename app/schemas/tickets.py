@@ -77,6 +77,7 @@ class TicketInboxItem(TicketRead):
     student_name: str
     class_name: str
     class_code: str
+    class_status: str = "ACTIVE"
     replies: list[TicketReplyRead] = Field(default_factory=list)
 
 
@@ -85,3 +86,21 @@ class TicketListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class TicketClassCounts(BaseModel):
+    """Open/completed totals for one class (AI-89 AC-03)."""
+
+    class_id: uuid.UUID
+    class_code: str
+    class_name: str
+    class_status: str = "ACTIVE"
+    open_count: int
+    completed_count: int
+    expired_count: int
+
+
+class TicketCountsResponse(BaseModel):
+    items: list[TicketClassCounts]
+    open_total: int
+    completed_total: int

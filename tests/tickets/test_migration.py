@@ -28,6 +28,22 @@ def test_agent_answer_migration_preserves_existing_ticket():
     engine.dispose()
 
 
+def test_reopened_at_migration_adds_an_optional_timestamp():
+    path = Path(__file__).resolve().parents[2] / "alembic/versions/0033_ticket_reopened_at.py"
+    spec = importlib.util.spec_from_file_location("ticket_reopened_at_migration", path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE ticket (id TEXT PRIMARY KEY)"))
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.upgrade()
+        columns = {column["name"]: column for column in inspect(connection).get_columns("ticket")}
+        assert columns["reopened_at"]["nullable"] is True
+    engine.dispose()
+
+
 def test_original_question_migration_preserves_existing_ticket():
     path = Path(__file__).resolve().parents[2] / "alembic/versions/0030_ticket_original_question.py"
     spec = importlib.util.spec_from_file_location("ticket_original_question_migration", path)
