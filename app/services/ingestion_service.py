@@ -9,7 +9,7 @@ from app.config import settings
 from app.core.database import get_session_local
 from app.services import document_service
 from app.services.embedding.gemini_embedding import GeminiEmbedding
-from app.services.ingestion.chunker import markdown_chunker, recursive_chunker
+from app.services.ingestion.chunker import build_chunk_context, markdown_chunker, recursive_chunker
 from app.services.ingestion.cleaner import clean_marker_markdown
 from app.services.ingestion.syllabus_parser import (
     SyllabusFormatError,
@@ -82,8 +82,11 @@ def process_document(db: Session, document_id: uuid.UUID | str) -> None:
         chunks = recursive_chunker(chunks)
         if not chunks:
             raise ValueError("Document did not produce any searchable chunks.")
+
+        embedding_texts = []
         for index, chunk in enumerate(chunks):
             chunk.metadata["chunk_index"] = index
+            embedding_texts.append(build_chunk_context(chunk.page_content, chunk.metadata))
 
         current = document_service.get_document(db, document_id)
         if current is None or current.status != document_service.STATUS_PROCESSING:
@@ -94,7 +97,9 @@ def process_document(db: Session, document_id: uuid.UUID | str) -> None:
         # points first to make retries idempotent.
         document_service.purge_document_vectors(record.id)
         vector_write_started = True
-        QdrantStore(embeddings=GeminiEmbedding(db=db)).add_documents(chunks)
+        QdrantStore(embeddings=GeminiEmbedding(db=db)).add_documents(
+            chunks, embedding_texts=embedding_texts
+        )
 
         current = document_service.get_document(db, document_id)
         if current is None or current.status != document_service.STATUS_PROCESSING:

@@ -273,9 +273,7 @@ def test_delete_points_by_document_id_against_real_qdrant_semantics():
     # Only the other document's chunk survives (AC-02: no answers from doc-1).
     remaining = client.count(collection_name="test_col", exact=True).count
     assert remaining == 1
-    assert [p.payload["metadata"]["document_id"] for p in client.scroll("test_col")[0]] == [
-        "doc-2"
-    ]
+    assert [p.payload["metadata"]["document_id"] for p in client.scroll("test_col")[0]] == ["doc-2"]
 
 
 @patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
@@ -320,3 +318,102 @@ def test_similarity_search_with_score_without_class_has_no_filter(
     kwargs = mock_vector_store_instance.similarity_search_with_score.call_args.kwargs
     assert kwargs["filter"] is None
     assert kwargs["k"] == settings.retriever_top_k
+
+
+@patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
+@patch("app.services.vector_store.qdrant_store.QdrantClient")
+def test_add_documents_with_embedding_texts_stores_clean_content(
+    mock_qdrant_client, mock_qdrant_vector_store
+):
+    """Contextual text is embedded while the payload keeps the clean page_content."""
+    mock_client_instance = mock_qdrant_client.return_value
+    mock_client_instance.collection_exists.return_value = True
+    mock_vector_store_instance = mock_qdrant_vector_store.return_value
+    mock_vector_store_instance.content_payload_key = "page_content"
+    mock_vector_store_instance.metadata_payload_key = "metadata"
+
+    embeddings = MagicMock()
+    embeddings.embed_documents.return_value = [[0.1, 0.2], [0.3, 0.4]]
+    store = QdrantStore(embeddings=embeddings, url="dummy", collection_name="dummy")
+    docs = [
+        Document(page_content="clean one", metadata={"document_id": "doc-1"}),
+        Document(page_content="clean two", metadata={"document_id": "doc-1"}),
+    ]
+    embedding_texts = ["File: lesson.pdf\nclean one", "File: lesson.pdf\nclean two"]
+
+    point_ids = store.add_documents(docs, embedding_texts=embedding_texts)
+
+    embeddings.embed_documents.assert_called_once_with(embedding_texts)
+    mock_vector_store_instance.add_documents.assert_not_called()
+    assert len(point_ids) == 2
+
+    points = mock_client_instance.upsert.call_args.kwargs["points"]
+    assert [p.payload["page_content"] for p in points] == ["clean one", "clean two"]
+    assert [p.payload["metadata"] for p in points] == [
+        {"document_id": "doc-1"},
+        {"document_id": "doc-1"},
+    ]
+
+
+def test_add_documents_rejects_mismatched_embedding_texts():
+    """A caller bug must fail loudly instead of silently embedding page_content."""
+    store = QdrantStore.__new__(QdrantStore)
+
+    with pytest.raises(ValueError, match="embedding_texts"):
+        store.add_documents(
+            [Document(page_content="one"), Document(page_content="two")],
+            embedding_texts=["only one"],
+        )
+
+
+@patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
+@patch("app.services.vector_store.qdrant_store.QdrantClient")
+def test_add_documents_batches_upsert(mock_qdrant_client, mock_qdrant_vector_store):
+    """Large uploads are split so one Qdrant request cannot grow without bound."""
+    mock_client_instance = mock_qdrant_client.return_value
+    mock_client_instance.collection_exists.return_value = True
+    mock_vector_store_instance = mock_qdrant_vector_store.return_value
+    mock_vector_store_instance.content_payload_key = "page_content"
+    mock_vector_store_instance.metadata_payload_key = "metadata"
+
+    embeddings = MagicMock()
+    embeddings.embed_documents.return_value = [[0.1]] * 70
+    store = QdrantStore(embeddings=embeddings, url="dummy", collection_name="dummy")
+    docs = [Document(page_content=f"chunk {i}") for i in range(70)]
+
+    point_ids = store.add_documents(docs, embedding_texts=[doc.page_content for doc in docs])
+
+    assert len(point_ids) == 70
+    embeddings.embed_documents.assert_called_once()
+    assert len(embeddings.embed_documents.call_args.args[0]) == 70
+    assert [len(call.kwargs["points"]) for call in mock_client_instance.upsert.call_args_list] == [
+        64,
+        6,
+    ]
+
+
+@patch("time.sleep", return_value=None)
+@patch("app.services.vector_store.qdrant_store.QdrantVectorStore")
+@patch("app.services.vector_store.qdrant_store.QdrantClient")
+def test_add_documents_retries_only_upsert_for_embedding_texts(
+    mock_qdrant_client, mock_qdrant_vector_store, mock_sleep
+):
+    """A transient Qdrant failure must not re-run the embedding calls."""
+    mock_client_instance = mock_qdrant_client.return_value
+    mock_client_instance.collection_exists.return_value = True
+    mock_client_instance.upsert.side_effect = [Exception("Network Error"), None]
+    mock_vector_store_instance = mock_qdrant_vector_store.return_value
+    mock_vector_store_instance.content_payload_key = "page_content"
+    mock_vector_store_instance.metadata_payload_key = "metadata"
+
+    embeddings = MagicMock()
+    embeddings.embed_documents.return_value = [[0.1]]
+    store = QdrantStore(embeddings=embeddings, url="dummy", collection_name="dummy")
+
+    store.add_documents(
+        [Document(page_content="clean")],
+        embedding_texts=["File: lesson.pdf\nclean"],
+    )
+
+    assert embeddings.embed_documents.call_count == 1
+    assert mock_client_instance.upsert.call_count == 2
