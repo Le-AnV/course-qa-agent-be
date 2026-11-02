@@ -46,6 +46,8 @@ def test_health_reports_unconfigured_llm_without_external_call(monkeypatch):
     """Fast path reports LLM readiness only (no Gemini call)."""
     monkeypatch.setattr(health, "_check_database", lambda db: _up("db"))
     monkeypatch.setattr(health, "_check_qdrant", lambda cfg: _up("qdrant"))
+    # The LLM key pool lookup needs a live DB; keep this test on the fast path.
+    monkeypatch.setattr(health, "_has_active_key", lambda db: False)
 
     response = client.get("/health")
 
