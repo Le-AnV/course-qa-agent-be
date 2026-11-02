@@ -19,6 +19,18 @@ def _clean_snippet(text: str) -> str:
     return text.strip()
 
 
+def normalize_search_url(url: str | None) -> str:
+    """Make provider-relative redirect URLs safe to store and open."""
+    cleaned = (url or "").strip()
+    if not cleaned:
+        return ""
+    if cleaned.startswith("//"):
+        cleaned = f"https:{cleaned}"
+    if cleaned.startswith(("/goto?url=", "goto?url=")):
+        return f"https://www.google.com/{cleaned.lstrip('/')}"
+    return cleaned
+
+
 def _clean_word(w: str) -> str:
     return re.sub(r"^[^\w]+|[^\w]+$", "", w)
 
@@ -43,7 +55,7 @@ def build_universal_jump_url(base_url: str, snippet: str | None = None) -> str:
     """
     if not base_url:
         return ""
-    clean_base = base_url.split("#")[0]
+    clean_base = normalize_search_url(base_url).split("#")[0]
     if not snippet or not snippet.strip():
         return clean_base
 
