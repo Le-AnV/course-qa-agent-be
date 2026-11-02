@@ -184,8 +184,8 @@ def test_follow_up_uses_history_and_persists_citations(db_session: Session, monk
             "snippet": "The database assignment deadline is Friday.",
             "document_id": "policy-doc",
             "page": 3,
-            "indexes": [],
-            "highlights": [],
+            "indexes": [1],
+            "highlights": ["The database assignment deadline is Friday."],
         }
     ]
 
@@ -517,7 +517,8 @@ def test_internet_follow_up_keeps_history_and_searches_the_standalone_question(
 
     done = events[-1]
     assert done[0] == "done"
-    assert done[1]["source"] == rag_service.SOURCE_INTERNET
+    # Mid-zone questions now blend course slides with web results.
+    assert done[1]["source"] == "docs_plus_web"
     assert done[1]["used_web_search"] is True
 
     rows = db_session.scalars(

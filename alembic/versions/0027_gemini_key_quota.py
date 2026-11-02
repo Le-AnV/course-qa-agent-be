@@ -6,6 +6,7 @@ Create Date: 2026-10-28
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0027_gemini_key_quota"

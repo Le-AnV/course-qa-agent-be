@@ -617,7 +617,7 @@ async def test_retrieval_query(
         )
         if scope_decision and scope_decision.search_query_en:
             search_query_en = scope_decision.search_query_en
-    except Exception:
+    except Exception:  # noqa: S110, BLE001
         pass
 
     decision = chat_retrieval_service.retrieve_for_chat(

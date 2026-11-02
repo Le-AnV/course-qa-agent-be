@@ -1,5 +1,12 @@
 """SQLAlchemy models - source of truth for the ERD (AI-119 aligns here)."""
 
+from app.models.attendance import (  # noqa: F401
+    Attendance,
+    ClassSchedule,
+    ClassSession,
+    Holiday,
+    TicketHandover,
+)
 from app.models.chat import ChatMessage, ChatSession  # noqa: F401
 from app.models.course import Class, ClassConfig, ClassTrainer, Course, Enrollment  # noqa: F401
 from app.models.document import Document, SyllabusUnit  # noqa: F401

@@ -104,7 +104,12 @@ def test_generate_followup_questions_uses_key_pool_gateway(monkeypatch):
 
 
 def test_generate_followup_questions_insufficient_context():
-    # AC-03: Insufficient context (< 50 chars) returns []
+    # Thin context no longer yields []: an unusable model reply falls back to
+    # material-based follow-ups so the student always gets suggestions.
+    class EmptyLLM:
+        async def ainvoke(self, messages):
+            return MagicMock(content="[]")
+
     chunks = [
         ScoredChunk(
             content="Short info",
@@ -118,14 +123,17 @@ def test_generate_followup_questions_insufficient_context():
             question="What is this?",
             answer="Answer",
             chunks=chunks,
+            model=EmptyLLM(),
         )
     )
 
-    assert questions == []
+    assert 2 <= len(questions) <= 3
+    assert all(isinstance(q, str) and q.strip() for q in questions)
+    assert any("nn" in q for q in questions)  # grounded in the chunk title
 
 
 def test_generate_followup_questions_handles_llm_failure():
-    # AC-05: LLM error gracefully returns [] without throwing
+    # AC-05: LLM error never raises; it degrades to material-based follow-ups.
     class FailingLLM:
         async def ainvoke(self, messages):
             raise RuntimeError("LLM service unavailable")
@@ -147,7 +155,8 @@ def test_generate_followup_questions_handles_llm_failure():
         )
     )
 
-    assert questions == []
+    assert 2 <= len(questions) <= 3
+    assert all(isinstance(q, str) and q.strip() for q in questions)
 
 
 def test_generate_followup_questions_works_without_a_completed_answer():

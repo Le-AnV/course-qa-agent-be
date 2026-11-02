@@ -10,14 +10,13 @@ flow stays available.
 from __future__ import annotations
 
 import asyncio
-from enum import Enum
 import json
 import logging
 import re
 import time
-from typing import Any, Literal
+from enum import Enum
+from typing import Any
 
-import httpx
 from google import genai
 from google.genai import types as genai_types
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -251,7 +250,9 @@ def _parse_decision(content: str) -> ScopeDecision:
         raise ValueError(f"Scope decision is not valid JSON: {content!r}") from exc
 
     if not isinstance(payload, dict):
-        raise ValueError(f"Scope decision is not a JSON object: {content!r}")
+        raise ValueError(  # noqa: TRY004 - payload content error, callers catch ValueError
+            f"Scope decision is not a JSON object: {content!r}"
+        )
 
     # Robust normalization before validation
     try:

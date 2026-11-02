@@ -22,6 +22,7 @@ from app.services import (
     chat_retrieval_service,
     course_service,
     decision_service,
+    document_service,
     history_service,
     quick_response_service,
     rag_service,
@@ -36,6 +37,52 @@ GENERATION_ERROR_MESSAGE = "The answer could not be generated. Please try again.
 TIMEOUT_ERROR_MESSAGE = "The answer timed out. Please try again."
 SUGGESTION_PREFETCH_GRACE_SECONDS = 15.0
 SUGGESTION_RETRY_TIMEOUT_SECONDS = 15.0
+
+
+def _format_syllabus_roadmap(
+    db: Session, class_id: uuid.UUID | str
+) -> tuple[str, rag_service.ScoredChunk | None]:
+    """Load and format the structured syllabus roadmap from database if available."""
+    try:
+        doc, outline, units = document_service.get_class_syllabus_roadmap(db, class_id)
+        if not units and not outline:
+            return "", None
+
+        parts: list[str] = ["### Structured Course Syllabus Roadmap (Authoritative Source):"]
+        doc_name = doc.file_name if doc and doc.file_name else "Course Syllabus"
+        doc_id = str(doc.id) if doc and doc.id else ""
+        parts.append(f"- Source Document: {doc_name}")
+        if outline:
+            parts.append(f"- Topic Outline: {outline.strip()}")
+        if units:
+            parts.append(f"- Total Units: {len(units)}")
+            for u in units:
+                desc = f" - {u.description.strip()}" if u.description else ""
+                parts.append(f"  * Unit {u.unit_number}: {u.unit_title.strip()}{desc}")
+                if u.content and u.content.strip():
+                    for line in u.content.strip().splitlines():
+                        if line.strip():
+                            parts.append(f"      {line.strip()}")
+
+        formatted_text = "\n".join(parts)
+        chunk = rag_service.ScoredChunk(
+            content=formatted_text,
+            score=1.0,
+            metadata={
+                "title": doc_name,
+                "file_name": doc_name,
+                "document_id": doc_id,
+                "page": None,
+            },
+        )
+        return formatted_text, chunk
+    except Exception:
+        logger.warning(
+            "Failed to load structured syllabus roadmap for class %s",
+            class_id,
+            exc_info=True,
+        )
+        return "", None
 
 _HOMEWORK_PATTERNS = re.compile(
     r"(?:"
@@ -113,6 +160,29 @@ def _course_context(
         lines.append(f"[{index}] {chunk.title}{locator}\n{chunk.content}")
 
     return "\n\n".join(lines)
+
+
+def _with_syllabus(
+    context: str,
+    class_description: str | None,
+    syllabus_roadmap: str = "",
+) -> str:
+    """Prepend the class syllabus summary and structured roadmap so overview questions can be answered."""
+
+    sections: list[str] = []
+    roadmap = (syllabus_roadmap or "").strip()
+    if roadmap:
+        sections.append(roadmap)
+
+    description = (class_description or "").strip()
+    if description:
+        sections.append(f"Course syllabus summary (not a numbered source):\n{description}")
+
+    ctx = (context or "").strip()
+    if ctx:
+        sections.append(ctx)
+
+    return "\n\n".join(sections) if sections else context
 
 
 def _format_messages(
@@ -245,6 +315,7 @@ def _determine_chat_action(
     is_low_zone: bool,
     is_hw: bool,
     confidence_threshold: float = 0.8,
+    has_roadmap: bool = False,
 ) -> str:
     """Resolve the pipeline action based on the refined Truth Table."""
     raw_verdict = scope_decision.verdict if scope_decision else None
@@ -264,9 +335,13 @@ def _determine_chat_action(
         return "code_help"
     elif gate_low_confidence:
         # Gate error / timeout: fail-safe to avoid unverified web search
-        if is_high_zone or is_mid_zone:
+        if is_high_zone or is_mid_zone or has_roadmap:
             return "docs"
         return "safe_fallback"
+    elif verdict == decision_service.ScopeVerdict.LOGISTICS.value:
+        # Administrative questions use course materials only (no web search);
+        # the prompt reminds students to confirm specifics on LMS.
+        return "docs" if (decision_chunks or has_roadmap) else "safe_fallback"
     elif verdict == decision_service.ScopeVerdict.COMPARISON.value:
         if is_low_zone and not decision_chunks:
             return "web_search"
@@ -282,13 +357,13 @@ def _determine_chat_action(
             return "docs"
         elif is_mid_zone:
             return "docs_plus_web"
-        return "web_search"
+        return "docs" if has_roadmap else "web_search"
     else:
         if is_high_zone:
             return "docs"
         elif is_mid_zone:
             return "docs_plus_web"
-        return "web_search"
+        return "docs" if has_roadmap else "web_search"
 
 
 
@@ -323,7 +398,6 @@ async def stream_chat(
     followup_questions: list[str] = []
     chunks_for_suggestions: Sequence[rag_service.ScoredChunk] = ()
     suggestion_task: asyncio.Task[list[str]] | None = None
-    turn_completed = False
     stage = "conversation context"
     budget = timeout_seconds if timeout_seconds is not None else settings.chat_timeout_seconds
     trace_steps: dict[str, str] = {}
@@ -527,61 +601,6 @@ async def stream_chat(
                     )
                     return
 
-                if (
-                    scope_decision is not None
-                    and scope_decision.verdict == decision_service.ScopeVerdict.LOGISTICS.value
-                    and scope_decision.confidence >= settings.decision_confidence_threshold
-                ):
-                    await _cancel_tasks(rewrite_task)
-                    logger.info(
-                        "Scope gate handled logistics query after %.2fs (class=%s).",
-                        gate_elapsed,
-                        class_id,
-                    )
-                    syllabus_info = f": {class_description}" if class_description else "."
-                    text = (
-                        f"Regarding administrative policies, exam schedules, or assignment deadlines for {class_name}"
-                        f"{syllabus_info} "
-                        "For the most accurate schedule and deadlines, please check announcements on LMS "
-                        "or contact your course instructor directly."
-                    )
-                    answer_parts.append(text)
-                    yield _sse("token", {"text": text})
-                    saved_turn = await _persist_turn(
-                        db=db,
-                        user_id=user_id,
-                        session_id=session_id,
-                        class_id=class_id,
-                        message=message,
-                        answer=text,
-                        citations=[],
-                        excluded_from_context=False,
-                        thinking_ms=first_token_ms,
-                        trace=list(trace_steps.values()),
-                    )
-                    saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
-                    yield _sse(
-                        "done",
-                        {
-                            "source": "logistics",
-                            "used_web_search": False,
-                            "threshold": 0.0,
-                            "top_score": None,
-                            "session_id": (
-                                str(saved_session.id)
-                                if saved_session is not None
-                                else (str(session_id) if session_id is not None else None)
-                            ),
-                            "user_message_id": str(user_msg.id) if user_msg is not None else None,
-                            "assistant_message_id": (
-                                str(assistant_msg.id) if assistant_msg is not None else None
-                            ),
-                            "suggestions": [],
-                            "suggested_questions": [],
-                        },
-                    )
-                    return
-
                 yield _sse(
                     "progress", {"stage": "searching", "message": "Searching class materials"}
                 )
@@ -646,7 +665,7 @@ async def stream_chat(
                     ):
                         retrieval_kwargs["search_query_en"] = search_query_en
                 except Exception:
-                    pass
+                    logger.debug("Could not pass search_query_en to retrieve_for_chat", exc_info=True)
 
             decision = await asyncio.to_thread(
                 chat_retrieval_service.retrieve_for_chat,
@@ -675,6 +694,9 @@ async def stream_chat(
                 or scope_decision.confidence < settings.decision_confidence_threshold
             )
 
+            roadmap_text, roadmap_chunk = _format_syllabus_roadmap(db, class_id)
+            has_roadmap = bool(roadmap_text)
+
             action = _determine_chat_action(
                 has_code=has_code,
                 scope_decision=scope_decision,
@@ -684,6 +706,7 @@ async def stream_chat(
                 is_low_zone=is_low_zone,
                 is_hw=is_hw,
                 confidence_threshold=settings.decision_confidence_threshold,
+                has_roadmap=has_roadmap,
             )
 
             # Phase 1: Context & Prompt Resolution
@@ -711,12 +734,29 @@ async def stream_chat(
                         reading_message = f"Found {count} relevant {unit}"
 
                     slide_chunks = list(decision.chunks)
+                    if roadmap_chunk is not None:
+                        slide_chunks = [roadmap_chunk] + [
+                            c for c in decision.chunks
+                            if c.document_id != roadmap_chunk.document_id
+                        ]
                     messages = _format_messages(
                         "answer-course-prompt",
-                        context=_course_context(decision.chunks),
+                        context=_with_syllabus(
+                            _course_context(slide_chunks),
+                            class_description,
+                            syllabus_roadmap=roadmap_text,
+                        ),
                         question=standalone_question,
                         history=chat_context_service.format_history_context(context_history),
                     )
+                    if verdict == decision_service.ScopeVerdict.LOGISTICS.value and not is_hw:
+                        messages[0] = SystemMessage(
+                            content=str(messages[0].content)
+                            + "\n\nADMINISTRATIVE NOTE: Answer only from the provided course materials. "
+                            "Never invent exam dates, deadlines or grading details. If specific dates are not in the "
+                            "materials, say so and remind the student to check official LMS announcements or the instructor. "
+                            "Answer in the language of the student."
+                        )
                     if action == "docs_socratic" or is_hw:
                         messages[0] = SystemMessage(
                             content=(
@@ -733,6 +773,27 @@ async def stream_chat(
                             "6. Citations: Reference the provided Course Materials [1..N] where relevant. If not available, rely on standard computer science principles without apologizing or saying documents are missing.\n"
                             "7. Tone & Language: Enthusiastic, supportive, pedagogical. Always respond in the language of the student (Vietnamese)."
                         )
+                        )
+                elif roadmap_chunk is not None:
+                    reading_message = f"Found syllabus roadmap in {roadmap_chunk.title}"
+                    slide_chunks = [roadmap_chunk]
+                    messages = _format_messages(
+                        "answer-course-prompt",
+                        context=_with_syllabus(
+                            _course_context([roadmap_chunk]),
+                            class_description,
+                            syllabus_roadmap="",
+                        ),
+                        question=standalone_question,
+                        history=chat_context_service.format_history_context(context_history),
+                    )
+                    if verdict == decision_service.ScopeVerdict.LOGISTICS.value and not is_hw:
+                        messages[0] = SystemMessage(
+                            content=str(messages[0].content)
+                            + "\n\nADMINISTRATIVE NOTE: Answer only from the provided course materials. "
+                            "Never invent exam dates, deadlines or grading details. If specific dates are not in the "
+                            "materials, say so and remind the student to check official LMS announcements or the instructor. "
+                            "Answer in the language of the student."
                         )
                 else:
                     if action == "docs_socratic" or is_hw:
@@ -770,7 +831,8 @@ async def stream_chat(
                     try:
                         search_q = f"{class_name} C++ pointer reference" if ("ptr" in student_code or "*" in student_code) else f"{class_name} {standalone_question or 'programming syntax reference'}"
                         web_results = await asyncio.to_thread(rag_service.search_internet, search_q)
-                    except Exception:
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Web search for code help failed: %s", exc)
                         web_results = []
                 slide_context = _course_context(decision.chunks) if decision.chunks else ""
                 code_block = f"### Student Code / Error Trace:\n```\n{student_code}\n```"
@@ -1037,8 +1099,8 @@ async def stream_chat(
                         )
                         if web_ref:
                             sources.extend(rag_service.internet_citations(web_ref[:2]))
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Web reference search failed: %s", exc)
                 if not sources and class_record is not None:
                     sources.append(
                         rag_service.Source(
@@ -1063,7 +1125,7 @@ async def stream_chat(
                     followup_questions = await asyncio.wait_for(
                         suggestion_task, timeout=SUGGESTION_PREFETCH_GRACE_SECONDS
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.warning("Suggestion prefetch wait timed out or failed: %s", exc)
                     if suggestion_task and not suggestion_task.done():
                         suggestion_task.cancel()
@@ -1136,7 +1198,6 @@ async def stream_chat(
                     "suggested_questions": followup_questions,
                 },
             )
-            turn_completed = True
 
     except TimeoutError:
         if suggestion_task is not None:
