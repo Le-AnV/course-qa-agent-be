@@ -423,7 +423,7 @@ def _serpapi_web_results(
     answer_box = data.get("answer_box") or {}
     if isinstance(answer_box, dict) and answer_box:
         ab_title = str(answer_box.get("title") or "Google Quick Answer")
-        ab_link = str(answer_box.get("link") or "")
+        ab_link = citation_service.normalize_search_url(str(answer_box.get("link") or ""))
         ab_snippet = str(
             answer_box.get("snippet")
             or answer_box.get("answer")
@@ -437,7 +437,7 @@ def _serpapi_web_results(
         if len(web_results) >= SERPAPI_FETCH_RESULTS:
             break
         title = str(item.get("title") or "Web Source")
-        raw_url = str(item.get("link") or "")
+        raw_url = citation_service.normalize_search_url(str(item.get("link") or ""))
         snippet = str(item.get("snippet") or "").strip()
 
         rich_snippet = item.get("rich_snippet")
@@ -666,7 +666,7 @@ def internet_citations(results: Sequence[WebResult], *, start_index: int = 1) ->
             index=index,
             kind=SOURCE_INTERNET,
             title=result.title,
-            url=result.url,
+            url=citation_service.normalize_search_url(result.url),
             snippet=result.content[:CITATION_SNIPPET_LENGTH],
         )
         for index, result in enumerate(results, start=start_index)

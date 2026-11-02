@@ -3,8 +3,29 @@ from types import SimpleNamespace
 from app.services.citation_service import (
     build_universal_jump_url,
     extract_best_sentence,
+    normalize_search_url,
     verify_citations,
 )
+
+
+def test_normalize_search_url_prefixes_provider_relative_redirects():
+    assert normalize_search_url("/goto?url=CAESabc") == "https://www.google.com/goto?url=CAESabc"
+    assert normalize_search_url("goto?url=CAESabc") == "https://www.google.com/goto?url=CAESabc"
+    assert normalize_search_url("//www.google.com/goto?url=CAESabc") == (
+        "https://www.google.com/goto?url=CAESabc"
+    )
+    assert normalize_search_url("https://example.com/article") == "https://example.com/article"
+    assert normalize_search_url(None) == ""
+
+
+def test_internet_citations_normalizes_relative_redirect_url():
+    from app.services.rag_service import WebResult, internet_citations
+
+    sources = internet_citations(
+        [WebResult(title="Email guide", url="/goto?url=CAESabc", content="Send email")]
+    )
+
+    assert sources[0].url == "https://www.google.com/goto?url=CAESabc"
 
 
 def test_build_universal_jump_url_with_range():
