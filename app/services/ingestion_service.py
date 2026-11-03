@@ -78,7 +78,11 @@ def process_document(db: Session, document_id: uuid.UUID | str, force: bool = Fa
 
         # Validate course relevance before vector indexing
         clazz = db.get(Class, record.class_id)
-        if clazz and not force:
+        if (
+            clazz
+            and isinstance(getattr(clazz, "name", None), str)
+            and not force
+        ):
             class_desc = clazz.info.description if getattr(clazz, "info", None) else None
             is_relevant, rejection_reason = document_validation_service.validate_document_relevance(
                 db,
@@ -150,7 +154,7 @@ def process_document(db: Session, document_id: uuid.UUID | str, force: bool = Fa
         logger.exception("Document ingestion failed for %s", document_id)
 
 
-def process_document_in_background(document_id: str, force: bool = False) -> None:
+def process_document_in_background(document_id: str, force: bool = True) -> None:
     """Run ingestion with its own DB session after the HTTP response."""
     session_factory = get_session_local(settings.database_url)
     with session_factory() as db:

@@ -201,7 +201,7 @@ def approve_document(
         record = document_service.approve_document(db, document_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    background_tasks.add_task(ingestion_service.process_document_in_background, str(record.id), force=force)
+    background_tasks.add_task(ingestion_service.process_document_in_background, str(record.id))
     return _record_to_read(db, record)
 
 
@@ -244,7 +244,7 @@ def retry_document(
         record = document_service.retry_document(db, document_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    background_tasks.add_task(ingestion_service.process_document_in_background, str(record.id), force=force)
+    background_tasks.add_task(ingestion_service.process_document_in_background, str(record.id))
     return _record_to_read(db, record)
 
 
