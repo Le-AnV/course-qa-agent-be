@@ -37,11 +37,12 @@ Out of scope:
 | Co-trainer assigned to the class | Yes | Yes, PDF/image |
 | Trainer not assigned to the class | `403` | `403` |
 | Student | `403` | `403` |
-| Admin authenticated through `require_trainer` | Subject to the same class scope | Subject to the same class scope |
+| Admin authenticated through `require_trainer` | Yes; existing admin policy grants all classes | Yes; existing admin policy grants all classes |
 | Unauthenticated | `401` | `401` |
 
 Both endpoints use the existing `require_trainer` dependency and the existing class
-scope helper. The client never receives a filesystem path.
+scope helper. That helper returns all classes for an ADMIN and active assigned classes
+for a TRAINER. The client never receives a filesystem path.
 
 ---
 
