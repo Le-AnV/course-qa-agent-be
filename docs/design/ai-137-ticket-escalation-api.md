@@ -145,7 +145,7 @@ Affected responses:
 | `GET /api/tickets/mine` | `TicketListResponse.items[]` (`TicketInboxItem`) |
 | `GET /api/tickets/{id}` | `TicketThreadRead` |
 | `POST /api/tickets` | `TicketRead` |
-| `POST /api/tickets/{id}/replies` | Created reply plus refreshed ticket in the client flow |
+| `POST /api/tickets/{id}/replies` | No escalation fields; returns `TicketReplyRead` only. The client refreshes the ticket separately. |
 
 Semantics:
 
