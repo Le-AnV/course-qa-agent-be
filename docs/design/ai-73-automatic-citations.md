@@ -17,14 +17,18 @@ Ensures every assistant answer grounded in course materials contains transparent
 
 ## Backend Implementation
 
-1. **Hallucination Verification (`app/services/citation_service.py`):**
+1. **Hallucination Verification & Passage Selection (`app/services/citation_service.py`):**
    - `verify_citations(answer: str, chunks: Sequence[Any]) -> tuple[str, list[int]]`:
-     - Inspects all numerical markers `[k]` in the generated answer text.
+     - Inspects all numerical markers `[k]`, `[k, m]` in the generated answer text (preserving code fences and inline blocks).
      - Strips out-of-bounds indices ($k < 1$ or $k > \text{total\_chunks}$).
-     - Performs word-overlap analysis between the assertion sentence containing `[k]` and chunk $k$, filtering out common stopwords in Vietnamese and English.
-     - Strips hallucinated markers when there is zero substantive overlap.
-     - Returns sanitized answer text and the deduplicated set of verified chunk indices.
+     - Performs lexical word-overlap guard between assertion sentences and chunk content.
+     - Strips hallucinated markers when there is no supporting content overlap.
+     - Returns sanitized answer text and verified citation indices.
+   - `extract_cited_passages(answer: str, chunks: Sequence[Any], *, question: str = "") -> dict[int, tuple[str, ...]]`:
+     - Resolves cited verbatim sentences, list items, table rows, or full overview sections to populate citation highlights.
 
-2. **Source Formatting & Emission (`app/services/chat_service.py`):**
-   - Assembles `Citation` payloads with document title, storage ID, chapter, and physical page number.
-   - Emits verified citations sequentially over SSE as `citation` events immediately following token streaming.
+2. **Source Formatting & Emission (`app/services/rag_service.py`, `app/services/chat_service.py`):**
+   - `cited_page_citations(chunks, answer, max_citations=3, *, question="") -> list[Source]`:
+     - Collapses same-page chunks into single citations carrying deduplicated `indexes: tuple[int, ...]` and exact `highlights: tuple[str, ...]`.
+     - Preserves breadcrumb-enriched context formatting via `_curriculum_context_line(index, chunk)`.
+   - Emits verified citations sequentially over SSE as `citation` events immediately following token streaming, matching the `ChatCitation` schema in `app/schemas/history.py`.

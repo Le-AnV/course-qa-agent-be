@@ -16,26 +16,31 @@ Provides backend APIs and calculation engines that allow students to click any c
 
 ## Backend Implementation
 
-1. **Best Sentence Extraction (`app/services/citation_service.py`):**
-   - `extract_best_sentence(chunk_content: str, target_assertion: str) -> str`:
-     - Parses sentences from the chunk text.
-     - Computes lexical overlap with the cited assertion sentence.
-     - Returns the most representative sentence for excerpt previews and tooltips.
+1. **Passage and Best Sentence Extraction (`app/services/citation_service.py`):**
+   - `extract_best_sentence(chunk_content: str, target_assertion: str, *, question: str = "") -> str`:
+     - Selects a complete source sentence, full list item (`_LIST_ITEM_PATTERN`), table row, or code block verbatim.
+     - Preserves code/math fence blocks and aligns with question keywords for excerpt previews.
+   - `extract_cited_passages(answer: str, chunks: Sequence[Any], *, question: str = "") -> dict[int, tuple[str, ...]]`:
+     - Extracts the exact passages corresponding to verified citation markers `[k]`, supporting overview queries by assembling same-page section chunks.
 
 2. **W3C Scroll-to-Text Directive (`app/services/citation_service.py`):**
-   - `build_universal_jump_url(file_url, target_quote, prefix, suffix)`:
-     - Formats compliant W3C Scroll-to-Text-Fragment fragments (`#:~:text=[prefix-,]start,end[,-suffix]`).
-     - Enables browsers to jump directly to and highlight text natively on HTML / Web pages.
+   - `normalize_search_url(url: str | None) -> str`:
+     - Normalizes SerpApi relative redirect URLs (`/goto?url=`) into absolute Google URLs.
+   - `build_universal_jump_url(base_url: str, snippet: str | None = None) -> str`:
+     - Generates compliant W3C Scroll-to-Text-Fragment fragments (`#:~:text=textStart,textEnd`).
+     - Preserves clean URLs without trailing hashes for Google redirect links to avoid dropping fragments on 302 hops.
 
 3. **PDF Bounding Box Coordinate Service (`app/services/pdf_highlight_service.py`):**
-   - `get_highlight_rects(pdf_path, search_phrase, target_page) -> list[dict]`:
-     - Inspects target PDF pages using PyMuPDF (`fitz`).
-     - Performs multi-tier fuzzy and normalized phrase matching.
-     - Filters out short, isolated random matches (requiring substantive phrases of $\ge 3$ words).
+   - `get_highlight_rects(pdf_path: str | Path, target_page: int, passages: Sequence[str]) -> list[dict]`:
+     - Inspects target PDF page using PyMuPDF (`fitz`).
+     - Matches full continuous token sequences (`_TOKEN_PATTERN = r"\w+(?:\.\w+)*|[^\w\s]"`) with soft hyphenation (`\u00ad`) and line-break dehyphenation support.
+     - Enforces single exact match semantics: bounding rects are emitted only when a cited passage matches at exactly one unique location on the target page.
      - Returns normalized bounding boxes: `[{ "page": int, "x": float, "y": float, "width": float, "height": float }]`.
+   - `highlight_pdf(pdf_path, target_page, passages) -> bytes`:
+     - Produces an in-memory highlighted PDF stream for native previewing.
 
 4. **REST Highlighting Endpoint (`app/routers/chat/router.py`):**
-   - `POST /api/chat/sources/{document_id}/rects`:
+   - `POST /api/chat/sources/{document_id}/highlight`:
      - Authenticates user and verifies class access.
-     - Accepts `{ "search_phrase": str, "target_page": int }`.
-     - Returns calculated bounding boxes, enabling high-performance frontend overlay rendering.
+     - Accepts `{ "page": int, "passages": list[str] }`.
+     - Returns highlighted PDF binary stream with exact yellow rect highlights.
