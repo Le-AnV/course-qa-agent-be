@@ -15,23 +15,24 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("ticket", sa.Column("escalated_to_id", sa.Uuid(), nullable=True))
-    op.add_column(
-        "ticket", sa.Column("escalated_at", sa.DateTime(timezone=True), nullable=True)
-    )
-    op.create_foreign_key(
-        "fk_ticket_escalated_to_id_user",
-        "ticket",
-        "user",
-        ["escalated_to_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
-    op.create_index("ix_ticket_escalated_to_id", "ticket", ["escalated_to_id"])
+    with op.batch_alter_table("ticket") as batch:
+        batch.add_column(sa.Column("escalated_to_id", sa.Uuid(), nullable=True))
+        batch.add_column(
+            sa.Column("escalated_at", sa.DateTime(timezone=True), nullable=True)
+        )
+        batch.create_foreign_key(
+            "fk_ticket_escalated_to_id_user",
+            "user",
+            ["escalated_to_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+        batch.create_index("ix_ticket_escalated_to_id", ["escalated_to_id"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_ticket_escalated_to_id", table_name="ticket")
-    op.drop_constraint("fk_ticket_escalated_to_id_user", "ticket", type_="foreignkey")
-    op.drop_column("ticket", "escalated_at")
-    op.drop_column("ticket", "escalated_to_id")
+    with op.batch_alter_table("ticket") as batch:
+        batch.drop_index("ix_ticket_escalated_to_id")
+        batch.drop_constraint("fk_ticket_escalated_to_id_user", type_="foreignkey")
+        batch.drop_column("escalated_at")
+        batch.drop_column("escalated_to_id")
