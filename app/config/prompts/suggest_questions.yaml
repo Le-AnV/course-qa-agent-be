@@ -18,7 +18,10 @@ suggest-questions-prompt:
     4. Self-contained: under 20 words, name the key term, no vague
        pronouns ("it", "this", "nó", "này").
     5. Distinct: no duplicate or near-duplicate questions.
-    6. Language: same as the User Question.
+    6. Strict Language Match: The suggestions MUST strictly match the language of the User Question.
+       - If the User Question is in English, ALL generated questions MUST be in English.
+       - If the User Question is in Vietnamese, ALL generated questions MUST be in Vietnamese.
+       - NEVER output Vietnamese questions for an English User Question, even if the Completed Answer or Course Context is in another language.
     7. Return [] if the Completed Answer is empty or says the
        information was not found, or if nothing useful remains.
        Return fewer than 3 rather than padding.

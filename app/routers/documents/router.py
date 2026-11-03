@@ -18,6 +18,7 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_db, require_trainer
+from app.models.course import Class
 from app.models.document import Document
 from app.models.user import User
 from app.schemas.documents import (
@@ -29,7 +30,7 @@ from app.schemas.documents import (
     DocumentUploadResponse,
     DocumentUploadResult,
 )
-from app.services import document_service, ingestion_service
+from app.services import document_service, document_validation_service, ingestion_service
 from app.services.document_service import ACCEPTED_EXTENSIONS, VALID_STATUSES
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
@@ -92,6 +93,7 @@ def classes_mine(
 async def upload_documents(
     files: list[UploadFile] = File(...),
     class_id: str = Form(...),
+    force: bool = Query(default=False),
     user: User = Depends(require_trainer),
     db: Session = Depends(get_db),
 ) -> DocumentUploadResponse:
@@ -109,6 +111,36 @@ async def upload_documents(
         except ValueError as exc:
             results.append(DocumentUploadResult(file_name=name, error=str(exc)))
             continue
+
+        if not force:
+            clazz = db.get(Class, record.class_id)
+            if clazz:
+                class_desc = clazz.info.description if getattr(clazz, "info", None) else None
+                doc_path = document_service.document_path(record)
+                try:
+                    loaded = ingestion_service._load_document(doc_path)
+                    doc_text = loaded.get("markdown", "")
+                except Exception:  # noqa: BLE001
+                    doc_text = ""
+
+                is_relevant, rejection_reason = document_validation_service.validate_document_relevance(
+                    db,
+                    class_name=clazz.name,
+                    class_code=clazz.code,
+                    class_description=class_desc,
+                    file_name=name,
+                    document_text=doc_text,
+                )
+                if not is_relevant:
+                    document_service.delete_document(db, record)
+                    results.append(
+                        DocumentUploadResult(
+                            file_name=name,
+                            warning=rejection_reason or "Document content does not match course subject.",
+                        )
+                    )
+                    continue
+
         results.append(DocumentUploadResult(file_name=name, document=_record_to_read(db, record)))
     return DocumentUploadResponse(uploaded=results)
 
@@ -149,6 +181,7 @@ def get_documents(
 def approve_document(
     document_id: str,
     background_tasks: BackgroundTasks,
+    force: bool = Query(default=True),
     user: User = Depends(require_trainer),
     db: Session = Depends(get_db),
 ) -> DocumentRead:
@@ -168,7 +201,7 @@ def approve_document(
         record = document_service.approve_document(db, document_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    background_tasks.add_task(ingestion_service.process_document_in_background, str(record.id))
+    background_tasks.add_task(ingestion_service.process_document_in_background, str(record.id), force=force)
     return _record_to_read(db, record)
 
 
@@ -196,6 +229,7 @@ def reject_document(
 def retry_document(
     document_id: str,
     background_tasks: BackgroundTasks,
+    force: bool = Query(default=False),
     user: User = Depends(require_trainer),
     db: Session = Depends(get_db),
 ) -> DocumentRead:
@@ -210,7 +244,7 @@ def retry_document(
         record = document_service.retry_document(db, document_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    background_tasks.add_task(ingestion_service.process_document_in_background, str(record.id))
+    background_tasks.add_task(ingestion_service.process_document_in_background, str(record.id), force=force)
     return _record_to_read(db, record)
 
 

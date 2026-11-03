@@ -89,37 +89,63 @@ def _parse_json_questions(raw: str, max_count: int = 3, min_count: int = 1) -> l
     return questions[:max_count]
 
 
+_VIETNAMESE_CHARS = set("ăâđêôơưàáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵ")
+
+
+def _is_vietnamese(text: str) -> bool:
+    return any(char in _VIETNAMESE_CHARS for char in text.lower())
+
+
 def build_fallback_followups(
     *,
     question: str,
     class_name: str = "",
     chunks: Sequence[ScoredChunk] = (),
 ) -> list[str]:
-    """Generate 2-3 logical follow-up questions from available material context."""
+    """Generate 2-3 logical follow-up questions from available material context matching the question language."""
     results: list[str] = []
+    is_vi = _is_vietnamese(question)
+    q_lower = question.lower()
 
     # Check if chunks have titles or topic keywords
     for chunk in chunks[:3]:
         title = (chunk.title or "").replace(".pdf", "").replace(".docx", "").strip()
         if title and title.lower() not in {"course material", "unknown"}:
-            results.append(f"Bạn có thể giải thích thêm về nội dung trong phần '{title}' không?")
+            if is_vi:
+                results.append(f"Bạn có thể giải thích thêm về nội dung trong phần '{title}' không?")
+            else:
+                results.append(f"Could you explain more about the contents in '{title}'?")
             if len(results) >= 2:
                 break
 
-    q_lower = question.lower()
-    if "con trỏ" in q_lower or "pointer" in q_lower or "ptr" in q_lower:
-        results.append("Sự khác biệt giữa con trỏ (pointer) và tham chiếu (reference) trong C++ là gì?")
-        results.append("Làm thế nào để tránh lỗi con trỏ treo (dangling pointer) và rò rỉ bộ nhớ?")
-    elif "hàm" in q_lower or "function" in q_lower or "đệ quy" in q_lower or "recursion" in q_lower:
-        results.append("Điều kiện dừng (base case) quan trọng như thế nào trong hàm đệ quy?")
-        results.append("Ưu và nhược điểm giữa đệ quy và vòng lặp lặp lại (iteration) là gì?")
-    elif "chữ hoa" in q_lower or "case" in q_lower or "cú pháp" in q_lower or "syntax" in q_lower:
-        results.append("Quy ước đặt tên biến và hàm phổ biến (naming conventions) trong C++ là gì?")
-        results.append("C++ có những từ khóa dành riêng (reserved keywords) nào cần tránh khi đặt tên?")
+    if is_vi:
+        if "con trỏ" in q_lower or "pointer" in q_lower or "ptr" in q_lower:
+            results.append("Sự khác biệt giữa con trỏ (pointer) và tham chiếu (reference) trong C++ là gì?")
+            results.append("Làm thế nào để tránh lỗi con trỏ treo (dangling pointer) và rò rỉ bộ nhớ?")
+        elif "hàm" in q_lower or "function" in q_lower or "đệ quy" in q_lower or "recursion" in q_lower:
+            results.append("Điều kiện dừng (base case) quan trọng như thế nào trong hàm đệ quy?")
+            results.append("Ưu và nhược điểm giữa đệ quy và vòng lặp lặp lại (iteration) là gì?")
+        elif "chữ hoa" in q_lower or "case" in q_lower or "cú pháp" in q_lower or "syntax" in q_lower:
+            results.append("Quy ước đặt tên biến và hàm phổ biến (naming conventions) trong C++ là gì?")
+            results.append("C++ có những từ khóa dành riêng (reserved keywords) nào cần tránh khi đặt tên?")
+        else:
+            topic = class_name or "môn học này"
+            results.append(f"Những ứng dụng thực tế phổ biến nhất của chủ đề này trong {topic} là gì?")
+            results.append("Có những lỗi thường gặp (common pitfalls) nào cần lưu ý về phần này?")
     else:
-        topic = class_name or "môn học này"
-        results.append(f"Những ứng dụng thực tế phổ biến nhất của chủ đề này trong {topic} là gì?")
-        results.append("Có những lỗi thường gặp (common pitfalls) nào cần lưu ý về phần này?")
+        if "pointer" in q_lower or "ptr" in q_lower:
+            results.append("What is the difference between a pointer and a reference in C++?")
+            results.append("How can dangling pointers and memory leaks be avoided?")
+        elif "function" in q_lower or "recursion" in q_lower or "recursive" in q_lower:
+            results.append("Why is a base case essential in a recursive function?")
+            results.append("What are the advantages and trade-offs between recursion and iteration?")
+        elif "case" in q_lower or "syntax" in q_lower or "naming" in q_lower:
+            results.append("What are standard naming conventions for variables and functions in C++?")
+            results.append("Which reserved keywords should be avoided when declaring variables in C++?")
+        else:
+            topic = class_name or "this course"
+            results.append(f"What are the most common practical applications of this topic in {topic}?")
+            results.append("What common pitfalls should be kept in mind regarding this concept?")
 
     unique: list[str] = []
     for q in results:

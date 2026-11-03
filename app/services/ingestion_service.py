@@ -7,7 +7,9 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.database import get_session_local
-from app.services import document_service
+from app.models.course import Class
+from app.services import document_service, document_validation_service
+from app.services.document_validation_service import DocumentRelevanceError
 from app.services.embedding.gemini_embedding import GeminiEmbedding
 from app.services.ingestion.chunker import build_chunk_context, markdown_chunker, recursive_chunker
 from app.services.ingestion.cleaner import clean_marker_markdown
@@ -31,6 +33,8 @@ def _failure_reason(error: Exception) -> str:
         return "Gemini embedding rate limit was hit repeatedly. Wait a minute, then retry the document."
     if isinstance(error, FileNotFoundError):
         return "The stored source file could not be found. Upload the document again."
+    if isinstance(error, DocumentRelevanceError):
+        return f"Course relevance: {error}"
     if isinstance(error, SyllabusFormatError):
         return "Syllabus format is not recognized or contains no course units."
     if isinstance(error, ValueError):
@@ -53,7 +57,7 @@ def _load_document(path: str) -> dict:
     return document_loader(path, clean=False)
 
 
-def process_document(db: Session, document_id: uuid.UUID | str) -> None:
+def process_document(db: Session, document_id: uuid.UUID | str, force: bool = False) -> None:
     """Index a processing document and persist indexed/failed status."""
     record = document_service.get_document(db, document_id)
     if record is None or record.status != document_service.STATUS_PROCESSING:
@@ -71,6 +75,22 @@ def process_document(db: Session, document_id: uuid.UUID | str) -> None:
             raise ValueError("No readable text found in document.")
 
         file_name = getattr(record, "file_name", "") or path.name
+
+        # Validate course relevance before vector indexing
+        clazz = db.get(Class, record.class_id)
+        if clazz and not force:
+            class_desc = clazz.info.description if getattr(clazz, "info", None) else None
+            is_relevant, rejection_reason = document_validation_service.validate_document_relevance(
+                db,
+                class_name=clazz.name,
+                class_code=clazz.code,
+                class_description=class_desc,
+                file_name=file_name,
+                document_text=markdown,
+            )
+            if not is_relevant:
+                raise DocumentRelevanceError(rejection_reason or "Document does not match course subject.")
+
         roadmap = (
             parse_syllabus_markdown(markdown)
             if is_syllabus_document(file_name, markdown)
@@ -130,8 +150,8 @@ def process_document(db: Session, document_id: uuid.UUID | str) -> None:
         logger.exception("Document ingestion failed for %s", document_id)
 
 
-def process_document_in_background(document_id: str) -> None:
+def process_document_in_background(document_id: str, force: bool = False) -> None:
     """Run ingestion with its own DB session after the HTTP response."""
     session_factory = get_session_local(settings.database_url)
     with session_factory() as db:
-        process_document(db, document_id)
+        process_document(db, document_id, force=force)

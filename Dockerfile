@@ -16,6 +16,11 @@ WORKDIR /app
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libreoffice-writer-nogui \
+    antiword \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app/.venv /app/.venv
 COPY app ./app
 COPY alembic ./alembic
