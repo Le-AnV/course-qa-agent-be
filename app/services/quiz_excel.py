@@ -1,4 +1,4 @@
-"""Excel Template Contract, Generator, and Strict Validator for Quizzes (AI-148)."""
+"""Excel Template Contract, Generator, and Strict Validator for Quizzes (AI-148, AI-152)."""
 
 from __future__ import annotations
 
@@ -44,6 +44,13 @@ OPTION_KEY_MAP = {
     "Option E": "E",
     "Option F": "F",
 }
+MAX_QUIZ_EXCEL_SIZE_BYTES = 10 * 1024 * 1024
+MAX_QUIZ_EXCEL_QUESTIONS = 1000
+MAX_QUIZ_EXCEL_POINTS_WITHOUT_WARNING = 10.0
+
+# Key used to persist FILL_IN_BLANK accepted answers in ``QuizQuestion.grading_config``.
+# Shared by the importer, the exporter, and the grading service so the round trip stays stable.
+FILL_IN_BLANK_ANSWERS_KEY = "correct_answers"
 
 
 @dataclass
@@ -54,10 +61,20 @@ class ExcelRowError:
 
 
 @dataclass
+class ExcelRowWarning:
+    """Non-blocking notice: the row is imported, but the teacher should look at it."""
+
+    row_index: int
+    column: str | None
+    message: str
+
+
+@dataclass
 class ExcelParseResult:
     is_valid: bool
     errors: list[ExcelRowError] = field(default_factory=list)
     questions: list[QuizQuestionCreate] = field(default_factory=list)
+    warnings: list[ExcelRowWarning] = field(default_factory=list)
 
 
 def _safe_str(val: Any) -> str:
@@ -77,7 +94,24 @@ def validate_and_parse_quiz_excel(file_bytes_or_stream: bytes | io.BytesIO) -> E
         ExcelParseResult containing validation errors or parsed QuizQuestionCreate objects.
     """
     errors: list[ExcelRowError] = []
+    warnings: list[ExcelRowWarning] = []
     questions: list[QuizQuestionCreate] = []
+    seen_questions: dict[str, int] = {}
+
+    if isinstance(file_bytes_or_stream, bytes):
+        if len(file_bytes_or_stream) > MAX_QUIZ_EXCEL_SIZE_BYTES:
+            return ExcelParseResult(
+                is_valid=False,
+                errors=[ExcelRowError(0, None, "Excel file exceeds the 10 MB upload limit.")],
+            )
+    else:
+        file_bytes_or_stream.seek(0, io.SEEK_END)
+        if file_bytes_or_stream.tell() > MAX_QUIZ_EXCEL_SIZE_BYTES:
+            return ExcelParseResult(
+                is_valid=False,
+                errors=[ExcelRowError(0, None, "Excel file exceeds the 10 MB upload limit.")],
+            )
+        file_bytes_or_stream.seek(0)
 
     try:
         stream = (
@@ -103,6 +137,18 @@ def validate_and_parse_quiz_excel(file_bytes_or_stream: bytes | io.BytesIO) -> E
         return ExcelParseResult(
             is_valid=False,
             errors=[ExcelRowError(row_index=1, column=None, message="The worksheet is completely empty.")],
+        )
+
+    if sheet.max_row - 1 > MAX_QUIZ_EXCEL_QUESTIONS:
+        return ExcelParseResult(
+            is_valid=False,
+            errors=[
+                ExcelRowError(
+                    MAX_QUIZ_EXCEL_QUESTIONS + 2,
+                    "Question",
+                    "A quiz may contain at most 1,000 question rows.",
+                )
+            ],
         )
 
     # Validate Header
@@ -218,6 +264,16 @@ def validate_and_parse_quiz_excel(file_bytes_or_stream: bytes | io.BytesIO) -> E
             else:
                 saw_empty_option = True
 
+        seen_options: set[str] = set()
+        for label, text_val in present_options:
+            normalized_option = " ".join(text_val.casefold().split())
+            if normalized_option in seen_options:
+                errors.append(
+                    ExcelRowError(row_idx, f"Option {label}", "Duplicate option text in this question.")
+                )
+                row_has_errors = True
+            seen_options.add(normalized_option)
+
         correct_raw = get_val("Correct Answer(s)")
         explanation = get_val("Explanation") or None
         rubric = get_val("Rubric") or None
@@ -307,6 +363,29 @@ def validate_and_parse_quiz_excel(file_bytes_or_stream: bytes | io.BytesIO) -> E
 
         # Build Question DTO if row has no errors
         if not row_has_errors:
+            # Non-blocking warnings: the row is imported, the teacher is nudged to review it.
+            if points > MAX_QUIZ_EXCEL_POINTS_WITHOUT_WARNING:
+                warnings.append(
+                    ExcelRowWarning(
+                        row_idx,
+                        "Points",
+                        f"Unusually high Points value '{points:g}'; confirm this is intended.",
+                    )
+                )
+
+            question_key = " ".join(question_text.casefold().split())
+            first_row = seen_questions.get(question_key)
+            if first_row is not None:
+                warnings.append(
+                    ExcelRowWarning(
+                        row_idx,
+                        "Question",
+                        f"Duplicate question text also appears on row {first_row}.",
+                    )
+                )
+            else:
+                seen_questions[question_key] = row_idx
+
             parsed_correct = [
                 a.strip().upper() for a in re.split(r"[,;]", correct_raw) if a.strip()
             ]
@@ -343,10 +422,16 @@ def validate_and_parse_quiz_excel(file_bytes_or_stream: bytes | io.BytesIO) -> E
             questions.append(q_dto)
             order_counter += 1
 
+    if not questions and not errors:
+        errors.append(ExcelRowError(2, "Question", "At least one question is required."))
+
+    # Parsed rows are always returned so a preview can show valid questions next to errors.
+    # Import remains gated on ``is_valid``.
     return ExcelParseResult(
         is_valid=(len(errors) == 0),
         errors=errors,
-        questions=questions if len(errors) == 0 else [],
+        questions=questions,
+        warnings=warnings,
     )
 
 
@@ -561,6 +646,10 @@ def export_quiz_to_workbook(questions: list[Any]) -> openpyxl.Workbook:
         if q_type == "FILL_IN_BLANK":
             correct_ans_str = ""
             raw_correct = getattr(q, "correct_answers", None)
+            if not raw_correct:
+                # DB-backed questions keep accepted answers in ``grading_config``.
+                config = getattr(q, "grading_config", None) or {}
+                raw_correct = config.get(FILL_IN_BLANK_ANSWERS_KEY)
             if raw_correct:
                 correct_ans_str = " | ".join(raw_correct)
             elif rubric:
