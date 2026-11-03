@@ -5,6 +5,8 @@ via ``app.core.deps.require_trainer``. Identity is the DB ``User`` row;
 class scope resolves from ``course``/``class`` tables.
 """
 
+from pathlib import Path
+
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -15,6 +17,7 @@ from fastapi import (
     Query,
     UploadFile,
 )
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_db, require_trainer
@@ -41,6 +44,29 @@ def _require_uploader(record: Document, user: User) -> None:
             status_code=403,
             detail="Only the uploader can manage this document.",
         )
+
+
+def _scoped_document(db: Session, document_id: str, user: User) -> Document:
+    record = document_service.get_document(db, document_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    if record.class_id not in document_service.my_class_ids(db, user):
+        raise HTTPException(status_code=403, detail="Class is not assigned to you.")
+    return record
+
+
+def _stored_file(record: Document) -> Path:
+    try:
+        path = document_service.document_path(record)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Document file not found on server.")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Document file not found on server.")
+    return path
+
+
+def _is_previewable(record: Document) -> bool:
+    return record.mime_type == "application/pdf" or record.mime_type.startswith("image/")
 
 
 def _record_to_read(db: Session, record: Document) -> DocumentRead:
@@ -142,6 +168,45 @@ def get_documents(
         total=total,
         page=page,
         page_size=page_size,
+    )
+
+
+@router.get("/{document_id}/download")
+def download_document(
+    document_id: str,
+    user: User = Depends(require_trainer),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """AI-43 AC-02/AC-03: download the original file, trainer scope enforced."""
+    record = _scoped_document(db, document_id, user)
+    path = _stored_file(record)
+    return FileResponse(
+        path,
+        media_type=record.mime_type or "application/octet-stream",
+        filename=record.file_name,
+        content_disposition_type="attachment",
+    )
+
+
+@router.get("/{document_id}/preview")
+def preview_document(
+    document_id: str,
+    user: User = Depends(require_trainer),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """AI-43 AC-01/AC-03: inline preview for PDFs and images only."""
+    record = _scoped_document(db, document_id, user)
+    if not _is_previewable(record):
+        raise HTTPException(
+            status_code=415,
+            detail="This file type cannot be previewed; download it instead.",
+        )
+    path = _stored_file(record)
+    return FileResponse(
+        path,
+        media_type=record.mime_type,
+        filename=record.file_name,
+        content_disposition_type="inline",
     )
 
 
