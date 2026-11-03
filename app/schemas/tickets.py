@@ -67,6 +67,9 @@ class TicketRead(BaseModel):
     agent_answer: str | None = None
     status: TicketStatus
     created_at: datetime
+    escalated_to_id: uuid.UUID | None = None
+    escalated_at: datetime | None = None
+    escalated_to_name: str | None = None
 
 
 class TicketThreadRead(TicketRead):
