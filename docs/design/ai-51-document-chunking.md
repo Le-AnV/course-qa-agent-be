@@ -10,21 +10,21 @@ The team decided to separate the document loaders into distinct files within a `
 
 | Module/Component | Purpose and use |
 |---|---|
-| `app/services/ingestion/loader/` | Contains format-specific extractors (`pdf_loader.py`, `docx_loader.py`, `excel_loader.py`). These parse raw files and yield LangChain `Document` objects with text and page metadata. |
+| `app/services/ingestion/loader/` | Contains format-specific extractors (`pdf_loader.py`, `docx_loader.py`, `excel_loader.py`, etc.). `pdf_loader.py` marks explicit page markers `<!-- Page number: {page_num} -->` from `pymupdf4llm` metadata and distinguishes empty files from blank whitespace pages. |
 | `app/services/ingestion/parser.py` | The main orchestrator. It inspects file extensions, routes the file to the appropriate loader, and handles unsupported file errors. |
-| `app/services/ingestion/cleaner.py` | Sanitizes the extracted Markdown. It removes zero-width spaces, normalizes excessive newlines, formats tables, and strips unreadable characters. |
-| `app/services/ingestion/chunker.py` | Uses LangChain's `MarkdownHeaderTextSplitter` to break down large markdown documents into smaller chunks, preserving header hierarchy in the metadata and tracking page numbers. |
+| `app/services/ingestion/cleaner.py` | Sanitizes the extracted Markdown. It removes zero-width spaces, normalizes heading spacing (`## Title`), strips emphasis (`**`, `_`, `~~`) from headings while strictly preserving emphasis in body, and protects code blocks, math blocks, and HTML locators. |
+| `app/services/ingestion/chunker.py` | Two-phase document-boundary chunker: splits content by `PageSection` (page/slide boundaries) first, then splits by headers (`markdown_chunker`) with parent heading inheritance (`_inherit_headers`), and finally splits by length (`recursive_chunker`). Tracks `section_path`, `page_number`, `slide_number`, and `table_header` in metadata. Preserves raw source text in `page_content` without pollution. Exposes `build_chunk_context(content, metadata)`. |
 | `app/services/ingestion/vision.py` | Provides Vision Language Model (VLM) capabilities (via Gemini) to process base64-encoded images/charts extracted from documents and enrich the text with descriptions. |
 
 ## Acceptance criteria status
 
 | AC | Status for this task | Notes |
 |---|---|---|
-| Extract text from PDF, DOCX, and Excel | Implemented | Uses `marker-pdf`, `pypdfium2`, `python-docx`, and `openpyxl`. Loaders are split by file type. |
-| Document Chunking | Implemented | Header-aware chunking is handled by `chunker.py` to maintain context. |
-| Markdown Sanitization | Implemented | Edge cases and formatting artifacts are handled by `cleaner.py`. |
+| Extract text from PDF, DOCX, and Excel | Implemented | Uses `pymupdf4llm`, `python-docx`, and `openpyxl`. Loaders inject explicit page/slide locators. |
+| Document Chunking | Implemented | Page-first and header-aware chunking handled by `chunker.py`. Separators include `["; ", " ", ""]` for long unpunctuated clauses. Tables split by row preserving `table_header` in metadata. Merging chunks across boundaries is forbidden. |
+| Markdown Sanitization | Implemented | Headings normalized, protected blocks (code, math, locators) safely restored in `cleaner.py`. |
 | Vision Enrichment | Implemented | VLM integration is ready in `vision.py`. |
-| Unit Testing | Implemented | Comprehensive test suite (24 tests) added to `tests/ingestion/`. |
+| Unit Testing | Implemented | Comprehensive test suite added to `tests/services/ingestion/` covering pagination, tables, and locator edge cases. |
 
 ## How to verify
 

@@ -22,6 +22,7 @@ from app.routers.citations.router import router as citations_router
 from app.routers.class_config import router as class_config_router
 from app.routers.documents import router as documents_router
 from app.routers.history import router as history_router
+from app.routers.quizzes import router as quizzes_router
 from app.routers.student.router import router as student_router
 from app.routers.tickets import router as tickets_router
 from app.services import reranker_service
@@ -77,7 +78,7 @@ async def _expire_tickets_periodically() -> None:
         try:
             expired = await asyncio.to_thread(_expire_tickets_once)
             if expired:
-                logger.info("Expired %s unanswered tickets after three days.", expired)
+                logger.info("Expired %s unanswered tickets after seven days.", expired)
         except Exception:
             logger.warning("Ticket expiration pass failed; will retry.", exc_info=True)
 
@@ -109,6 +110,7 @@ app.include_router(history_router)
 app.include_router(student_router)
 app.include_router(citations_router)
 app.include_router(tickets_router)
+app.include_router(quizzes_router)
 
 
 

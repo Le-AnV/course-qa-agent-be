@@ -172,17 +172,178 @@ def test_trainer_answer_requires_student_confirmation_to_resolve(client, db_sess
     assert client.post(f"/api/tickets/{ticket_id}/resolve", headers=student_headers).json()["status"] == "RESOLVED"
 
 
-def test_old_open_tickets_expire_in_trainer_inbox(client, db_session):
-    from datetime import UTC, datetime, timedelta
+def test_student_can_follow_up_after_a_teacher_answer(client, db_session):
+    created = client.post("/api/tickets", headers=_headers(db_session.info["student_id"]), json={
+        "class_id": str(db_session.info["class_id"]), "question": "Please explain this.",
+    })
+    ticket_id = created.json()["id"]
+    student_headers = _headers(db_session.info["student_id"])
+    trainer_headers = _headers(db_session.info["trainer_id"], "trainer")
 
-    ticket = Ticket(class_id=db_session.info["class_id"], student_id=db_session.info["student_id"],
-                    question="Old question?", created_at=datetime.now(UTC) - timedelta(days=4))
+    assert client.post(
+        f"/api/tickets/{ticket_id}/replies", headers=trainer_headers,
+        json={"message": "First answer"},
+    ).status_code == 201
+    assert client.get(
+        f"/api/tickets/{ticket_id}", headers=student_headers
+    ).json()["status"] == "ANSWERED"
+
+    follow_up = client.post(
+        f"/api/tickets/{ticket_id}/replies", headers=student_headers,
+        json={"message": "Can you explain more?"},
+    )
+    assert follow_up.status_code == 201
+    thread = client.get(f"/api/tickets/{ticket_id}", headers=student_headers).json()
+    assert thread["status"] == "OPEN"
+    assert [reply["message"] for reply in thread["replies"]] == [
+        "First answer", "Can you explain more?"
+    ]
+
+    assert client.post(
+        f"/api/tickets/{ticket_id}/replies", headers=trainer_headers,
+        json={"message": "Second answer"},
+    ).status_code == 201
+    assert client.post(
+        f"/api/tickets/{ticket_id}/resolve", headers=student_headers
+    ).json()["status"] == "RESOLVED"
+    assert client.post(
+        f"/api/tickets/{ticket_id}/replies", headers=student_headers,
+        json={"message": "Too late"},
+    ).status_code == 409
+
+
+def test_follow_up_on_an_old_answered_ticket_restarts_expiration(client, db_session):
+    ticket = Ticket(
+        class_id=db_session.info["class_id"],
+        student_id=db_session.info["student_id"],
+        question="Answered ten days ago?",
+        status="ANSWERED",
+        created_at=datetime.now(UTC) - timedelta(days=10),
+    )
     db_session.add(ticket)
+    db_session.commit()
+    student_headers = _headers(db_session.info["student_id"])
+
+    assert client.post(
+        f"/api/tickets/{ticket.id}/replies", headers=student_headers,
+        json={"message": "One more question"},
+    ).status_code == 201
+
+    listed = client.get("/api/tickets/mine?status=OPEN", headers=student_headers).json()
+    assert [item["id"] for item in listed["items"]] == [str(ticket.id)]
+    db_session.expire_all()
+    saved = db_session.get(Ticket, ticket.id)
+    assert saved is not None
+    assert saved.status == "OPEN"
+    assert saved.reopened_at is not None
+
+
+def test_unanswered_tickets_expire_after_seven_days(client, db_session):
+    now = datetime.now(UTC)
+    db_session.add_all([
+        Ticket(class_id=db_session.info["class_id"], student_id=db_session.info["student_id"],
+               question="Six days old?", created_at=now - timedelta(days=6)),
+        Ticket(class_id=db_session.info["class_id"], student_id=db_session.info["student_id"],
+               question="Eight days old?", created_at=now - timedelta(days=8)),
+    ])
     db_session.commit()
 
     response = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
     assert response.status_code == 200
-    assert response.json()["items"][0]["status"] == "EXPIRED"
+    statuses = {item["question"]: item["status"] for item in response.json()["items"]}
+    assert statuses == {"Six days old?": "OPEN", "Eight days old?": "EXPIRED"}
+
+
+def test_trainer_resolves_and_reopens_an_answered_ticket(client, db_session):
+    created = client.post("/api/tickets", headers=_headers(db_session.info["student_id"]), json={
+        "class_id": str(db_session.info["class_id"]), "question": "Please explain this.",
+    })
+    ticket_id = created.json()["id"]
+    trainer_headers = _headers(db_session.info["trainer_id"], "trainer")
+
+    reply = client.post(f"/api/tickets/{ticket_id}/replies", headers=trainer_headers,
+                        json={"message": "Here is the explanation."})
+    assert reply.status_code == 201
+
+    resolved = client.post(f"/api/tickets/{ticket_id}/resolve", headers=trainer_headers)
+    assert resolved.status_code == 200
+    assert resolved.json()["status"] == "RESOLVED"
+
+    reopened = client.post(f"/api/tickets/{ticket_id}/reopen", headers=trainer_headers)
+    assert reopened.status_code == 200
+    assert reopened.json()["status"] == "ANSWERED"
+
+
+def test_trainer_resolves_an_open_ticket_and_reopens_it_to_open(client, db_session):
+    created = client.post("/api/tickets", headers=_headers(db_session.info["student_id"]), json={
+        "class_id": str(db_session.info["class_id"]), "question": "Already handled offline.",
+    })
+    ticket_id = created.json()["id"]
+    trainer_headers = _headers(db_session.info["trainer_id"], "trainer")
+
+    resolved = client.post(f"/api/tickets/{ticket_id}/resolve", headers=trainer_headers)
+    assert resolved.status_code == 200
+    assert resolved.json()["status"] == "RESOLVED"
+
+    reopened = client.post(f"/api/tickets/{ticket_id}/reopen", headers=trainer_headers)
+    assert reopened.status_code == 200
+    assert reopened.json()["status"] == "OPEN"
+
+
+def test_reopening_an_old_ticket_starts_a_new_expiration_window(client, db_session):
+    ticket = Ticket(
+        class_id=db_session.info["class_id"],
+        student_id=db_session.info["student_id"],
+        question="Old but still relevant?",
+        status="RESOLVED",
+        created_at=datetime.now(UTC) - timedelta(days=10),
+    )
+    db_session.add(ticket)
+    db_session.commit()
+    trainer_headers = _headers(db_session.info["trainer_id"], "trainer")
+
+    reopened = client.post(f"/api/tickets/{ticket.id}/reopen", headers=trainer_headers)
+    assert reopened.status_code == 200
+    assert reopened.json()["status"] == "OPEN"
+
+    listed = client.get("/api/tickets?status=OPEN", headers=trainer_headers)
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["id"] == str(ticket.id)
+    assert listed.json()["items"][0]["status"] == "OPEN"
+
+
+def test_student_can_reopen_their_resolved_ticket(client, db_session):
+    created = client.post("/api/tickets", headers=_headers(db_session.info["student_id"]), json={
+        "class_id": str(db_session.info["class_id"]), "question": "Still need help.",
+    })
+    ticket_id = created.json()["id"]
+    trainer_headers = _headers(db_session.info["trainer_id"], "trainer")
+    student_headers = _headers(db_session.info["student_id"])
+
+    client.post(f"/api/tickets/{ticket_id}/replies", headers=trainer_headers,
+                json={"message": "First answer."})
+    assert client.post(f"/api/tickets/{ticket_id}/resolve",
+                       headers=student_headers).json()["status"] == "RESOLVED"
+    reopened = client.post(f"/api/tickets/{ticket_id}/reopen", headers=student_headers)
+    assert reopened.status_code == 200
+    assert reopened.json()["status"] == "ANSWERED"
+
+
+def test_invalid_ticket_status_transitions_are_rejected(client, db_session):
+    created = client.post("/api/tickets", headers=_headers(db_session.info["student_id"]), json={
+        "class_id": str(db_session.info["class_id"]), "question": "Question?",
+    })
+    ticket_id = created.json()["id"]
+    trainer_headers = _headers(db_session.info["trainer_id"], "trainer")
+
+    assert client.post(f"/api/tickets/{ticket_id}/reopen",
+                       headers=trainer_headers).status_code == 409
+    assert client.post(f"/api/tickets/{ticket_id}/resolve",
+                       headers=trainer_headers).status_code == 200
+    assert client.post(f"/api/tickets/{ticket_id}/resolve",
+                       headers=trainer_headers).status_code == 409
+    assert client.post(f"/api/tickets/{uuid.uuid4()}/resolve",
+                       headers=trainer_headers).status_code == 404
 
 
 def test_student_cannot_create_ticket_for_unenrolled_class(
@@ -368,6 +529,63 @@ def test_inbox_only_lists_assigned_classes_newest_first(client, db_session, inbo
     assert all_ids == [str(t.id) for t in reversed(inbox["items"])]
 
 
+def test_student_lists_only_own_tickets_newest_first(client, db_session, inbox):
+    headers = _headers(db_session.info["student_id"])
+    response = client.get("/api/tickets/mine?page_size=2", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 5
+    assert body["page"] == 1 and body["page_size"] == 2
+    assert [item["id"] for item in body["items"]] == [
+        str(t.id) for t in inbox["items"][-1:-3:-1]
+    ]
+    assert all(
+        item["student_id"] == str(db_session.info["student_id"]) for item in body["items"]
+    )
+
+
+def test_student_ticket_list_filters_class_status_and_includes_replies(
+    client, db_session, inbox
+):
+    headers = _headers(db_session.info["student_id"])
+    answered = client.get("/api/tickets/mine?status=ANSWERED", headers=headers).json()
+    assert answered["total"] == 2
+    assert all(item["status"] == "ANSWERED" for item in answered["items"])
+
+    other_class = client.get(
+        f"/api/tickets/mine?class_id={db_session.info['other_class_id']}", headers=headers
+    ).json()
+    assert other_class["total"] == 1
+    assert other_class["items"][0]["class_id"] == str(db_session.info["other_class_id"])
+
+    target = inbox["items"][0]
+    trainer_headers = _headers(db_session.info["trainer_id"], "trainer")
+    assert client.post(
+        f"/api/tickets/{target.id}/replies",
+        headers=trainer_headers,
+        json={"message": "Teacher reply"},
+    ).status_code == 201
+
+    listed = client.get(
+        f"/api/tickets/mine?class_id={db_session.info['class_id']}", headers=headers
+    ).json()
+    item = next(item for item in listed["items"] if item["id"] == str(target.id))
+    assert [reply["message"] for reply in item["replies"]] == ["Teacher reply"]
+
+
+def test_my_tickets_rejects_other_roles_and_scopes_each_student(client, db_session, inbox):
+    assert client.get("/api/tickets/mine").status_code == 401
+    assert client.get(
+        "/api/tickets/mine", headers=_headers(db_session.info["trainer_id"], "trainer")
+    ).status_code == 403
+
+    other = client.get(
+        "/api/tickets/mine", headers=_headers(db_session.info["other_student_id"])
+    ).json()
+    assert other["total"] == 1
+    assert other["items"][0]["id"] == str(inbox["private_ticket"].id)
+
+
 @pytest.mark.parametrize("state,total", [("OPEN", 2), ("ANSWERED", 2), ("RESOLVED", 1)])
 def test_inbox_filters_status_and_class(client, db_session, inbox, state, total):
     headers = _headers(db_session.info["trainer_id"], "trainer")
@@ -402,6 +620,145 @@ def test_co_trainer_inbox_and_empty_assignment(client, db_session, inbox):
     db_session.query(ClassTrainer).delete()
     db_session.commit()
     assert client.get("/api/tickets", headers=_headers(inbox["co_trainer"].id, "trainer")).json()["items"] == []
+
+
+def test_ticket_counts_are_tracked_per_assigned_class(client, db_session, inbox):
+    headers = _headers(db_session.info["trainer_id"], "trainer")
+    response = client.get("/api/tickets/counts", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["open_total"] == 4
+    assert body["completed_total"] == 1
+    assert body["items"] == [
+        {
+            "class_id": str(db_session.info["class_id"]),
+            "class_code": "AI81-A",
+            "class_name": "AI-81 Class A",
+            "class_status": "ACTIVE",
+            "open_count": 3,
+            "completed_count": 1,
+            "expired_count": 0,
+        },
+        {
+            "class_id": str(db_session.info["other_class_id"]),
+            "class_code": "AI81-B",
+            "class_name": "AI-81 Class B",
+            "class_status": "ACTIVE",
+            "open_count": 1,
+            "completed_count": 0,
+            "expired_count": 0,
+        },
+    ]
+
+    filtered = client.get(
+        f"/api/tickets/counts?class_id={db_session.info['class_id']}", headers=headers
+    )
+    assert filtered.status_code == 200
+    assert len(filtered.json()["items"]) == 1
+    assert filtered.json()["items"][0]["open_count"] == 3
+
+
+def test_archived_class_is_hidden_from_counts_inbox_and_student_views(client, db_session, inbox):
+    section = db_session.get(Class, db_session.info["class_id"])
+    assert section is not None
+    section.status = "ARCHIVED"
+    db_session.commit()
+    trainer_headers = _headers(db_session.info["trainer_id"], "trainer")
+
+    counts = client.get("/api/tickets/counts", headers=trainer_headers).json()
+    assert [item["class_code"] for item in counts["items"]] == ["AI81-B"]
+    assert counts["open_total"] == 1 and counts["completed_total"] == 0
+
+    # Asking for the archived class directly is rejected, and it never shows up
+    # in the unfiltered inbox.
+    assert client.get(
+        f"/api/tickets?class_id={db_session.info['class_id']}", headers=trainer_headers
+    ).status_code == 403
+    listed = client.get("/api/tickets", headers=trainer_headers).json()
+    assert listed["total"] == 1
+    assert [item["class_id"] for item in listed["items"]] == [
+        str(db_session.info["other_class_id"])
+    ]
+
+    # Students keep their history for active classes only.
+    student_headers = _headers(db_session.info["student_id"])
+    mine = client.get("/api/tickets/mine", headers=student_headers).json()
+    assert [item["class_id"] for item in mine["items"]] == [
+        str(db_session.info["other_class_id"])
+    ]
+    archived_ticket = inbox["items"][0]
+    assert client.get(
+        f"/api/tickets/{archived_ticket.id}", headers=student_headers
+    ).status_code == 404
+    assert client.post(
+        f"/api/tickets/{archived_ticket.id}/resolve", headers=student_headers
+    ).status_code == 404
+    assert client.post(
+        f"/api/tickets/{archived_ticket.id}/reopen", headers=student_headers
+    ).status_code == 404
+    assert client.post(
+        f"/api/tickets/{archived_ticket.id}/replies",
+        headers=student_headers,
+        json={"message": "Still there?"},
+    ).status_code == 404
+
+    # Trainers cannot read, answer, resolve or reopen archived-class tickets.
+    assert client.post(
+        f"/api/tickets/{archived_ticket.id}/resolve", headers=trainer_headers
+    ).status_code == 403
+    assert client.post(
+        f"/api/tickets/{archived_ticket.id}/reopen", headers=trainer_headers
+    ).status_code == 403
+    assert client.post(
+        f"/api/tickets/{archived_ticket.id}/replies",
+        headers=trainer_headers,
+        json={"message": "Follow-up"},
+    ).status_code == 403
+
+
+def test_ticket_counts_follow_resolve_and_reopen(client, db_session, inbox):
+    headers = _headers(db_session.info["trainer_id"], "trainer")
+    class_id = db_session.info["class_id"]
+    open_ticket, _, resolved_ticket, _, _ = inbox["items"][:5]
+
+    assert client.post(f"/api/tickets/{open_ticket.id}/resolve", headers=headers).status_code == 200
+    after_resolve = client.get(
+        f"/api/tickets/counts?class_id={class_id}", headers=headers
+    ).json()["items"][0]
+    assert after_resolve["open_count"] == 2
+    assert after_resolve["completed_count"] == 2
+
+    assert client.post(f"/api/tickets/{resolved_ticket.id}/reopen", headers=headers).status_code == 200
+    after_reopen = client.get(
+        f"/api/tickets/counts?class_id={class_id}", headers=headers
+    ).json()["items"][0]
+    assert after_reopen["open_count"] == 3
+    assert after_reopen["completed_count"] == 1
+
+
+def test_ticket_counts_reject_foreign_class_and_other_roles(client, db_session, inbox):
+    headers = _headers(db_session.info["trainer_id"], "trainer")
+    foreign = client.get(
+        f"/api/tickets/counts?class_id={inbox['private_class'].id}", headers=headers
+    )
+    assert foreign.status_code == 403
+    assert client.get(
+        "/api/tickets/counts", headers=_headers(db_session.info["student_id"])
+    ).status_code == 403
+    assert client.get("/api/tickets/counts").status_code == 401
+
+
+def test_trainer_cannot_change_status_in_a_foreign_class(client, db_session, inbox):
+    headers = _headers(db_session.info["trainer_id"], "trainer")
+    private_ticket = inbox["private_ticket"]
+    assert client.post(
+        f"/api/tickets/{private_ticket.id}/resolve", headers=headers
+    ).status_code == 403
+    private_ticket.status = "RESOLVED"
+    db_session.commit()
+    assert client.post(
+        f"/api/tickets/{private_ticket.id}/reopen", headers=headers
+    ).status_code == 403
 
 
 def test_inbox_rejects_other_roles_and_invalid_filters(client, db_session):
@@ -522,13 +879,26 @@ def test_escalation_sla_is_configurable(client, db_session, inbox):
     assert items[str(waiting.id)]["escalated_to_id"] is None
 
 
+def test_reopened_ticket_uses_a_fresh_escalation_window(client, db_session, inbox):
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    ticket = _old_open_ticket(db_session, hours=24 * 8)
+    ticket.reopened_at = datetime.now(UTC) - timedelta(hours=1)
+    db_session.commit()
+
+    response = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
+
+    item = next(i for i in response.json()["items"] if i["id"] == str(ticket.id))
+    assert item["escalated_to_id"] is None
+
+
 def test_escalation_sla_is_capped_below_ticket_expiration(client, db_session, inbox):
     db_session.query(Ticket).delete()
     db_session.commit()
-    db_session.add(SystemConfig(key="ticket_escalation_sla_hours", value="96"))
+    db_session.add(SystemConfig(key="ticket_escalation_sla_hours", value="200"))
     db_session.commit()
-    escalated = _old_open_ticket(db_session, hours=71.5)
-    expired = _old_open_ticket(db_session, hours=73)
+    escalated = _old_open_ticket(db_session, hours=167.5)
+    expired = _old_open_ticket(db_session, hours=169)
 
     response = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
 

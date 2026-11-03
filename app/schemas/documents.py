@@ -51,6 +51,7 @@ class DocumentUploadResult(BaseModel):
     file_name: str
     document: DocumentRead | None = None
     error: str | None = None
+    warning: str | None = None
 
 
 class DocumentUploadResponse(BaseModel):

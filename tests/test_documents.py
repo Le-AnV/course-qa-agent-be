@@ -103,9 +103,14 @@ def _seed_classes(db: Session) -> None:
 @pytest.fixture()
 def client(db_session, monkeypatch):
     # Route-level lifecycle tests exercise scheduling without calling Gemini/Qdrant.
-    from app.services import ingestion_service
+    from app.services import document_validation_service, ingestion_service
 
     monkeypatch.setattr(ingestion_service, "process_document_in_background", lambda _id: None)
+    monkeypatch.setattr(
+        document_validation_service,
+        "validate_document_relevance",
+        lambda *args, **kwargs: (True, "Mocked relevance"),
+    )
 
     def _override():
         try:

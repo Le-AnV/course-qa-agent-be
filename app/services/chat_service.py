@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 GENERATION_ERROR_MESSAGE = "The answer could not be generated. Please try again."
 TIMEOUT_ERROR_MESSAGE = "The answer timed out. Please try again."
-SUGGESTION_PREFETCH_GRACE_SECONDS = 15.0
+SUGGESTION_PREFETCH_GRACE_SECONDS = 4.0
 SUGGESTION_RETRY_TIMEOUT_SECONDS = 15.0
 
 
@@ -153,13 +153,10 @@ def _course_context(
 ) -> str:
     """Build numbered context matching the citation indexes."""
 
-    lines: list[str] = []
-
-    for index, chunk in enumerate(chunks, start=1):
-        locator = f", page {chunk.page}" if chunk.page is not None else ""
-        lines.append(f"[{index}] {chunk.title}{locator}\n{chunk.content}")
-
-    return "\n\n".join(lines)
+    return "\n\n".join(
+        rag_service._curriculum_context_line(index, chunk)
+        for index, chunk in enumerate(chunks, start=1)
+    )
 
 
 def _with_syllabus(
@@ -766,12 +763,12 @@ async def stream_chat(
                             "1. ABSOLUTELY NO COMPLETE CODE: Under NO circumstances should you provide complete, copy-pasteable, runnable code or full function implementations (such as a complete recursive factorial function or main() method). Never write the final answer for the student.\n"
                             "2. Concept Explanation: Explain mathematical concepts clearly. NEVER use dollar signs ($) or LaTeX math delimiters ($...$ or $...$). Write all formulas, equations, and variables as plain text or inline code in backticks (e.g. `n! = n * (n-1)!`, `0! = 1`, `F(0) = 0`).\n"
                             "3. Socratic Breakdown: Guide the student step-by-step through the thought process:\n"
-                            "   - What is the Base Case (điều kiện dừng để không bị tràn stack / lặp vô tận)?\n"
-                            "   - What is the Recursive Step (công thức truy hồi để đưa bài toán về kích thước nhỏ hơn)?\n"
-                            "4. Pseudocode & Skeleton: Provide pseudocode, algorithm logic, or a code skeleton with blanks/TODO comments only (e.g. `// TODO: viết điều kiện dừng tại đây`).\n"
+                            "   - What is the Base Case (stopping condition to prevent stack overflow or infinite loops)?\n"
+                            "   - What is the Recursive Step (recurrence relation to break the problem into smaller subproblems)?\n"
+                            "4. Pseudocode & Skeleton: Provide pseudocode, algorithm logic, or a code skeleton with blanks/TODO comments only (e.g. `// TODO: write base condition here`).\n"
                             "5. Guiding Questions: Ask 1-2 targeted Socratic questions encouraging the student to implement the missing parts and reply with their solution.\n"
                             "6. Citations: Reference the provided Course Materials [1..N] where relevant. If not available, rely on standard computer science principles without apologizing or saying documents are missing.\n"
-                            "7. Tone & Language: Enthusiastic, supportive, pedagogical. Always respond in the language of the student (Vietnamese)."
+                            "7. Tone & Language: Enthusiastic, supportive, pedagogical. Always respond in the exact language of the user's question (e.g. English if asked in English, Vietnamese if asked in Vietnamese)."
                         )
                         )
                 elif roadmap_chunk is not None:
@@ -813,12 +810,12 @@ async def stream_chat(
                             "1. ABSOLUTELY NO COMPLETE CODE: Under NO circumstances should you provide complete, copy-pasteable, runnable code or full function implementations (such as a complete recursive factorial function or main() method). Never write the final answer for the student.\n"
                             "2. Concept Explanation: Explain mathematical concepts clearly. NEVER use dollar signs ($) or LaTeX math delimiters ($...$ or $...$). Write all formulas, equations, and variables as plain text or inline code in backticks (e.g. `n! = n * (n-1)!`, `0! = 1`, `F(0) = 0`).\n"
                             "3. Socratic Breakdown: Guide the student step-by-step through the thought process:\n"
-                            "   - What is the Base Case (điều kiện dừng để không bị tràn stack / lặp vô tận)?\n"
-                            "   - What is the Recursive Step (công thức truy hồi để đưa bài toán về kích thước nhỏ hơn)?\n"
-                            "4. Pseudocode & Skeleton: Provide pseudocode, algorithm logic, or a code skeleton with blanks/TODO comments only (e.g. `// TODO: viết điều kiện dừng tại đây`).\n"
+                            "   - What is the Base Case (stopping condition to prevent stack overflow or infinite loops)?\n"
+                            "   - What is the Recursive Step (recurrence relation to break the problem into smaller subproblems)?\n"
+                            "4. Pseudocode & Skeleton: Provide pseudocode, algorithm logic, or a code skeleton with blanks/TODO comments only (e.g. `// TODO: write base condition here`).\n"
                             "5. Guiding Questions: Ask 1-2 targeted Socratic questions encouraging the student to implement the missing parts and reply with their solution.\n"
                             "6. Citations: Reference the provided Course Materials [1..N] where relevant. If not available, rely on standard computer science principles without apologizing or saying documents are missing.\n"
-                            "7. Tone & Language: Enthusiastic, supportive, pedagogical. Always respond in the language of the student (Vietnamese)."
+                            "7. Tone & Language: Enthusiastic, supportive, pedagogical. Always respond in the exact language of the user's question (e.g. English if asked in English, Vietnamese if asked in Vietnamese)."
                         )
                         )
                     else:
@@ -1073,7 +1070,11 @@ async def stream_chat(
                 chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE,
                 rag_service.NO_SOURCE_MESSAGE,
             ):
-                page_citations = rag_service.cited_page_citations(slide_chunks, full_answer)
+                page_citations = rag_service.cited_page_citations(
+                    slide_chunks,
+                    full_answer,
+                    question=f"{standalone_question}\n{search_query_en or ''}",
+                )
                 if not page_citations:
                     page_citations = rag_service.curriculum_citations(slide_chunks)
                 sources.extend(page_citations)
@@ -1082,7 +1083,9 @@ async def stream_chat(
                 web_citations = rag_service.internet_citations(
                     web_results, start_index=len(sources) + 1
                 )
-                sources.extend(web_citations)
+                used_markers = rag_service.cited_markers(full_answer)
+                matched_web = [s for s in web_citations if s.index in used_markers]
+                sources.extend(matched_web if matched_web else web_citations)
 
             if not sources and full_answer and full_answer not in (
                 chat_retrieval_service.NO_DOCUMENT_EVIDENCE_MESSAGE,

@@ -1,15 +1,15 @@
 """Add ticket escalation fields.
 
-Revision ID: 0032_ticket_escalation
-Revises: 0031_ticket_lifecycle
+Revision ID: 0034_ticket_escalation
+Revises: 0033_ticket_reopened_at
 """
 
 import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0032_ticket_escalation"
-down_revision = "0031_ticket_lifecycle"
+revision = "0034_ticket_escalation"
+down_revision = "0033_ticket_reopened_at"
 branch_labels = None
 depends_on = None
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
@@ -62,6 +63,8 @@ from app.services.llm import (
     check_llm_connection,
 )
 from app.services.system_health_service import build_health
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 router.include_router(gemini_router)
@@ -617,8 +620,10 @@ async def test_retrieval_query(
         )
         if scope_decision and scope_decision.search_query_en:
             search_query_en = scope_decision.search_query_en
-    except Exception:  # noqa: S110, BLE001
-        pass
+    except Exception:
+        logger.warning(
+            "Admin retrieval scope decision failed; using the original query.", exc_info=True
+        )
 
     decision = chat_retrieval_service.retrieve_for_chat(
         db,

@@ -22,6 +22,8 @@ from app.config.config import settings
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_UPSERT_BATCH_SIZE = 64
+
 
 def _is_retryable_qdrant_error(error: BaseException) -> bool:
     """Retry Qdrant failures without multiplying embedding retries."""
@@ -206,19 +208,76 @@ class QdrantStore:
             getattr(retry_state.outcome, "exception", lambda: None)() or "unknown error",
         ),
     )
-    def add_documents(self, documents: list[Document]) -> list[str]:
+    def _add_documents_via_store(self, documents: list[Document]) -> list[str]:
+        return self.vector_store.add_documents(documents)
+
+    @retry(
+        retry=retry_if_exception(_is_retryable_qdrant_error),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(5),
+        before_sleep=lambda retry_state: logger.warning(
+            "Retrying Qdrant upsert... Attempt %s. Error: %s",
+            retry_state.attempt_number,
+            getattr(retry_state.outcome, "exception", lambda: None)() or "unknown",
+        ),
+    )
+    def _upsert_points(self, points: list[PointStruct]) -> None:
+        self.client.upsert(collection_name=self.collection_name, points=points, wait=True)
+
+    def add_documents(
+        self,
+        documents: list[Document],
+        *,
+        embedding_texts: list[str] | None = None,
+    ) -> list[str]:
         """Upsert documents into Qdrant.
 
         Metadata from Document objects are automatically stored as payload (AC-02).
         Data is queryable immediately upon successful upsert (AC-03).
+        If ``embedding_texts`` is provided, embeddings are computed from those texts
+        while preserving the clean ``doc.page_content`` in Qdrant's payload for display.
+        Upserts are sent in batches so large documents do not exceed Qdrant's request
+        size limit; the embedder keeps its own provider-level batching and pacing.
 
         Args:
             documents (list[Document]): List of Langchain Document objects to upsert.
+            embedding_texts (list[str] | None): Optional contextual text strings to embed.
 
         Returns:
             list[str]: A list of generated vector IDs.
+
+        Raises:
+            ValueError: If ``embedding_texts`` does not match ``documents``.
         """
-        return self.vector_store.add_documents(documents)
+        if embedding_texts is not None and len(embedding_texts) != len(documents):
+            raise ValueError("embedding_texts must have the same length as documents.")
+        if not documents:
+            return []
+
+        if embedding_texts is None:
+            return self._add_documents_via_store(documents)
+
+        point_ids = [uuid.uuid4().hex for _ in documents]
+        # Embed once so the embedder can apply its own provider pacing; only the
+        # Qdrant upsert is batched.
+        vectors = self.embeddings.embed_documents(embedding_texts)
+        for start in range(0, len(documents), DEFAULT_UPSERT_BATCH_SIZE):
+            batch_docs = documents[start : start + DEFAULT_UPSERT_BATCH_SIZE]
+            batch_ids = point_ids[start : start + DEFAULT_UPSERT_BATCH_SIZE]
+            batch_vectors = vectors[start : start + DEFAULT_UPSERT_BATCH_SIZE]
+            points = [
+                PointStruct(
+                    id=p_id,
+                    vector=vec,
+                    payload={
+                        self.vector_store.content_payload_key: doc.page_content,
+                        self.vector_store.metadata_payload_key: doc.metadata,
+                    },
+                )
+                for p_id, vec, doc in zip(batch_ids, batch_vectors, batch_docs, strict=True)
+            ]
+            self._upsert_points(points)
+        return [str(p_id) for p_id in point_ids]
 
     @retry(
         wait=wait_exponential(multiplier=1, min=2, max=10),
