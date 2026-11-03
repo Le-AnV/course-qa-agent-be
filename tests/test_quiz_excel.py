@@ -1,12 +1,16 @@
 """Unit tests for Quiz Excel template contract, generator, validator, and no-schema-drift (AI-148)."""
 
 import io
+from types import SimpleNamespace
 
 import openpyxl
 
 from app.schemas.quiz import QuizOptionCreate, QuizQuestionCreate
 from app.services.quiz_excel import (
     EXCEL_HEADERS,
+    FILL_IN_BLANK_ANSWERS_KEY,
+    MAX_QUIZ_EXCEL_QUESTIONS,
+    MAX_QUIZ_EXCEL_SIZE_BYTES,
     export_quiz_to_workbook,
     generate_quiz_template_workbook,
     validate_and_parse_quiz_excel,
@@ -220,3 +224,93 @@ def test_no_schema_drift_round_trip():
             assert opt_orig.option_label == opt_imp.option_label
             assert opt_orig.option_text == opt_imp.option_text
             assert opt_orig.is_correct == opt_imp.is_correct
+
+
+# ---------------------------------------------------------------------------
+# AI-152: import guards, warnings, and DB-backed export
+# ---------------------------------------------------------------------------
+
+
+def test_validate_rejects_duplicate_option_text():
+    wb = generate_quiz_template_workbook()
+    ws = wb["Questions"]
+    ws["D2"] = f"  {ws['C2'].value.upper()}  "  # Same text as Option A, different case/spacing
+
+    res = validate_and_parse_quiz_excel(_wb_to_bytes(wb))
+    assert res.is_valid is False
+    assert any("Duplicate option text" in e.message for e in res.errors)
+    assert all(e.row_index == 2 for e in res.errors if "Duplicate option" in e.message)
+
+
+def test_validate_rejects_oversized_payload():
+    oversized = b"PK" + b"0" * MAX_QUIZ_EXCEL_SIZE_BYTES
+
+    res = validate_and_parse_quiz_excel(oversized)
+    assert res.is_valid is False
+    assert any("10 MB" in e.message for e in res.errors)
+
+
+def test_validate_rejects_too_many_question_rows():
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Questions"
+    ws.append(EXCEL_HEADERS)
+    for _ in range(MAX_QUIZ_EXCEL_QUESTIONS + 1):
+        ws.append(["x"] * len(EXCEL_HEADERS))
+
+    res = validate_and_parse_quiz_excel(_wb_to_bytes(wb))
+    assert res.is_valid is False
+    assert any("at most 1,000 question rows" in e.message for e in res.errors)
+
+
+def test_validate_requires_at_least_one_question():
+    wb = generate_quiz_template_workbook()
+    ws = wb["Questions"]
+    ws.delete_rows(2, ws.max_row - 1)
+
+    res = validate_and_parse_quiz_excel(_wb_to_bytes(wb))
+    assert res.is_valid is False
+    assert any("At least one question is required" in e.message for e in res.errors)
+
+
+def test_validate_warns_without_blocking_import():
+    wb = generate_quiz_template_workbook()
+    ws = wb["Questions"]
+    ws["J2"] = 15.0  # Above the warning threshold
+    ws["B3"] = ws["B2"].value  # Duplicate question text of row 2
+
+    res = validate_and_parse_quiz_excel(_wb_to_bytes(wb))
+    assert res.is_valid is True
+    assert len(res.questions) == 3
+    messages = [w.message for w in res.warnings]
+    assert any("Unusually high Points" in m for m in messages)
+    assert any("Duplicate question text also appears on row 2" in m for m in messages)
+
+
+def test_validate_keeps_valid_questions_next_to_errors():
+    wb = generate_quiz_template_workbook()
+    ws = wb["Questions"]
+    ws["A2"] = "NOT_A_TYPE"  # Only row 2 is invalid
+
+    res = validate_and_parse_quiz_excel(_wb_to_bytes(wb))
+    assert res.is_valid is False
+    assert len(res.questions) == 2
+    assert [q.order_index for q in res.questions] == [0, 1]
+
+
+def test_export_reads_fill_in_answers_from_grading_config():
+    """DB-backed FILL_IN_BLANK questions keep answers in grading_config (AI-152)."""
+    db_question = SimpleNamespace(
+        question_type="FILL_IN_BLANK",
+        question="Which protocol provides encrypted transport over port 443?",
+        points=1.0,
+        difficulty="APPLY",
+        explanation=None,
+        rubric=None,
+        source_reference=None,
+        options=[],
+        grading_config={FILL_IN_BLANK_ANSWERS_KEY: ["HTTPS", "HTTP over TLS"]},
+    )
+
+    wb = export_quiz_to_workbook([db_question])
+    assert wb["Questions"].cell(row=2, column=9).value == "HTTPS | HTTP over TLS"
