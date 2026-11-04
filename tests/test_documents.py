@@ -876,3 +876,107 @@ def test_list_accepts_replaced_status_filter(client, trainer_headers):
     )
     assert response.status_code == 200
     assert response.json()["total"] == 0
+
+
+# --- AI-43: preview & download ------------------------------------------------
+
+
+def _uploaded_pdf(client, headers, name="lesson.pdf", content=b"%PDF-1.4 lesson"):
+    class_a = _class_id(client, headers, "CS101-A")
+    response = _upload(client, headers, class_a, name, content=content)
+    assert response.status_code == 201
+    return response.json()["uploaded"][0]["document"]
+
+
+def test_download_returns_original_file_as_attachment(client, trainer_headers):
+    """AI-43 AC-02: trainers download the exact uploaded bytes."""
+    document = _uploaded_pdf(client, trainer_headers)
+
+    response = client.get(f"/api/documents/{document['id']}/download", headers=trainer_headers)
+
+    assert response.status_code == 200
+    assert response.content == b"%PDF-1.4 lesson"
+    assert response.headers["content-type"].startswith("application/pdf")
+    disposition = response.headers["content-disposition"]
+    assert disposition.startswith("attachment")
+    assert "lesson.pdf" in disposition
+
+
+def test_preview_pdf_is_served_inline(client, trainer_headers):
+    """AI-43 AC-01: a PDF previews in the browser instead of downloading."""
+    document = _uploaded_pdf(client, trainer_headers)
+
+    response = client.get(f"/api/documents/{document['id']}/preview", headers=trainer_headers)
+
+    assert response.status_code == 200
+    assert response.content == b"%PDF-1.4 lesson"
+    assert response.headers["content-type"].startswith("application/pdf")
+    assert response.headers["content-disposition"].startswith("inline")
+
+
+def test_preview_image_is_served_inline(db_session, client, trainer_headers):
+    """AI-43 AC-01: image materials preview too."""
+    document = _uploaded_pdf(client, trainer_headers, name="diagram.pdf")
+    record = db_session.query(models.Document).filter_by(id=uuid.UUID(document["id"])).one()
+    record.file_name = "diagram.png"
+    record.mime_type = "image/png"
+    db_session.commit()
+
+    response = client.get(f"/api/documents/{document['id']}/preview", headers=trainer_headers)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/png")
+    assert response.headers["content-disposition"].startswith("inline")
+
+
+def test_preview_rejects_non_previewable_types(client, trainer_headers):
+    """AI-43 AC-01: only PDFs and images preview; other formats download."""
+    class_a = _class_id(client, trainer_headers, "CS101-A")
+    response = _upload(client, trainer_headers, class_a, "notes.txt", b"notes", "text/plain")
+    document = response.json()["uploaded"][0]["document"]
+
+    preview = client.get(f"/api/documents/{document['id']}/preview", headers=trainer_headers)
+
+    assert preview.status_code == 415
+    assert "preview" in preview.json()["detail"].lower()
+
+
+def test_file_access_is_scoped_to_assigned_classes_and_trainers(
+    client, trainer_headers, other_trainer_headers, student_headers
+):
+    """AI-43 AC-03: the link only works for an authorized trainer."""
+    document = _uploaded_pdf(client, trainer_headers)
+
+    assert (
+        client.get(f"/api/documents/{document['id']}/download").status_code in (401, 403)
+    )
+    assert (
+        client.get(
+            f"/api/documents/{document['id']}/download", headers=student_headers
+        ).status_code
+        == 403
+    )
+    assert (
+        client.get(
+            f"/api/documents/{document['id']}/download", headers=other_trainer_headers
+        ).status_code
+        == 403
+    )
+    assert (
+        client.get(
+            f"/api/documents/{uuid.uuid4()}/download", headers=trainer_headers
+        ).status_code
+        == 404
+    )
+
+
+def test_download_reports_missing_file_as_not_found(db_session, client, trainer_headers):
+    """A row whose file vanished on disk must not leak a server path."""
+    document = _uploaded_pdf(client, trainer_headers)
+    record = db_session.query(models.Document).filter_by(id=uuid.UUID(document["id"])).one()
+    Path(record.storage_path).unlink()
+
+    response = client.get(f"/api/documents/{document['id']}/download", headers=trainer_headers)
+
+    assert response.status_code == 404
+    assert "file" in response.json()["detail"].lower()

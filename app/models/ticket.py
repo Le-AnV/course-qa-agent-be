@@ -2,11 +2,15 @@
 
 import uuid
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.user import User
 
 
 class Ticket(Base):
@@ -42,12 +46,23 @@ class Ticket(Base):
         nullable=False,
         index=True,
     )
+    escalated_to_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("user.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     replies: Mapped[list["TicketReply"]] = relationship(
         back_populates="ticket",
         cascade="all, delete-orphan",
         order_by="TicketReply.created_at",
     )
+    escalated_to: Mapped[Optional["User"]] = relationship(
+        "User", foreign_keys=[escalated_to_id]
+    )
+
+    @property
+    def escalated_to_name(self) -> str | None:
+        return self.escalated_to.full_name if self.escalated_to is not None else None
 
 
 class TicketReply(Base):

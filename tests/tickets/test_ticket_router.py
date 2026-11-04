@@ -15,6 +15,7 @@ from app.core.deps import get_db
 from app.core.security import create_access_token
 from app.main import app
 from app.models.course import Class, ClassTrainer, Enrollment
+from app.models.system_config import SystemConfig
 from app.models.ticket import Ticket, TicketReply
 from app.models.user import Role, User
 
@@ -773,3 +774,135 @@ def test_inbox_rejects_other_roles_and_invalid_filters(client, db_session):
     headers = _headers(db_session.info["trainer_id"], "trainer")
     for query in ["status=INVALID", "page=0", "page_size=0", "page_size=101", "class_id=invalid"]:
         assert client.get(f"/api/tickets?{query}", headers=headers).status_code == 422
+
+
+def _old_open_ticket(db_session, *, class_id=None, hours=25, status="OPEN"):
+    ticket = Ticket(
+        class_id=class_id or db_session.info["class_id"],
+        student_id=db_session.info["student_id"],
+        question="Unanswered question",
+        status=status,
+        created_at=datetime.now(UTC) - timedelta(hours=hours),
+    )
+    db_session.add(ticket)
+    db_session.commit()
+    return ticket
+
+
+def test_open_ticket_past_sla_escalates_to_backup_trainer(client, db_session, inbox):
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    ticket = _old_open_ticket(db_session)
+
+    response = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
+
+    assert response.status_code == 200
+    item = next(i for i in response.json()["items"] if i["id"] == str(ticket.id))
+    assert item["escalated_to_id"] == str(inbox["co_trainer"].id)
+    assert item["escalated_to_name"] == "Co Trainer"
+    assert item["escalated_at"] is not None
+
+
+def test_ticket_inside_sla_is_not_escalated(client, db_session, inbox):
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    ticket = _old_open_ticket(db_session, hours=1)
+
+    response = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
+
+    item = next(i for i in response.json()["items"] if i["id"] == str(ticket.id))
+    assert item["escalated_to_id"] is None
+    assert item["escalated_at"] is None
+
+
+def test_answered_ticket_past_sla_is_never_escalated(client, db_session, inbox):
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    ticket = _old_open_ticket(db_session, status="ANSWERED")
+
+    response = client.get(
+        "/api/tickets?status=ANSWERED",
+        headers=_headers(db_session.info["trainer_id"], "trainer"),
+    )
+
+    item = next(i for i in response.json()["items"] if i["id"] == str(ticket.id))
+    assert item["escalated_to_id"] is None
+    assert item["escalated_at"] is None
+
+
+def test_ticket_without_backup_trainer_is_not_escalated(client, db_session, inbox):
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    ticket = _old_open_ticket(db_session, class_id=db_session.info["other_class_id"])
+
+    response = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
+
+    item = next(i for i in response.json()["items"] if i["id"] == str(ticket.id))
+    assert item["escalated_to_id"] is None
+    assert item["escalated_at"] is None
+
+
+def test_escalation_happens_only_once_per_ticket(client, db_session, inbox):
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    _old_open_ticket(db_session)
+    headers = _headers(db_session.info["trainer_id"], "trainer")
+
+    first = client.get("/api/tickets", headers=headers).json()["items"][0]
+    assert first["escalated_to_id"] == str(inbox["co_trainer"].id)
+
+    db_session.query(ClassTrainer).filter_by(
+        class_id=db_session.info["class_id"], trainer_id=inbox["co_trainer"].id
+    ).delete()
+    db_session.add(
+        ClassTrainer(class_id=db_session.info["class_id"], trainer_id=inbox["outsider"].id)
+    )
+    db_session.commit()
+
+    second = client.get("/api/tickets", headers=headers).json()["items"][0]
+    assert second["escalated_to_id"] == str(inbox["co_trainer"].id)
+    assert second["escalated_at"] == first["escalated_at"]
+
+
+def test_escalation_sla_is_configurable(client, db_session, inbox):
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    db_session.add(SystemConfig(key="ticket_escalation_sla_hours", value="2"))
+    db_session.commit()
+    escalated = _old_open_ticket(db_session, hours=3)
+    waiting = _old_open_ticket(db_session, hours=1)
+
+    response = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
+
+    items = {item["id"]: item for item in response.json()["items"]}
+    assert items[str(escalated.id)]["escalated_to_id"] == str(inbox["co_trainer"].id)
+    assert items[str(waiting.id)]["escalated_to_id"] is None
+
+
+def test_reopened_ticket_uses_a_fresh_escalation_window(client, db_session, inbox):
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    ticket = _old_open_ticket(db_session, hours=24 * 8)
+    ticket.reopened_at = datetime.now(UTC) - timedelta(hours=1)
+    db_session.commit()
+
+    response = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
+
+    item = next(i for i in response.json()["items"] if i["id"] == str(ticket.id))
+    assert item["escalated_to_id"] is None
+
+
+def test_escalation_sla_is_capped_below_ticket_expiration(client, db_session, inbox):
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    db_session.add(SystemConfig(key="ticket_escalation_sla_hours", value="200"))
+    db_session.commit()
+    escalated = _old_open_ticket(db_session, hours=167.5)
+    expired = _old_open_ticket(db_session, hours=169)
+
+    response = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
+
+    items = {item["id"]: item for item in response.json()["items"]}
+    assert items[str(escalated.id)]["escalated_to_id"] == str(inbox["co_trainer"].id)
+    assert items[str(expired.id)]["status"] == "EXPIRED"
+    assert items[str(expired.id)]["escalated_to_id"] is None
