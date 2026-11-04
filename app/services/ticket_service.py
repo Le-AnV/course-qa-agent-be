@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
@@ -105,8 +106,10 @@ def create_student_ticket(
     original_question: str | None = None,
     agent_answer: str | None = None,
     details: str | None = None,
+    citations: list[dict[str, Any]] | None = None,
+    source_message_id: uuid.UUID | None = None,
 ) -> Ticket | None:
-    """Create a ticket only when the caller is enrolled in the selected class."""
+    """Create a ticket for an active student and class, preserving supplied snapshots."""
 
     if role_name_of(student) != "STUDENT":
         return None
@@ -133,6 +136,8 @@ def create_student_ticket(
         question=question,
         original_question=original_question,
         agent_answer=agent_answer,
+        citations=citations or [],
+        source_message_id=source_message_id,
     )
     db.add(ticket)
     db.flush()
@@ -324,6 +329,7 @@ def _inbox_items(rows) -> list[TicketInboxItem]:
             question=ticket.question, original_question=ticket.original_question,
             status=ticket.status, created_at=ticket.created_at,
             agent_answer=ticket.agent_answer,
+            citations=ticket.citations, source_message_id=ticket.source_message_id,
             escalated_to_id=ticket.escalated_to_id, escalated_at=ticket.escalated_at,
             escalated_to_name=ticket.escalated_to_name,
             student_name=student_name, class_name=class_name, class_code=class_code,

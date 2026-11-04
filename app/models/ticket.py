@@ -2,9 +2,9 @@
 
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, Uuid, func
+from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -32,6 +32,11 @@ class Ticket(Base):
     question: Mapped[str] = mapped_column(Text, nullable=False)
     original_question: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    citations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    source_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True,
+        unique=True,
+    )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="OPEN", server_default="OPEN"
     )
