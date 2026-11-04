@@ -6,18 +6,20 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db
 from app.models.course import Class, ClassTrainer, Enrollment
 from app.models.document import Document
+from app.models.ticket import Ticket
 from app.models.user import User
 from app.schemas.chat import ChatQuotaResponse, ChatRequest
+from app.schemas.tickets import TicketRead
 from app.services import (
     chat_context_service,
     chat_service,
@@ -30,6 +32,48 @@ from app.services.course_service import STATUS_ARCHIVED
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+
+class AnswerFeedback(BaseModel):
+    feedback: Literal["helpful", "not_helpful"]
+
+
+class ConfirmAnswerTicket(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirmed: StrictBool
+    details: str | None = Field(default=None, max_length=10000)
+
+    @field_validator("confirmed")
+    @classmethod
+    def require_confirmation(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError("Explicit confirmation is required.")
+        return value
+
+
+@router.post("/messages/{message_id}/ticket", response_model=TicketRead, status_code=201)
+def confirm_answer_ticket(
+    message_id: uuid.UUID, payload: ConfirmAnswerTicket, response: Response,
+    current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
+) -> Ticket:
+    from app.services.answer_feedback_service import create_answer_ticket
+
+    ticket, created = create_answer_ticket(db, current_user, message_id, (payload.details or "").strip() or None)
+    response.status_code = 201 if created else 200
+    return ticket
+
+
+@router.put("/messages/{message_id}/feedback", response_model=AnswerFeedback)
+def update_answer_feedback(
+    message_id: uuid.UUID, payload: AnswerFeedback,
+    current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
+) -> AnswerFeedback:
+    from app.services.answer_feedback_service import owned_answer
+
+    message = owned_answer(db, current_user, message_id)
+    message.feedback = payload.feedback
+    db.commit()
+    return AnswerFeedback(feedback=payload.feedback)
 
 
 async def _stream_with_quota_refund(
