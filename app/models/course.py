@@ -20,6 +20,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
 if TYPE_CHECKING:
+    from app.models.category import ClassCategory
     from app.models.document import Document
 
 
@@ -70,6 +71,9 @@ class Class(Base):
     )
     info: Mapped["ClassInfo | None"] = relationship(
         "ClassInfo", back_populates="clazz", uselist=False, cascade="all, delete-orphan"
+    )
+    categories: Mapped[list["ClassCategory"]] = relationship(
+        "ClassCategory", back_populates="clazz", cascade="all, delete-orphan"
     )
 
 

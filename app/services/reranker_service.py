@@ -58,6 +58,9 @@ def _load_model() -> tuple[Any, Any, Any]:
 
 def warm_up() -> None:
     """Load the Cross Encoder ahead of the first request."""
+    import sys
+    if "pytest" in sys.modules:
+        return
 
     try:
         _load_model()

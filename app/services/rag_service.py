@@ -76,6 +76,15 @@ class VectorStore(Protocol):
     ) -> list[tuple[Document, float]]:
         """Return ``(chunk, score)`` pairs for one class, best first."""
 
+    def similarity_search_by_vector_with_score(
+        self,
+        embedding: list[float],
+        k: int | None = None,
+        *,
+        class_id: str | None = None,
+    ) -> list[tuple[Document, float]]:
+        """Return ``(chunk, score)`` pairs using pre-computed vector."""
+
 
 @dataclass(frozen=True)
 class ScoredChunk:
@@ -151,6 +160,7 @@ class RetrievalDecision:
     unrelated_threshold: float = DEFAULT_UNRELATED_THRESHOLD
     cluster_count: int = 0
     margin: float = 0.0
+    query_vector: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -291,6 +301,7 @@ def retrieve_class_chunks(
     class_id: uuid.UUID | str,
     store: VectorStore | None = None,
     top_k: int | None = None,
+    query_vector: list[float] | None = None,
 ) -> list[ScoredChunk]:
     """Retrieve the top-k chunks of one class (AC-01) and drop dead documents.
 
@@ -302,11 +313,18 @@ def retrieve_class_chunks(
 
     class_key = str(class_id)
     vector_store = store or default_vector_store(db)
-    pairs = vector_store.similarity_search_with_score(
-        question,
-        k=top_k or settings.retriever_top_k,
-        class_id=class_key,
-    )
+    if query_vector is not None and hasattr(vector_store, 'similarity_search_by_vector_with_score'):
+        pairs = vector_store.similarity_search_by_vector_with_score(
+            query_vector,
+            k=top_k or settings.retriever_top_k,
+            class_id=class_key,
+        )
+    else:
+        pairs = vector_store.similarity_search_with_score(
+            question,
+            k=top_k or settings.retriever_top_k,
+            class_id=class_key,
+        )
 
     allowed = document_service.retrievable_document_ids(db, class_key)
     chunks: list[ScoredChunk] = []
@@ -328,6 +346,7 @@ def decide_source(
     class_id: uuid.UUID | str,
     store: VectorStore | None = None,
     top_k: int | None = None,
+    query_vector: list[float] | None = None,
 ) -> RetrievalDecision:
     """Run retrieval, then route between Curriculum, Internet, or Unrelated."""
 
@@ -340,6 +359,7 @@ def decide_source(
             class_id=class_id,
             store=store,
             top_k=top_k,
+            query_vector=query_vector,
         )
     except Exception:  # retrieval outage must not refuse the request
         logger.warning(
@@ -366,6 +386,7 @@ def decide_source(
         top_score=top_score,
         source=source,
         chunks=tuple(chunks) if source == SOURCE_CURRICULUM else (),
+        query_vector=tuple(query_vector) if query_vector else (),
     )
 
 
@@ -516,6 +537,7 @@ def answer_question(
     internet_search: InternetSearch | None = None,
     generate: GenerateAnswer | None = None,
     top_k: int | None = None,
+    query_vector: list[float] | None = None,
 ) -> QaAnswer:
     """Answer one question from a cited source (curriculum or Internet).
 

@@ -7,6 +7,7 @@ from app.models.attendance import (  # noqa: F401
     Holiday,
     TicketHandover,
 )
+from app.models.category import ClassCategory  # noqa: F401
 from app.models.chat import ChatMessage, ChatSession  # noqa: F401
 from app.models.course import Class, ClassConfig, ClassTrainer, Course, Enrollment  # noqa: F401
 from app.models.document import Document, SyllabusUnit  # noqa: F401
