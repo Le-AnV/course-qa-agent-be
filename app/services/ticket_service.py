@@ -12,6 +12,7 @@ from app.models.ticket import Ticket, TicketReply
 from app.models.user import User
 from app.schemas.tickets import TicketClassCounts, TicketInboxItem, TicketStatus
 from app.services.course_service import class_ids_for_trainer
+from app.services.holiday_service import business_elapsed, holiday_dates, local_date
 from app.services.user_service import role_name_of
 
 TICKET_EXPIRATION = timedelta(days=7)
@@ -70,9 +71,16 @@ def _backup_trainer_id(db: Session, class_id: uuid.UUID) -> uuid.UUID | None:
 
 
 def escalate_stale_tickets(db: Session, *, now: datetime | None = None) -> int:
-    """Escalate each open ticket past the SLA to its class backup trainer once."""
+    """Escalate each open ticket past the holiday-aware SLA once.
+
+    The SQL cutoff is the wall-clock lower bound (a ticket that is not old
+    enough in wall-clock terms cannot be stale in business time either). The
+    final decision removes full Vietnam holiday days from the elapsed window,
+    so holidays do not consume the SLA (AI-156 AC-04).
+    """
     moment = now or datetime.now(UTC)
-    cutoff = moment - ticket_escalation_sla(db)
+    sla = ticket_escalation_sla(db)
+    cutoff = moment - sla
     stale = (
         db.query(Ticket)
         .filter(
@@ -84,6 +92,15 @@ def escalate_stale_tickets(db: Session, *, now: datetime | None = None) -> int:
     )
     escalated = 0
     for ticket in stale:
+        started = ticket.reopened_at or ticket.created_at
+        holidays = holiday_dates(
+            db,
+            local_date(started),
+            local_date(moment),
+            ticket.class_id,
+        )
+        if business_elapsed(started, moment, holidays) < sla:
+            continue
         backup_id = _backup_trainer_id(db, ticket.class_id)
         if backup_id is None:
             continue
