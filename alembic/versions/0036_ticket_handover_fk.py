@@ -5,8 +5,6 @@
 so the deferred foreign key can land now (AI-155 AC-04).
 """
 
-import sqlalchemy as sa
-
 from alembic import op
 
 revision = "0036_ticket_handover_fk"
