@@ -368,7 +368,7 @@ def test_alembic_quiz_migration_upgrade_and_downgrade(tmp_path):
 
     command.stamp(cfg, "0031_ticket_lifecycle")
     # Apply 0032_quiz_schema and 0033_ticket_reopened_at.
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0034_ticket_escalation")
     command.downgrade(cfg, "-1")
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0034_ticket_escalation")
 

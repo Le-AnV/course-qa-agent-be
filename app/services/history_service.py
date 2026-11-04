@@ -378,6 +378,8 @@ def save_chat_turn(
     )
 
     db.add(user_msg)
+    db.flush()
+    assistant_msg.parent_message_id = user_msg.id
     db.add(assistant_msg)
 
     # Update session updated_at

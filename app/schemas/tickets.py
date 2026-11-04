@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -65,6 +65,8 @@ class TicketRead(BaseModel):
     question: str
     original_question: str | None = None
     agent_answer: str | None = None
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    source_message_id: uuid.UUID | None = None
     status: TicketStatus
     created_at: datetime
     escalated_to_id: uuid.UUID | None = None
