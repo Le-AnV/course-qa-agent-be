@@ -17,6 +17,7 @@ from app.core.security import create_access_token
 from app.main import app
 from app.models.attendance import Holiday
 from app.models.course import Class, ClassTrainer, Enrollment
+from app.models.email_outbox import EmailOutbox
 from app.models.system_config import SystemConfig
 from app.models.ticket import Ticket, TicketReply
 from app.models.user import Role, User
@@ -301,6 +302,28 @@ def test_student_can_create_open_ticket_and_add_follow_up(
         "Could you show another example?",
     ]
     assert all(reply.user_id == db_session.info["student_id"] for reply in saved.replies)
+
+
+def test_trainer_answer_queues_an_email_to_the_student(client, db_session):
+    """AI-85 AC-03: the student is notified when the trainer answers."""
+    created = client.post("/api/tickets", headers=_headers(db_session.info["student_id"]), json={
+        "class_id": str(db_session.info["class_id"]), "question": "Please explain this.",
+    })
+    ticket_id = created.json()["id"]
+    reply = client.post(
+        f"/api/tickets/{ticket_id}/replies",
+        headers=_headers(db_session.info["trainer_id"], "trainer"),
+        json={"message": "Here is the explanation."},
+    )
+    assert reply.status_code == 201
+
+    queued = db_session.query(EmailOutbox).filter(
+        EmailOutbox.to_email == "ticket-student@example.com"
+    ).all()
+    assert len(queued) == 1
+    assert queued[0].user_id == db_session.info["student_id"]
+    assert "Trainer" in queued[0].body
+    assert "Here is the explanation." in queued[0].body
 
 
 def test_trainer_answer_requires_student_confirmation_to_resolve(client, db_session):

@@ -1,5 +1,6 @@
 """Student-initiated ticket operations (AI-81, AI-89)."""
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -12,9 +13,12 @@ from app.models.system_config import SystemConfig
 from app.models.ticket import Ticket, TicketReply
 from app.models.user import User
 from app.schemas.tickets import TicketClassCounts, TicketInboxItem, TicketStatus
+from app.services import email_service
 from app.services.course_service import class_ids_for_trainer
 from app.services.holiday_service import business_elapsed, holiday_dates, local_date
 from app.services.user_service import role_name_of
+
+logger = logging.getLogger(__name__)
 
 TICKET_EXPIRATION = timedelta(days=7)
 TICKET_ESCALATION_SLA_KEY = "ticket_escalation_sla_hours"
@@ -235,7 +239,30 @@ def add_trainer_reply(
     ticket.status = "ANSWERED"
     db.commit()
     db.refresh(reply)
+    _queue_student_reply_email(db, ticket=ticket, trainer_id=trainer_id, reply=reply)
     return reply
+
+
+def _queue_student_reply_email(
+    db: Session, *, ticket: Ticket, trainer_id: uuid.UUID, reply: TicketReply
+) -> None:
+    """AC-03: tell the student their trainer answered; never fail the saved reply."""
+    student = db.query(User).filter(User.id == ticket.student_id).first()
+    trainer = db.query(User).filter(User.id == trainer_id).first()
+    if student is None or trainer is None:
+        return
+    clazz = db.query(Class).filter(Class.id == ticket.class_id).first()
+    subject, body = email_service.ticket_reply_email_body(
+        student.full_name,
+        trainer.full_name,
+        clazz.code if clazz is not None else None,
+        ticket.question,
+        reply.message,
+    )
+    try:
+        email_service.queue_email(db, student.email, subject, body, user_id=student.id)
+    except Exception:
+        logger.exception("Failed to queue the ticket reply email for ticket %s", ticket.id)
 
 
 def get_trainer_ticket(
