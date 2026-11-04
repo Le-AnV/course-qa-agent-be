@@ -23,6 +23,7 @@ from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.models.course import Class
+    from app.models.ticket import Ticket
     from app.models.user import User
 
 
@@ -70,6 +71,7 @@ class ChatMessage(Base):
 
     __tablename__ = "chat_message"
     __table_args__ = (
+        CheckConstraint("feedback IN ('helpful', 'not_helpful')", name="ck_chat_message_feedback"),
         CheckConstraint(
             "role IN ('USER', 'ASSISTANT', 'SYSTEM')",
             name="ck_chat_message_role",
@@ -82,6 +84,10 @@ class ChatMessage(Base):
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    feedback: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    parent_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True
+    )
     used_web_search: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # AI-63 AC-03: citations stay attached to the answer that produced them.
     citations: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
@@ -106,3 +112,26 @@ class ChatMessage(Base):
     )
 
     session: Mapped["ChatSession"] = relationship("ChatSession", back_populates="messages")
+    source_ticket: Mapped["Ticket | None"] = relationship("Ticket", uselist=False, passive_deletes="all", lazy="selectin")
+    parent_message: Mapped["ChatMessage | None"] = relationship(
+        "ChatMessage", remote_side=[id], foreign_keys=[parent_message_id],
+        lazy="joined", join_depth=1, passive_deletes="all",
+    )
+
+    @property
+    def original_question(self) -> str | None:
+        """Return the linked USER prompt only when it belongs to this session."""
+        parent = self.parent_message
+        if parent and parent.role == "USER" and parent.session_id == self.session_id:
+            return parent.content
+        return None
+
+    @property
+    def ticket_id(self) -> uuid.UUID | None:
+        """Expose the feedback ticket ID in chat history responses."""
+        return self.source_ticket.id if self.source_ticket else None
+
+    @property
+    def can_create_feedback_ticket(self) -> bool:
+        """Require an assistant answer with an identifiable original question."""
+        return self.role == "ASSISTANT" and self.original_question is not None
