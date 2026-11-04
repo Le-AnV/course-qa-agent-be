@@ -17,6 +17,8 @@ from app.models.chat import ChatMessage, ChatSession
 
 logger = logging.getLogger(__name__)
 
+CONTENT_GAP_COLLECTION = "content_gap_queries"
+
 
 def get_qdrant_client() -> Any | None:
     """Safely obtain a Qdrant client instance using application configuration."""
@@ -29,17 +31,40 @@ def get_qdrant_client() -> Any | None:
         return None
 
 
+def ensure_content_gap_collection(client: Any) -> None:
+    """Ensure the content_gap_queries collection exists in Qdrant (AC-01)."""
+    try:
+        from qdrant_client.http.models import Distance, VectorParams
+        collection_name = CONTENT_GAP_COLLECTION
+        if not client.collection_exists(collection_name):
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=settings.vector_size, distance=Distance.COSINE),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to ensure collection 'content_gap_queries' in Qdrant: %s", exc)
+
+
 def sync_content_gap_query(
     message_id: str,
     class_id: str,
     student_id: str,
     embedding: list[float],
+    *,
+    source: str = "web",
+    fallback_reason: str | None = None,
+    concept_tag: str | None = None,
+    embedding_model_version: str | None = None,
     qdrant_client: Any | None = None,
 ) -> None:
-    """Upsert question query embedding into Qdrant collection 'content_gap_queries' (AC-03, TECHSTACK §3.3).
+    """Upsert question query embedding into Qdrant collection 'content_gap_queries' (AC-01, AC-03).
 
     Zero extra API calls: reuses the embedding vector already computed during retrieval.
+    Strictly avoids storing question text (privacy safeguard).
     """
+    if not embedding:
+        return
+
     client = qdrant_client or get_qdrant_client()
     if client is None:
         return
@@ -47,17 +72,23 @@ def sync_content_gap_query(
     try:
         from qdrant_client.http.models import PointStruct
 
+        ensure_content_gap_collection(client)
+
         point = PointStruct(
             id=message_id,
             vector=embedding,
             payload={
-                "message_id": message_id,
-                "class_id": class_id,
-                "student_id": student_id,
+                "message_id": str(message_id),
+                "class_id": str(class_id),
+                "student_id": str(student_id),
                 "timestamp": datetime.now(UTC).isoformat(),
+                "source": str(source),
+                "fallback_reason": fallback_reason,
+                "concept_tag": concept_tag or "",
+                "embedding_model_version": embedding_model_version or settings.embedding_model,
             },
         )
-        client.upsert(collection_name="content_gap_queries", points=[point])
+        client.upsert(collection_name=CONTENT_GAP_COLLECTION, points=[point])
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to sync content gap query to Qdrant: %s", exc)
 
@@ -78,7 +109,7 @@ def delete_content_gap_queries(
         from qdrant_client.http.models import PointIdsList
 
         client.delete(
-            collection_name="content_gap_queries",
+            collection_name=CONTENT_GAP_COLLECTION,
             points_selector=PointIdsList(points=message_ids),
         )
     except Exception as exc:  # noqa: BLE001
@@ -315,6 +346,8 @@ def save_chat_turn(
     thinking_ms: int | None = None,
     trace: Sequence[str] | None = None,
     query_embedding: list[float] | None = None,
+    fallback_reason: str | None = None,
+    concept_tag: str | None = None,
     qdrant_client: Any | None = None,
     excluded_from_context: bool = False,
 ) -> tuple[ChatSession, ChatMessage, ChatMessage]:
@@ -390,13 +423,17 @@ def save_chat_turn(
     db.refresh(user_msg)
     db.refresh(assistant_msg)
 
-    # 3. Synchronize with Qdrant content_gap_queries if web search was needed
-    if used_web_search and query_embedding:
+    # 3. Synchronize with Qdrant content_gap_queries (AC-01: record every query)
+    if query_embedding:
         sync_content_gap_query(
             message_id=str(assistant_msg.id),
             class_id=str(class_id),
             student_id=str(user_id),
             embedding=query_embedding,
+            source="web" if used_web_search else "material",
+            fallback_reason=fallback_reason if used_web_search else None,
+            concept_tag=concept_tag,
+            embedding_model_version=settings.embedding_model,
             qdrant_client=qdrant_client,
         )
 

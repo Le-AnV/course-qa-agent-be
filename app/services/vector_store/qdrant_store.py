@@ -345,6 +345,42 @@ class QdrantStore:
             )
         return self.vector_store.similarity_search_with_score(query, k=k, filter=query_filter)
 
+    @retry(
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(5),
+        before_sleep=lambda retry_state: logger.warning(
+            "Retrying Qdrant vector scored search... Attempt %s. Error: %s",
+            retry_state.attempt_number,
+            getattr(retry_state.outcome, "exception", lambda: None)() or "unknown error",
+        ),
+    )
+    def similarity_search_by_vector_with_score(
+        self,
+        embedding: list[float],
+        k: int | None = None,
+        *,
+        class_id: str | None = None,
+    ) -> list[tuple[Document, float]]:
+        """Return ``(chunk, score)`` pairs using a pre-computed vector.
+
+        AI-91 (AC-01): Reuses query embedding from retrieval to avoid calling
+        the embedding API twice.
+        """
+        k = k or settings.retriever_top_k
+        query_filter = None
+        if class_id:
+            query_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.class_id",
+                        match=MatchValue(value=str(class_id)),
+                    )
+                ]
+            )
+        return self.vector_store.similarity_search_by_vector_with_score(
+            embedding, k=k, filter=query_filter
+        )
+
     def as_retriever(self, **kwargs):
         """Get the underlying Qdrant vector store as a LangChain retriever.
 

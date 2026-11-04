@@ -17,9 +17,11 @@ from app.core.logging import configure_logging
 from app.core.seed import seed_database
 from app.routers.admin.router import router as admin_router
 from app.routers.auth.router import router as auth_router
+from app.routers.categories import router as categories_router
 from app.routers.chat.router import router as chat_router
 from app.routers.citations.router import router as citations_router
 from app.routers.class_config import router as class_config_router
+from app.routers.content_gaps import router as content_gaps_router
 from app.routers.documents import router as documents_router
 from app.routers.history import router as history_router
 from app.routers.quizzes import router as quizzes_router
@@ -116,6 +118,8 @@ app.include_router(student_router)
 app.include_router(citations_router)
 app.include_router(tickets_router)
 app.include_router(quizzes_router)
+app.include_router(categories_router)
+app.include_router(content_gaps_router)
 
 
 
