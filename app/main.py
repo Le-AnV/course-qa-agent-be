@@ -27,6 +27,7 @@ from app.routers.student.router import router as student_router
 from app.routers.tickets import router as tickets_router
 from app.services import reranker_service
 from app.services.document_service import fail_stale_processing
+from app.services.holiday_service import seed_holidays
 from app.services.system_health_service import build_health
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
             seed_database(db)
             fail_stale_processing(db)
+            try:
+                seed_holidays(db)
+            except Exception as exc:  # noqa: BLE001 - holiday seed must not block boot
+                logger.warning("Holiday seed failed; will retry on next boot: %s", exc)
         finally:
             db.close()
     except (OSError, SQLAlchemyError) as exc:

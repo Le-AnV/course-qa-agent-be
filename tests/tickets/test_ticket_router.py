@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Generator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,10 +14,12 @@ from app.core.database import Base, get_session_local, reset_engine
 from app.core.deps import get_db
 from app.core.security import create_access_token
 from app.main import app
+from app.models.attendance import Holiday
 from app.models.course import Class, ClassTrainer, Enrollment
 from app.models.system_config import SystemConfig
 from app.models.ticket import Ticket, TicketReply
 from app.models.user import Role, User
+from app.services.ticket_service import escalate_stale_tickets
 
 
 @pytest.fixture()
@@ -877,6 +879,44 @@ def test_escalation_sla_is_configurable(client, db_session, inbox):
     items = {item["id"]: item for item in response.json()["items"]}
     assert items[str(escalated.id)]["escalated_to_id"] == str(inbox["co_trainer"].id)
     assert items[str(waiting.id)]["escalated_to_id"] is None
+
+
+def test_holiday_pauses_the_escalation_sla(db_session, inbox):
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    now = datetime(2026, 5, 4, 3, 0, tzinfo=UTC)
+    db_session.add(
+        Holiday(
+            date=date(2026, 5, 3),
+            name="Nghỉ lễ",
+            type="admin",
+            scope="class",
+            class_id=db_session.info["class_id"],
+        )
+    )
+    waiting = Ticket(
+        class_id=db_session.info["class_id"],
+        student_id=db_session.info["student_id"],
+        question="Waiting through a holiday",
+        status="OPEN",
+        created_at=now - timedelta(hours=25),
+    )
+    escalated = Ticket(
+        class_id=db_session.info["class_id"],
+        student_id=db_session.info["student_id"],
+        question="Past the holiday-aware SLA",
+        status="OPEN",
+        created_at=now - timedelta(hours=49),
+    )
+    db_session.add_all([waiting, escalated])
+    db_session.commit()
+
+    assert escalate_stale_tickets(db_session, now=now) == 1
+
+    db_session.refresh(waiting)
+    db_session.refresh(escalated)
+    assert waiting.escalated_to_id is None
+    assert escalated.escalated_to_id == inbox["co_trainer"].id
 
 
 def test_reopened_ticket_uses_a_fresh_escalation_window(client, db_session, inbox):
