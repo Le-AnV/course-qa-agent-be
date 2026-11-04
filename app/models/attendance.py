@@ -237,8 +237,10 @@ class TicketHandover(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    # FK lands with AI-81/AI-83 (the ``ticket`` table does not exist yet).
-    ticket_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # AI-81/AI-83 shipped the ``ticket`` table, so the deferred FK now lands.
+    ticket_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("ticket.id", ondelete="CASCADE"), nullable=False
+    )
     from_trainer_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("user.id", ondelete="RESTRICT"), nullable=False
     )
