@@ -61,8 +61,9 @@ class Ticket(Base):
         cascade="all, delete-orphan",
         order_by="TicketReply.created_at",
     )
+    # Joined so a ticket list does not issue one SELECT per escalated ticket.
     escalated_to: Mapped[Optional["User"]] = relationship(
-        "User", foreign_keys=[escalated_to_id]
+        "User", foreign_keys=[escalated_to_id], lazy="joined"
     )
 
     @property
