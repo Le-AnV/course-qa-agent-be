@@ -1090,3 +1090,92 @@ def test_escalation_sla_is_capped_below_ticket_expiration(client, db_session, in
     assert items[str(escalated.id)]["escalated_to_id"] == str(inbox["co_trainer"].id)
     assert items[str(expired.id)]["status"] == "EXPIRED"
     assert items[str(expired.id)]["escalated_to_id"] is None
+
+
+def test_ticket_list_does_not_query_a_user_per_escalated_ticket(client, db_session, inbox):
+    """Regression: escalated_to_name must not lazy-load one user row per ticket."""
+    from sqlalchemy import event
+
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    class_id = db_session.info["class_id"]
+    for index in range(5):
+        db_session.add(
+            Ticket(
+                class_id=class_id,
+                student_id=db_session.info["student_id"],
+                question=f"Escalated {index}",
+                status="OPEN",
+                created_at=datetime.now(UTC) - timedelta(hours=48),
+                escalated_to_id=inbox["co_trainer"].id,
+                escalated_at=datetime.now(UTC) - timedelta(hours=1),
+            )
+        )
+    db_session.commit()
+
+    statements: list[str] = []
+    engine = db_session.get_bind()
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _capture)
+    try:
+        response = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
+
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 5
+    user_selects = [s for s in statements if s.lstrip().upper().startswith("SELECT USER.")]
+    assert len(user_selects) <= 1, f"expected at most one user SELECT, got {len(user_selects)}"
+
+
+def test_reading_one_ticket_only_sweeps_its_own_class(client, db_session, inbox):
+    """Regression: a single ticket read must not sweep every stale ticket in the DB."""
+    from sqlalchemy import event
+
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    own_class = db_session.info["class_id"]
+    other_class = db_session.info["other_class_id"]
+    own = Ticket(
+        class_id=own_class,
+        student_id=db_session.info["student_id"],
+        question="Own class",
+        status="OPEN",
+        created_at=datetime.now(UTC) - timedelta(hours=48),
+    )
+    db_session.add(own)
+    for index in range(20):
+        db_session.add(
+            Ticket(
+                class_id=other_class,
+                student_id=db_session.info["other_student_id"],
+                question=f"Other class {index}",
+                status="OPEN",
+                created_at=datetime.now(UTC) - timedelta(hours=48),
+            )
+        )
+    db_session.commit()
+
+    statements: list[str] = []
+    engine = db_session.get_bind()
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _capture)
+    try:
+        response = client.get(
+            f"/api/tickets/{own.id}", headers=_headers(db_session.info["student_id"])
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
+
+    assert response.status_code == 200
+    sweep_selects = [s for s in statements if "FROM ticket" in s and "escalated_at IS NULL" in s]
+    assert len(sweep_selects) == 1
+    assert "CLASS_ID IN" in sweep_selects[0].upper()

@@ -71,26 +71,35 @@ def _backup_trainer_id(db: Session, class_id: uuid.UUID) -> uuid.UUID | None:
     return row[0] if row is not None else None
 
 
-def escalate_stale_tickets(db: Session, *, now: datetime | None = None) -> int:
+def escalate_stale_tickets(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    class_ids: set[uuid.UUID] | None = None,
+) -> int:
     """Escalate each open ticket past the holiday-aware SLA once.
 
     The SQL cutoff is the wall-clock lower bound (a ticket that is not old
     enough in wall-clock terms cannot be stale in business time either). The
     final decision removes full Vietnam holiday days from the elapsed window,
     so holidays do not consume the SLA (AI-156 AC-04).
+
+    ``class_ids`` limits the sweep to the classes the caller can already see, so
+    reading one ticket never walks every stale ticket in the database.
     """
+    if class_ids is not None and not class_ids:
+        return 0
     moment = now or datetime.now(UTC)
     sla = ticket_escalation_sla(db)
     cutoff = moment - sla
-    stale = (
-        db.query(Ticket)
-        .filter(
-            Ticket.status == "OPEN",
-            func.coalesce(Ticket.reopened_at, Ticket.created_at) <= cutoff,
-            Ticket.escalated_at.is_(None),
-        )
-        .all()
+    query = db.query(Ticket).filter(
+        Ticket.status == "OPEN",
+        func.coalesce(Ticket.reopened_at, Ticket.created_at) <= cutoff,
+        Ticket.escalated_at.is_(None),
     )
+    if class_ids is not None:
+        query = query.filter(Ticket.class_id.in_(class_ids))
+    stale = query.all()
     escalated = 0
     for ticket in stale:
         started = ticket.reopened_at or ticket.created_at
@@ -167,8 +176,7 @@ def create_student_ticket(
 
 def get_student_ticket(db: Session, *, ticket_id: uuid.UUID, student_id: uuid.UUID) -> Ticket | None:
     expire_open_tickets(db)
-    escalate_stale_tickets(db)
-    return (
+    ticket = (
         db.query(Ticket)
         .join(Class, Ticket.class_id == Class.id)
         .filter(
@@ -178,6 +186,9 @@ def get_student_ticket(db: Session, *, ticket_id: uuid.UUID, student_id: uuid.UU
         )
         .first()
     )
+    if ticket is not None and escalate_stale_tickets(db, class_ids={ticket.class_id}):
+        db.refresh(ticket)
+    return ticket
 
 
 def add_student_reply(
@@ -211,12 +222,13 @@ def add_trainer_reply(
     message: str,
 ) -> TicketReply | None:
     expire_open_tickets(db)
-    escalate_stale_tickets(db)
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if ticket is None or ticket.status != "OPEN":
         return None
     if ticket.class_id not in class_ids_for_trainer(db, trainer_id, active_only=True):
         raise PermissionError("You are not assigned to this class.")
+    if escalate_stale_tickets(db, class_ids={ticket.class_id}):
+        db.refresh(ticket)
 
     reply = TicketReply(ticket_id=ticket.id, user_id=trainer_id, message=message)
     db.add(reply)
@@ -367,11 +379,11 @@ def list_trainer_tickets(
     page_size: int = 20,
 ) -> tuple[list[TicketInboxItem], int]:
     expire_open_tickets(db)
-    escalate_stale_tickets(db)
     assigned = class_ids_for_trainer(db, trainer_id, active_only=True)
     if class_id is not None and class_id not in assigned:
         raise PermissionError("You are not assigned to this class.")
     scope = {class_id} if class_id is not None else assigned
+    escalate_stale_tickets(db, class_ids=scope)
     query = (
         db.query(Ticket, User.full_name, Class.name, Class.code, Class.status)
         .join(User, Ticket.student_id == User.id)
