@@ -7,6 +7,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -14,10 +15,10 @@ from app.core.deps import get_current_user, get_db
 from app.models.course import Class
 from app.models.quiz import Quiz, QuizOption, QuizQuestion
 from app.models.user import User
-from app.schemas.quiz import QuizTeacherRead
+from app.schemas.quiz import QuizSummaryRead, QuizTeacherRead
 from app.services import course_service, quiz_excel, user_service
 
-router = APIRouter(prefix="/api/classes/{class_id}/quizzes/import", tags=["quizzes"])
+router = APIRouter(prefix="/api/classes/{class_id}/quizzes", tags=["quizzes"])
 
 
 def _require_class_teacher(db: Session, user: User, class_id: uuid.UUID) -> Class:
@@ -52,7 +53,7 @@ def _parse_result(result: quiz_excel.ExcelParseResult) -> dict:
     }
 
 
-@router.post("/preview")
+@router.post("/import/preview")
 async def preview_quiz_import(
     class_id: uuid.UUID,
     file: UploadFile = File(...),
@@ -65,7 +66,7 @@ async def preview_quiz_import(
     return _parse_result(result)
 
 
-@router.post("", response_model=QuizTeacherRead, status_code=status.HTTP_201_CREATED)
+@router.post("/import", response_model=QuizTeacherRead, status_code=status.HTTP_201_CREATED)
 async def import_quiz(
     class_id: uuid.UUID,
     title: str = Form(..., min_length=1, max_length=255),
@@ -127,7 +128,7 @@ async def import_quiz(
     return QuizTeacherRead.model_validate(quiz)
 
 
-@router.get("/template")
+@router.get("/import/template")
 def download_quiz_template(
     class_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -142,3 +143,50 @@ def download_quiz_template(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="quiz_template.xlsx"'},
     )
+
+
+@router.get("", response_model=list[QuizSummaryRead])
+def list_class_quizzes(
+    class_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[QuizSummaryRead]:
+    """List this class' quizzes for the teacher import page."""
+
+    _require_class_teacher(db, user, class_id)
+    rows = (
+        db.query(Quiz, func.count(QuizQuestion.id))
+        .outerjoin(QuizQuestion, QuizQuestion.quiz_id == Quiz.id)
+        .filter(Quiz.class_id == class_id)
+        .group_by(Quiz.id)
+        .order_by(Quiz.created_at.desc())
+        .all()
+    )
+    return [
+        QuizSummaryRead(
+            id=quiz.id,
+            title=quiz.title,
+            description=quiz.description,
+            status=quiz.status,
+            question_count=question_count,
+            created_at=quiz.created_at,
+            updated_at=quiz.updated_at,
+        )
+        for quiz, question_count in rows
+    ]
+
+
+@router.get("/{quiz_id}", response_model=QuizTeacherRead)
+def get_class_quiz(
+    class_id: uuid.UUID,
+    quiz_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> QuizTeacherRead:
+    """Full quiz with questions, options and accepted answers for review."""
+
+    _require_class_teacher(db, user, class_id)
+    quiz = db.get(Quiz, quiz_id)
+    if quiz is None or quiz.class_id != class_id:
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    return QuizTeacherRead.model_validate(quiz)

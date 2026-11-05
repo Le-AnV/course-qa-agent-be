@@ -225,6 +225,20 @@ class QuizTeacherRead(QuizBase):
     questions: list[QuizQuestionTeacherRead] = Field(default_factory=list)
 
 
+class QuizSummaryRead(BaseModel):
+    """Lightweight quiz row for the teacher import list."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    title: str
+    description: str | None = None
+    status: QuizStatus
+    question_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
 class QuizStudentExamRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
