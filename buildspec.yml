@@ -1,0 +1,17 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to ECR..."
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPO_URI
+      - echo "Build image $ECR_REPO_URI:$IMAGE_TAG from $(pwd)"
+  build:
+    commands:
+      - export DOCKER_BUILDKIT=1
+      - docker build --progress=plain -t $ECR_REPO_URI:$IMAGE_TAG .
+  post_build:
+    commands:
+      - echo "Pushing $ECR_REPO_URI:$IMAGE_TAG"
+      - docker push $ECR_REPO_URI:$IMAGE_TAG
+      - echo "DONE pushing"
