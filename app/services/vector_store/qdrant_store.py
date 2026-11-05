@@ -377,8 +377,17 @@ class QdrantStore:
                     )
                 ]
             )
-        return self.vector_store.similarity_search_by_vector_with_score(
-            embedding, k=k, filter=query_filter
+        if hasattr(self.vector_store, "similarity_search_with_score_by_vector"):
+            return self.vector_store.similarity_search_with_score_by_vector(
+                embedding, k=k, filter=query_filter
+            )
+        if hasattr(self.vector_store, "similarity_search_by_vector_with_score"):
+            return self.vector_store.similarity_search_by_vector_with_score(
+                embedding, k=k, filter=query_filter
+            )
+        raise AttributeError(
+            f"Vector store {type(self.vector_store).__name__} does not implement "
+            "similarity_search_with_score_by_vector or similarity_search_by_vector_with_score"
         )
 
     def as_retriever(self, **kwargs):
