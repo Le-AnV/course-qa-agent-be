@@ -18,7 +18,6 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-writer-nogui \
-    antiword \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/.venv /app/.venv
