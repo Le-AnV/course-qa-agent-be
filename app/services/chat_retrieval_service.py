@@ -1,9 +1,11 @@
+
 """Class-scoped retrieval and reranking for the AI-61 document chat."""
 
 from __future__ import annotations
 
 import logging
 import uuid
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -36,6 +38,7 @@ def retrieve_for_chat(
 
     threshold_high = rag_service.get_retrieval_threshold(db)
     threshold_low = rag_service.get_unrelated_threshold(db)
+    query_vector: list[float] | None = None
     if not question or not question.strip():
         return RetrievalDecision(
             question=question,
@@ -47,12 +50,25 @@ def retrieve_for_chat(
             chunks=(),
         )
     try:
-        candidates = rag_service.retrieve_class_chunks(
-            db,
-            question=question,
-            class_id=class_id,
-            top_k=RERANK_CANDIDATES,
-        )
+        try:
+            from app.services.embedding.gemini_embedding import GeminiEmbedding
+            query_vector = GeminiEmbedding(db=db).embed_query(question)
+        except Exception:
+            logger.warning("Pre-computing query embedding failed; falling back to text query.", exc_info=True)
+            query_vector = None
+
+        retrieval_kwargs: dict[str, Any] = {
+            "question": question,
+            "class_id": class_id,
+            "top_k": RERANK_CANDIDATES,
+        }
+        if query_vector is not None:
+            import inspect
+            sig = inspect.signature(rag_service.retrieve_class_chunks)
+            if "query_vector" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                retrieval_kwargs["query_vector"] = query_vector
+
+        candidates = rag_service.retrieve_class_chunks(db, **retrieval_kwargs)
         if search_query_en and search_query_en.strip() and search_query_en.strip().lower() != question.strip().lower():
             try:
                 en_candidates = rag_service.retrieve_class_chunks(
@@ -81,6 +97,7 @@ def retrieve_for_chat(
                 top_score=None,
                 source=SOURCE_NONE,
                 chunks=(),
+                query_vector=tuple(query_vector) if query_vector else (),
             )
 
         top_candidate_score = candidates[0].score
@@ -96,6 +113,7 @@ def retrieve_for_chat(
                 top_score=top_candidate_score,
                 source=rag_service.SOURCE_UNRELATED,
                 chunks=(),
+                query_vector=tuple(query_vector) if query_vector else (),
             )
 
         ranked_candidates = rerank_chunks(question, candidates, top_k=len(candidates))
@@ -139,4 +157,5 @@ def retrieve_for_chat(
         chunks=tuple(chunks),
         cluster_count=cluster_count,
         margin=margin,
+        query_vector=tuple(query_vector) if query_vector else (),
     )

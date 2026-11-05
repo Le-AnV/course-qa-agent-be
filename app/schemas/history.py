@@ -84,6 +84,10 @@ class ChatMessageResponse(ChatMessageBase):
     id: uuid.UUID
     session_id: uuid.UUID
     created_at: datetime
+    feedback: Literal["helpful", "not_helpful"] | None = None
+    ticket_id: uuid.UUID | None = None
+    can_create_feedback_ticket: bool = False
+    original_question: str | None = None
 
 
 class SessionCreateRequest(BaseModel):

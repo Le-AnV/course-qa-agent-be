@@ -204,6 +204,29 @@ def _format_messages(
     ]
 
 
+def _tag_pedagogy(
+    message: str,
+    code_content: str = "",
+    scope_decision: Any = None,
+    action: str = "",
+) -> str:
+    """Determine pedagogical category for Content Gap analytics (0 extra API requests)."""
+    msg_l = (message or "").lower()
+    if any(p.search(code_content) for p in decision_service._COMPILER_ERROR_PATTERNS) or any(
+        kw in msg_l for kw in ["lỗi", "error", "segfault", "crash", "leak", "bug", "sai ở đâu", "tại sao sai"]
+    ):
+        return "Troubleshooting & Edge Cases"
+    if (scope_decision and getattr(scope_decision, "verdict", None) == decision_service.ScopeVerdict.COMPARISON.value) or any(
+        kw in msg_l for kw in ["so sánh", "vs", "compare", "khác nhau", "nhanh hơn", "ưu nhược điểm", "phân biệt"]
+    ):
+        return "In-Scope Comparison"
+    if bool(code_content) or action in ("code_help", "docs_socratic") or any(
+        kw in msg_l for kw in ["code", "syntax", "thực hành", "bài tập", "hướng dẫn", "ví dụ", "example", "cài đặt", "hàm", "function"]
+    ):
+        return "Practical Implementation"
+    return "Foundational Concepts"
+
+
 async def _persist_turn(
     *,
     db: Session,
@@ -218,6 +241,9 @@ async def _persist_turn(
     excluded_from_context: bool = False,
     thinking_ms: int | None = None,
     trace: Sequence[str] | None = None,
+    query_embedding: Sequence[float] | None = None,
+    fallback_reason: str | None = None,
+    concept_tag: str | None = None,
 ) -> tuple[Any, Any, Any] | None:
     """Save a completed turn without letting a DB failure break the SSE stream."""
 
@@ -239,6 +265,9 @@ async def _persist_turn(
             excluded_from_context=excluded_from_context,
             thinking_ms=thinking_ms,
             trace=trace,
+            query_embedding=list(query_embedding) if query_embedding else None,
+            fallback_reason=fallback_reason,
+            concept_tag=concept_tag,
         )
     except Exception:
         logger.exception("Failed to persist chat turn for class %s.", class_id)
@@ -422,6 +451,7 @@ async def stream_chat(
                     yield _sse("token", {"text": chunk})
                     await asyncio.sleep(0.02)
 
+                trace_steps["pedagogy"] = f"pedagogy:{_tag_pedagogy(message)}"
                 saved_turn = await _persist_turn(
                     db=db,
                     user_id=user_id,
@@ -563,6 +593,7 @@ async def stream_chat(
                         )
                     answer_parts.append(text)
                     yield _sse("token", {"text": text})
+                    trace_steps["pedagogy"] = f"pedagogy:{_tag_pedagogy(message, student_code, scope_decision)}"
                     saved_turn = await _persist_turn(
                         db=db,
                         user_id=user_id,
@@ -1150,6 +1181,27 @@ async def stream_chat(
 
             citation_payload = [asdict(source) for source in sources]
             used_web = action in ("web_search", "docs_plus_web") or decision.source == rag_service.SOURCE_INTERNET
+
+            fallback_reason: str | None = None
+            if used_web:
+                if not decision.chunks:
+                    fallback_reason = "no_results"
+                elif decision.top_score is not None and decision.top_score < decision.threshold:
+                    fallback_reason = "similarity_below_threshold"
+                else:
+                    fallback_reason = "insufficient_context"
+
+            concept_tag: str | None = None
+            if scope_decision and scope_decision.external_search_query:
+                concept_tag = scope_decision.external_search_query.strip()
+            elif scope_decision and scope_decision.search_query_en:
+                concept_tag = scope_decision.search_query_en.strip()
+            elif decision.chunks:
+                concept_tag = decision.chunks[0].title
+            else:
+                concept_tag = standalone_question[:50]
+
+            trace_steps["pedagogy"] = f"pedagogy:{_tag_pedagogy(message, student_code, scope_decision, action)}"
             saved_turn = await _persist_turn(
                 db=db,
                 user_id=user_id,
@@ -1162,6 +1214,9 @@ async def stream_chat(
                 used_web_search=used_web,
                 thinking_ms=first_token_ms,
                 trace=list(trace_steps.values()),
+                query_embedding=list(decision.query_vector) if decision.query_vector else None,
+                fallback_reason=fallback_reason,
+                concept_tag=concept_tag,
             )
             saved_session, user_msg, assistant_msg = saved_turn or (None, None, None)
 

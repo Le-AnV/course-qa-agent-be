@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import Generator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,10 +15,13 @@ from app.core.database import Base, get_session_local, reset_engine
 from app.core.deps import get_db
 from app.core.security import create_access_token
 from app.main import app
+from app.models.attendance import Holiday
 from app.models.course import Class, ClassTrainer, Enrollment
+from app.models.email_outbox import EmailOutbox
 from app.models.system_config import SystemConfig
 from app.models.ticket import Ticket, TicketReply
 from app.models.user import Role, User
+from app.services.ticket_service import escalate_stale_tickets
 
 
 @pytest.fixture()
@@ -32,11 +36,18 @@ def db_session(monkeypatch) -> Generator[Session, None, None]:
 
     reset_engine()
     monkeypatch.setattr(settings, "database_url", "sqlite://")
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    pg_url = os.getenv("AI135_TEST_DATABASE_URL")
+    schema = "ai135_" + uuid.uuid4().hex
+    if pg_url:
+        from sqlalchemy import text
+        admin_engine = create_engine(pg_url)
+        with admin_engine.begin() as connection:
+            connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+        engine = create_engine(pg_url, connect_args={"options": f"-csearch_path={schema}"})
+    else:
+        engine = create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+        )
     dbmod._engine = engine
     dbmod._SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     dbmod._db_url = "sqlite://"
@@ -99,6 +110,10 @@ def db_session(monkeypatch) -> Generator[Session, None, None]:
     finally:
         db.close()
         engine.dispose()
+        if pg_url:
+            with admin_engine.begin() as connection:
+                connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+            admin_engine.dispose()
         reset_engine()
 
 
@@ -116,6 +131,138 @@ def client(db_session: Session) -> Generator[TestClient, None, None]:
 def _headers(user_id: uuid.UUID, role: str = "student") -> dict[str, str]:
     token = create_access_token(str(user_id), role)
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_answer_feedback_persists_without_creating_ticket(client, db_session):
+    from app.services.history_service import save_chat_turn
+
+    _, question, answer = save_chat_turn(
+        db_session, db_session.info["student_id"], db_session.info["class_id"],
+        "Original question", "Complete answer",
+    )
+    url = f"/api/chat/messages/{answer.id}/feedback"
+    headers = _headers(db_session.info["student_id"])
+    for choice in ("not_helpful", "helpful"):
+        response = client.put(url, headers=headers, json={"feedback": choice})
+        assert response.status_code == 200
+        assert response.json()["feedback"] == choice
+        db_session.refresh(answer)
+        assert answer.feedback == choice
+    assert answer.parent_message_id == question.id
+    assert db_session.query(Ticket).count() == 0
+    history = client.get(f"/api/history/{answer.session_id}", headers=headers)
+    assert history.json()["messages"][-1]["feedback"] == "helpful"
+    assert history.json()["messages"][-1]["ticket_id"] is None
+    assert client.put(f"/api/chat/messages/{question.id}/feedback", headers=headers,
+                      json={"feedback": "helpful"}).status_code == 409
+    assert client.put(url, headers=headers, json={"feedback": "invalid"}).status_code == 422
+    assert client.put(url, headers=_headers(db_session.info["other_student_id"]),
+                      json={"feedback": "helpful"}).status_code == 404
+    assert client.put(url, headers=_headers(db_session.info["trainer_id"], "trainer"),
+                      json={"feedback": "helpful"}).status_code == 403
+
+
+def test_confirmed_answer_ticket_snapshot_and_retry(client, db_session):
+    from app.services.history_service import save_chat_turn
+
+    citation = {"index": 1, "kind": "internet", "title": "Source", "url": "https://example.com", "snippet": "Evidence"}
+    session, _, answer = save_chat_turn(
+        db_session, db_session.info["student_id"], db_session.info["class_id"],
+        "Original question", "A" * 12000, citations=[citation],
+    )
+    headers = _headers(db_session.info["student_id"])
+    url = f"/api/chat/messages/{answer.id}/ticket"
+    assert client.post(url, headers=headers, json={"confirmed": True}).status_code == 409
+    client.put(f"/api/chat/messages/{answer.id}/feedback", headers=headers, json={"feedback": "not_helpful"})
+    for invalid in ({}, {"confirmed": False}, {"confirmed": "true"}):
+        assert client.post(url, headers=headers, json=invalid).status_code == 422
+    assert db_session.query(Ticket).count() == 0
+    created = client.post(url, headers=headers, json={"confirmed": True, "details": "Please explain"})
+    assert created.status_code == 201
+    ticket = created.json()
+    assert ticket["original_question"] == "Original question"
+    assert ticket["agent_answer"] == "A" * 12000
+    assert ticket["citations"][0]["title"] == "Source"
+    assert ticket["source_message_id"] == str(answer.id)
+    inbox = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
+    assert inbox.status_code == 200
+    assert inbox.json()["items"][0]["citations"][0]["title"] == "Source"
+    assert client.post(url, headers=_headers(db_session.info["other_student_id"]), json={"confirmed": True}).status_code == 404
+    assert client.post(url, headers=_headers(db_session.info["trainer_id"], "trainer"), json={"confirmed": True}).status_code == 403
+    assert client.post(url, headers=headers, json={"confirmed": True, "class_id": str(db_session.info["other_class_id"])}).status_code == 422
+    client.put(f"/api/chat/messages/{answer.id}/feedback", headers=headers, json={"feedback": "helpful"})
+    repeated = client.post(url, headers=headers, json={"confirmed": True, "details": "Different"})
+    assert repeated.status_code == 200
+    assert repeated.json()["id"] == ticket["id"]
+    assert db_session.query(Ticket).count() == 1
+    assert db_session.query(TicketReply).count() == 1
+    history = client.get(f"/api/history/{session.id}", headers=headers)
+    assert history.status_code == 200
+    saved_answer = history.json()["messages"][-1]
+    assert saved_answer["feedback"] == "helpful"
+    assert saved_answer["ticket_id"] == ticket["id"]
+
+
+@pytest.mark.skipif(not os.getenv("AI135_TEST_DATABASE_URL"), reason="PostgreSQL test URL required")
+def test_answer_ticket_concurrency_and_delete_snapshot(db_session):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sqlalchemy import select
+
+    from app.models.chat import ChatSession
+    from app.services.answer_feedback_service import create_answer_ticket
+    from app.services.history_service import save_chat_turn
+
+    session, _, answer = save_chat_turn(
+        db_session, db_session.info["student_id"], db_session.info["class_id"], "Question", "Answer",
+    )
+    answer.feedback = "not_helpful"
+    db_session.commit()
+    message_id, student_id, session_id = answer.id, db_session.info["student_id"], session.id
+
+    def submit():
+        with Session(db_session.bind) as independent:
+            user = independent.get(User, student_id)
+            ticket, _ = create_answer_ticket(independent, user, message_id, "Details")
+            ticket_id = ticket.id
+            independent.commit()
+            return ticket_id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: submit(), range(2)))
+    assert results[0] == results[1]
+    assert db_session.query(Ticket).count() == 1
+    assert db_session.query(TicketReply).count() == 1
+    db_session.expire_all()
+    db_session.delete(db_session.get(ChatSession, session_id))
+    db_session.commit()
+    db_session.expire_all()
+    ticket = db_session.scalar(select(Ticket))
+    assert ticket.source_message_id is None
+    assert ticket.original_question == "Question"
+    assert ticket.agent_answer == "Answer"
+    assert ticket.citations == []
+
+
+@pytest.mark.parametrize("condition", ["missing_parent", "inactive_class", "inactive_enrollment"])
+def test_answer_ticket_rejects_unavailable_context(client, db_session, condition):
+    from app.services.history_service import save_chat_turn
+
+    _, _, answer = save_chat_turn(
+        db_session, db_session.info["student_id"], db_session.info["class_id"], "Q", "A",
+    )
+    answer.feedback = "not_helpful"
+    if condition == "missing_parent":
+        answer.parent_message_id = None
+    elif condition == "inactive_class":
+        db_session.get(Class, db_session.info["class_id"]).status = "ARCHIVED"
+    else:
+        db_session.query(Enrollment).first().status = "INACTIVE"
+    db_session.commit()
+    response = client.post(f"/api/chat/messages/{answer.id}/ticket",
+                           headers=_headers(db_session.info["student_id"]), json={"confirmed": True})
+    assert response.status_code == (409 if condition == "missing_parent" else 403)
+    assert db_session.query(Ticket).count() == 0
 
 
 def test_student_can_create_open_ticket_and_add_follow_up(
@@ -155,6 +302,28 @@ def test_student_can_create_open_ticket_and_add_follow_up(
         "Could you show another example?",
     ]
     assert all(reply.user_id == db_session.info["student_id"] for reply in saved.replies)
+
+
+def test_trainer_answer_queues_an_email_to_the_student(client, db_session):
+    """AI-85 AC-03: the student is notified when the trainer answers."""
+    created = client.post("/api/tickets", headers=_headers(db_session.info["student_id"]), json={
+        "class_id": str(db_session.info["class_id"]), "question": "Please explain this.",
+    })
+    ticket_id = created.json()["id"]
+    reply = client.post(
+        f"/api/tickets/{ticket_id}/replies",
+        headers=_headers(db_session.info["trainer_id"], "trainer"),
+        json={"message": "Here is the explanation."},
+    )
+    assert reply.status_code == 201
+
+    queued = db_session.query(EmailOutbox).filter(
+        EmailOutbox.to_email == "ticket-student@example.com"
+    ).all()
+    assert len(queued) == 1
+    assert queued[0].user_id == db_session.info["student_id"]
+    assert "Trainer" in queued[0].body
+    assert "Here is the explanation." in queued[0].body
 
 
 def test_trainer_answer_requires_student_confirmation_to_resolve(client, db_session):
@@ -879,6 +1048,44 @@ def test_escalation_sla_is_configurable(client, db_session, inbox):
     assert items[str(waiting.id)]["escalated_to_id"] is None
 
 
+def test_holiday_pauses_the_escalation_sla(db_session, inbox):
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    now = datetime(2026, 5, 4, 3, 0, tzinfo=UTC)
+    db_session.add(
+        Holiday(
+            date=date(2026, 5, 3),
+            name="Nghỉ lễ",
+            type="admin",
+            scope="class",
+            class_id=db_session.info["class_id"],
+        )
+    )
+    waiting = Ticket(
+        class_id=db_session.info["class_id"],
+        student_id=db_session.info["student_id"],
+        question="Waiting through a holiday",
+        status="OPEN",
+        created_at=now - timedelta(hours=25),
+    )
+    escalated = Ticket(
+        class_id=db_session.info["class_id"],
+        student_id=db_session.info["student_id"],
+        question="Past the holiday-aware SLA",
+        status="OPEN",
+        created_at=now - timedelta(hours=49),
+    )
+    db_session.add_all([waiting, escalated])
+    db_session.commit()
+
+    assert escalate_stale_tickets(db_session, now=now) == 1
+
+    db_session.refresh(waiting)
+    db_session.refresh(escalated)
+    assert waiting.escalated_to_id is None
+    assert escalated.escalated_to_id == inbox["co_trainer"].id
+
+
 def test_reopened_ticket_uses_a_fresh_escalation_window(client, db_session, inbox):
     db_session.query(Ticket).delete()
     db_session.commit()
@@ -906,3 +1113,92 @@ def test_escalation_sla_is_capped_below_ticket_expiration(client, db_session, in
     assert items[str(escalated.id)]["escalated_to_id"] == str(inbox["co_trainer"].id)
     assert items[str(expired.id)]["status"] == "EXPIRED"
     assert items[str(expired.id)]["escalated_to_id"] is None
+
+
+def test_ticket_list_does_not_query_a_user_per_escalated_ticket(client, db_session, inbox):
+    """Regression: escalated_to_name must not lazy-load one user row per ticket."""
+    from sqlalchemy import event
+
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    class_id = db_session.info["class_id"]
+    for index in range(5):
+        db_session.add(
+            Ticket(
+                class_id=class_id,
+                student_id=db_session.info["student_id"],
+                question=f"Escalated {index}",
+                status="OPEN",
+                created_at=datetime.now(UTC) - timedelta(hours=48),
+                escalated_to_id=inbox["co_trainer"].id,
+                escalated_at=datetime.now(UTC) - timedelta(hours=1),
+            )
+        )
+    db_session.commit()
+
+    statements: list[str] = []
+    engine = db_session.get_bind()
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _capture)
+    try:
+        response = client.get("/api/tickets", headers=_headers(db_session.info["trainer_id"], "trainer"))
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
+
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 5
+    user_selects = [s for s in statements if s.lstrip().upper().startswith("SELECT USER.")]
+    assert len(user_selects) <= 1, f"expected at most one user SELECT, got {len(user_selects)}"
+
+
+def test_reading_one_ticket_only_sweeps_its_own_class(client, db_session, inbox):
+    """Regression: a single ticket read must not sweep every stale ticket in the DB."""
+    from sqlalchemy import event
+
+    db_session.query(Ticket).delete()
+    db_session.commit()
+    own_class = db_session.info["class_id"]
+    other_class = db_session.info["other_class_id"]
+    own = Ticket(
+        class_id=own_class,
+        student_id=db_session.info["student_id"],
+        question="Own class",
+        status="OPEN",
+        created_at=datetime.now(UTC) - timedelta(hours=48),
+    )
+    db_session.add(own)
+    for index in range(20):
+        db_session.add(
+            Ticket(
+                class_id=other_class,
+                student_id=db_session.info["other_student_id"],
+                question=f"Other class {index}",
+                status="OPEN",
+                created_at=datetime.now(UTC) - timedelta(hours=48),
+            )
+        )
+    db_session.commit()
+
+    statements: list[str] = []
+    engine = db_session.get_bind()
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _capture)
+    try:
+        response = client.get(
+            f"/api/tickets/{own.id}", headers=_headers(db_session.info["student_id"])
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
+
+    assert response.status_code == 200
+    sweep_selects = [s for s in statements if "FROM ticket" in s and "escalated_at IS NULL" in s]
+    assert len(sweep_selects) == 1
+    assert "CLASS_ID IN" in sweep_selects[0].upper()
