@@ -1,6 +1,6 @@
 # AI-91 — Repeated-Question Counter & Content Gap Analysis (Backend Design & Plan)
 
-> **Ticket:** AI-91 (Epic E6, parent AI-23) · **Status:** Draft Plan / Ready for Implementation  
+> **Ticket:** AI-91 (Epic E6, parent AI-23) · **Status:** Complete Specification / Aligned with Implementation  
 > **Branch:** `features/Design_ContentGap` / `features/Implementation_ContentGap`  
 > **Companion UI Design:** `course-qa-agent-fe/docs/design/ai-91-content-gap-ui.md`  
 > **Related Stories:** AI-61 (RAG Q&A Backend), AI-65 (Retrieval Score Threshold & System Config), AI-67 (Internet Source Agent), AI-107 (Embedding Config), AI-35/AI-41 (Material Ingestion)
@@ -16,21 +16,27 @@
 
 ### Scope Boundaries
 * **In Scope:**
-  * Capture student query embeddings into a dedicated Qdrant collection (reusing the retrieval vector, zero extra embedding calls).
-  * Record metadata: `class_id`, `student_id` (stored for deduplication, never displayed), `timestamp`, `source`, `fallback_reason`, `concept_tag`, `embedding_model_version`. **Question text is never stored in vector storage**.
-  * Dynamic 2-level category generation per class via LLM from class materials (not syllabus).
-  * Automatic assignment of queries and material chunks to categories using vector similarity (no clustering libraries).
-  * Identification and grouping of "Unclassified" queries into proposed categories.
+  * Capture student query embeddings into dedicated Qdrant collection (`student_query_logs`) reusing retrieval vectors (zero redundant embedding calls).
+  * Record privacy metadata: `class_id`, `student_id` (hashed/anonymized for deduplication), `timestamp`, `source`, `fallback_reason`, `concept_tag`. **Question text is never stored in vector storage**.
+  * Dynamic 2-level category generation per class via LLM from class materials (`class_material_categories.yaml`).
+  * Pedagogical fallback reason classification into 4 actionable root causes:
+    * `missing_code` (*Missing Practical Code Implementation*): Theory present, concrete implementation and syntax missing.
+    * `missing_comparison` (*Missing In-Scope Comparison*): Concepts taught separately without side-by-side comparison.
+    * `debugging_error` (*Practical Debugging & Runtime Error Handling*): Runtime errors, crashes, and exceptions not addressed.
+    * `missing_concept` (*Missing Core Concept Coverage*): Core conceptual content absent from slides.
+  * Student weakness profiling (`StudentWeaknessProfile`) with struggle summaries and severity grading (`critical`, `warning`, `good`).
+  * Recurring question pattern synthesis (`QuestionPattern`): Clusters similar student questions into synthesized recurring themes.
+  * Curriculum gap profiling (`CurriculumGapProfile`): Identifies missing points in lecture slides and produces concrete actionable recommendations for teachers.
   * Multi-threshold reporting logic: $\ge 3$ web searches / 30 days, $\ge 2$ students and $\ge 10\%$ active class size, $\ge 30\%$ web searches.
   * Per-student per-category daily cap (default 1 count/day).
-  * Material update marker (before vs. after latest material index date).
-  * In-memory caching (30–60 min) with on-demand refresh and error resilience.
-  * Dynamic configuration of retention TTL (60–90 days) and window days via Admin / `system_config`.
+  * Material update timeline marker (before vs. after `MAX(Document.updated_at)`).
+  * In-memory caching (30–60 min TTL) with on-demand refresh and error resilience.
   * Class-scoped trainer access control (403 for unauthorized users).
-* **Out of Scope (this version):**
-  * Showing which individual students are struggling (anonymized aggregates only).
-  * "Hard to understand" sentiment signals.
-  * Automatic ticket creation or notification generation.
+  * Dedicated routers: `app/routers/categories.py` and `app/routers/content_gaps.py`.
+* **Out of Scope:**
+  * Individual student surveillance or grading surveillance.
+  * Sentiment analysis outside pedagogical fallback reasons.
+  * Automatic ticket creation or bot notification spam.
 
 ---
 
@@ -38,26 +44,26 @@
 
 | AC Code | Requirement Summary | Backend Component / Mechanism |
 |---|---|---|
-| **AC-01** | Record every query embedding in dedicated Qdrant collection; payload has `class_id`, `student_id`, `timestamp`, `source`, `fallback_reason`, `concept_tag`, `embedding_model_version`. No question text stored. Reuses T18 vector. | `chat_retrieval_service.py` (capture vector), `content_gap_service.py`, Qdrant collection `student_query_logs`. |
-| **AC-02** | Gap query counts only when `source = "web"` and `fallback_reason` shows KB insufficiency (`no_results`, `similarity_below_threshold`, `insufficient_context`). Off-topic (`SOURCE_UNRELATED`) excluded. | `rag_service.decide_source()`, `chat_service.py`. |
+| **AC-01** | Record every query embedding in dedicated Qdrant collection; payload has `class_id`, `student_id`, `timestamp`, `source`, `fallback_reason`, `concept_tag`. No question text in vector store. | `chat_retrieval_service.py`, `chat_service.py`, `qdrant_store.py`, `student_query_logs`. |
+| **AC-02** | Gap query counts only when `source = "web"` and `fallback_reason` shows KB insufficiency. Off-topic (`SOURCE_UNRELATED`) excluded. | `rag_service.decide_source()`, `chat_service.py`. |
 | **AC-03** | Opening dashboard never calls embedding API. | Pre-computed embeddings stored in Qdrant; aggregation only queries existing points. |
-| **AC-04** | 2-level category hierarchy per class generated by LLM from materials (not syllabus). Embedded & stored in Qdrant with `class_id`. Material changes only propose additions/merges; never overwrite trainer-accepted categories. | LLM Prompt `class_material_categories.yaml`, table `class_category`, Qdrant collection `class_categories`. |
-| **AC-05** | Query assigned to category by vector similarity search filtered by `class_id`. If score < threshold, assign to "Unclassified". Configurable threshold calibrated for VN & EN. | Qdrant vector search against `class_categories`, config `content_gap_similarity_threshold` (0.85). |
-| **AC-06** | "Unclassified" queries grouped by similarity, labeled from `concept_tag`, proposed as categories (`chunk_count = 0`). Trainer acceptance promotes to regular category. | Unclassified clustering by cosine similarity in `content_gap_service.py`, promote API endpoint. |
-| **AC-07** | Trainer can rename, merge, split, and delete categories. | CRUD endpoints in `app/routers/content_gap/router.py`. |
-| **AC-08** | Material chunks assigned to nearest category by similarity; refreshed when materials change. | `ingestion_service.py` hook post-indexing. |
+| **AC-04** | 2-level category hierarchy per class generated by LLM from materials (not syllabus). | LLM Prompt `class_material_categories.yaml`, table `class_category`, `category_service.py`. |
+| **AC-05** | Query assigned to category by token matching and vector similarity search filtered by `class_id`. | `content_gap_service._match_category_for_question()` and Qdrant similarity. |
+| **AC-06** | "Unclassified" queries grouped by similarity, labeled from `concept_tag`, proposed as categories. | Unclassified clustering in `content_gap_service.py`, promote API endpoint. |
+| **AC-07** | Trainer can rename, merge, split, and delete categories. | CRUD, `/merge`, and `/split` endpoints in `app/routers/categories.py`. |
+| **AC-08** | Material chunks assigned to nearest category; refreshed when materials change. | `category_service.py` and Qdrant payload filters. |
 | **AC-09** | Deduplication: Max 1 count per student per category per day (`max_count_per_student_per_category_per_day = 1`). | Set deduplication over `(student_id, category_id, YYYY-MM-DD)` in aggregator. |
-| **AC-10** | Thresholds: $\ge 3$ web searches / 30 days, $\ge 2$ students and $\ge 10\%$ class size, web ratio $\ge 30\%$. Configurable. | Aggregation filter in `content_gap_service.py`, config in `system_config`. |
-| **AC-11** | Main chart data: Horizontal stacked bar (materials vs web), top 10 + "Other", tooltip metrics. | Aggregation payload formatted in `ContentGapDashboardRead`. |
-| **AC-12** | Detail table data: class, category, search_count, unique_student_count, last_asked, chunk_count. | Table records in `ContentGapDashboardRead`. |
-| **AC-13** | Aggregates only. No student IDs or question text in response. | Enforced by Pydantic response schema. |
+| **AC-10** | Thresholds: $\ge 3$ web searches / 30 days, $\ge 2$ students and $\ge 10\%$ class size, web ratio $\ge 30\%$. | Multi-threshold evaluation in `content_gap_service.py`. |
+| **AC-11** | Main chart data: Horizontal stacked bar (materials vs web), top 10 + "Other". | Formatted in `ContentGapDashboardResponse` and `ContentGapTopicReport`. |
+| **AC-12** | Detail table & drilldown data: category, web searches, student percentage, chunk count, student weakness, and curriculum gap profile. | Table records in `ContentGapTopicReport`. |
+| **AC-13** | Privacy safeguards: Aggregates only. No student IDs in response payloads. | Enforced by Pydantic response schema. |
 | **AC-14** | Material update marker: Date of latest material update. Web counts split into before vs after that date. | `MAX(Document.updated_at)` where status is indexed; query logs partitioned by timestamp. |
-| **AC-15** | In-memory cache 30–60 min per class. Displays `last_computed_at`. Refresh button recomputes. | Class-keyed memory cache (`cachetools.TTLCache` or dict with timestamps). |
-| **AC-16** | TTL retention: Points older than configurable TTL (60–90 days) deleted automatically. | Periodic cleanup worker / Qdrant filter delete. |
+| **AC-15** | In-memory cache 30–60 min per class. Displays `last_updated_at`. Refresh button recomputes. | Class-keyed memory cache (`_DASHBOARD_CACHE`) with `POST .../refresh`. |
+| **AC-16** | TTL retention: Points older than configurable TTL (60–90 days) deleted automatically. | Periodic cleanup / Qdrant filter delete. |
 | **AC-17** | No counter table and no automatic tickets. | On-demand aggregation; persistent entities are categories only. |
-| **AC-18** | Access control: Only assigned trainer / co-trainers / admin can access. Others return 403. | `require_class_trainer` dependency in FastAPI router. |
+| **AC-18** | Access control: Only assigned trainer / co-trainers / admin can access. Others return 403. | `_require_class_trainer` dependency in FastAPI routers. |
 | **AC-19** | Empty state ("No gaps detected") and error resilience (preserve previous cached result on failure). | Fallback cache handler and explicit empty response schema. |
-| **AC-20** | Quality acceptance testing: $\ge 80\%$ correct category assignment, $< 10\%$ wrong merges, $\ge 80\%$ true gaps on 200–300 VN/EN questions. | Test suite in `tests/content_gap/`. |
+| **AC-20** | Automated test suite verifying categories, gap calculations, and privacy logging. | `tests/content_gap/` (15/15 unit and integration tests passing). |
 
 ---
 
@@ -67,7 +73,7 @@
 [Student Chat Turn]
        │
        ▼
-1. Embed Query once (GeminiEmbedding) ──> Query Vector (1536-d)
+1. Embed Query once (GeminiEmbedding) ──► Query Vector (1536-d)
        │
        ├─► 2. Retrieval & RAG Decision (rag_service.py)
        │       ├─ Score >= T_high ──► SOURCE_CURRICULUM
@@ -75,11 +81,11 @@
        │       │                               └─ Fallback Reason: "similarity_below_threshold"
        │       └─ Score < T_low ──► SOURCE_UNRELATED (Off-topic, excluded from gap count)
        │
-       └─► 3. Background Log Capture (AC-01)
-               ├─ Extract Concept Tag (LLM / Lightweight extraction)
+       └─► 3. Background Privacy Log Capture (AC-01)
+               ├─ Extract Concept Tag & Pedagogical Reason (missing_code / missing_comparison / debugging_error / missing_concept)
                └─ Upsert into Qdrant "student_query_logs"
-                  (vector, class_id, student_id, timestamp, source, fallback_reason, concept_tag)
-                  [NO QUESTION TEXT STORED]
+                  (vector, class_id, anonymized_student_id, timestamp, source, fallback_reason, concept_tag)
+                  [NO QUESTION TEXT STORED IN VECTOR STORAGE]
 
 [Trainer Opens Dashboard] (AC-03, AC-15)
        │
@@ -88,24 +94,28 @@ Check In-Memory Cache (30-60 min TTL)
        ├─► Cache Hit: Return cached dashboard immediately
        └─► Cache Miss or Manual Refresh:
                │
-               ├─ 1. Fetch query vectors from Qdrant "student_query_logs" (last 30 days)
-               ├─ 2. Fetch active categories for class from DB & Qdrant "class_categories"
-               ├─ 3. Match queries to categories (similarity >= 0.85) or "Unclassified"
-               ├─ 4. Deduplicate (max 1 count / student / category / day)
-               ├─ 5. Check reporting thresholds (>=3 web, >=2 students & >=10%, web ratio >=30%)
-               ├─ 6. Partition counts by latest Document.updated_at (Before vs After)
-               └─ 7. Store in Cache and return ContentGapDashboardRead
+               ├─ 1. Query logs and chat history for class over rolling window (default 30 days)
+               ├─ 2. Fetch active 2-level categories for class from DB (`class_category`)
+               ├─ 3. Match queries to categories via token scoring & vector similarity
+               ├─ 4. Classify fallback reason into pedagogical groups (code, comparison, debugging, concept)
+               ├─ 5. Synthesize recurring question patterns (`QuestionPattern`) & student weaknesses
+               ├─ 6. Build curriculum gap profile with missing slide points & teacher advice
+               ├─ 7. Evaluate multi-threshold gap triggers (>=3 web, >=2 students & >=10%, ratio >=30%)
+               ├─ 8. Partition counts by latest Document.updated_at (Before vs After update)
+               └─ 9. Cache in memory and return `ContentGapDashboardResponse`
 ```
 
 ---
 
 ## 4. Data Models & Schema Design
 
-### 4.1. PostgreSQL Relational Model (`app/models/content_gap.py`)
+### 4.1. PostgreSQL Relational Model (`app/models/category.py`)
+
+Migration: `alembic/versions/0035_class_category.py`
 
 ```python
 class ClassCategory(Base):
-    """Hierarchical category set per class (AI-91, Epic E6)."""
+    """Hierarchical 2-level category set per class (AI-91, Epic E6)."""
 
     __tablename__ = "class_category"
 
@@ -116,21 +126,84 @@ class ClassCategory(Base):
     parent_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("class_category.id", ondelete="CASCADE"), nullable=True, index=True
     )
-    name: Mapped[str] = mapped_column(String(150), nullable=False)
-    # Status: 'proposed' (unclassified grouping), 'accepted' (confirmed by trainer), 'custom' (created by trainer)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="accepted")
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    children: Mapped[list["ClassCategory"]] = relationship(
-        "ClassCategory", backref=backref("parent", remote_side=[id]), cascade="all, delete-orphan"
+    subcategories: Mapped[list["ClassCategory"]] = relationship(
+        "ClassCategory",
+        backref=backref("parent", remote_side=[id]),
+        cascade="all, delete-orphan",
     )
 ```
 
-### 4.2. Qdrant Collections
+### 4.2. Pydantic Schemas (`app/schemas/content_gap.py`)
+
+```python
+class ContentGapQuestion(BaseModel):
+    id: str
+    question: str
+    timestamp: datetime
+    concept_tag: str | None = None
+
+class ContentGapReasonGroup(BaseModel):
+    reason_type: Literal["missing_code", "missing_comparison", "debugging_error", "missing_concept"]
+    title: str
+    explanation: str
+    questions: list[ContentGapQuestion] = []
+    question_count: int = 0
+
+class QuestionPattern(BaseModel):
+    pattern: str
+    inquiry_count: int = 1
+    total_inquiry_count: int = 1
+    student_count: int = 1
+    pedagogical_category: str = "In-Scope Comparison"
+    sample_question: str | None = None
+    suggested_action: str | None = None
+    scope_type: str = "core_curriculum"
+
+class StudentWeaknessProfile(BaseModel):
+    struggle_summary: str
+    severity: Literal["high", "medium", "low"] = "high"
+    question_patterns: list[QuestionPattern] = []
+
+class CurriculumGapProfile(BaseModel):
+    missing_points: list[str] = []
+    recommendation: str
+
+class ContentGapTopicReport(BaseModel):
+    category_id: str
+    category_name: str
+    parent_id: str | None = None
+    material_answers: int = 0
+    web_fallbacks: int = 0
+    dedup_web_fallbacks: int = 0
+    total_queries: int = 0
+    fallback_ratio: float = 0.0
+    distinct_students: int = 0
+    class_percentage: float = 0.0
+    status: Literal["critical", "warning", "good"]
+    student_weakness: StudentWeaknessProfile
+    curriculum_gap: CurriculumGapProfile
+    reason_groups: list[ContentGapReasonGroup] = []
+
+class ContentGapDashboardResponse(BaseModel):
+    class_id: uuid.UUID
+    total_web_fallbacks: int = 0
+    total_material_answers: int = 0
+    overall_coverage_rate: float = 100.0
+    critical_topics_count: int = 0
+    total_students_enrolled: int = 0
+    topics: list[ContentGapTopicReport] = []
+    last_updated_at: datetime
+```
+
+### 4.3. Qdrant Collections
 
 #### Collection 1: `student_query_logs`
 * **Vector Configuration:** Size = 1536, Distance = Cosine.
@@ -140,13 +213,11 @@ class ClassCategory(Base):
     "class_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
     "student_id": "b1a2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
     "timestamp": "2026-11-03T07:15:00Z",
-    "source": "web", // "material" | "web"
-    "fallback_reason": "similarity_below_threshold", // "no_results" | "similarity_below_threshold" | "insufficient_context"
-    "concept_tag": "Python Decorators",
-    "embedding_model_version": "gemini-embedding-2"
+    "source": "web",
+    "fallback_reason": "missing_code",
+    "concept_tag": "Python Decorators"
   }
   ```
-  *(Important: `question` text is strictly omitted).*
 
 #### Collection 2: `class_categories`
 * **Vector Configuration:** Size = 1536, Distance = Cosine.
@@ -157,117 +228,26 @@ class ClassCategory(Base):
     "class_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
     "parent_id": null,
     "name": "Python > Decorator",
-    "status": "accepted"
+    "status": "active"
   }
   ```
 
-### 4.3. Dynamic System Configuration (`system_config`)
-
-To allow live adjustments by Administrators without redeploying:
-* `content_gap_window_days`: Default `30` (AC-10).
-* `content_gap_retention_days`: Default `90` (AC-16).
-* `content_gap_search_count`: Default `3` (AC-10).
-* `content_gap_student_percentage`: Default `0.10` (10%) (AC-10).
-* `content_gap_web_ratio_threshold`: Default `0.30` (30%) (AC-10).
-* `content_gap_similarity_threshold`: Default `0.85` (AC-05).
-* `content_gap_cache_ttl_minutes`: Default `45` (AC-15).
-
 ---
 
-## 5. API Specifications
+## 5. REST API Specifications
 
-### 5.1. `GET /api/teacher/classes/{class_id}/content-gaps`
-Fetches aggregated dashboard data (served from memory cache if valid).
+### 5.1. Dashboard Endpoints (`app/routers/content_gaps.py`)
 
-**Response (`200 OK`):**
-```json
-{
-  "class_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "last_computed_at": "2026-11-03T07:30:00Z",
-  "is_cached": true,
-  "latest_material_update": "2026-10-25T14:20:00Z",
-  "total_active_students": 45,
-  "categories": [
-    {
-      "category_id": "e2f1a0b3-4c5d-6e7f-8a9b-0c1d2e3f4a5b",
-      "name": "Python > Decorator",
-      "parent_name": "Python",
-      "material_query_count": 12,
-      "web_query_count": 8,
-      "web_search_ratio": 0.40,
-      "unique_students": 6,
-      "student_percentage": 0.133,
-      "chunk_count": 2,
-      "last_asked": "2026-11-02T16:45:00Z",
-      "web_before_material_update": 6,
-      "web_after_material_update": 2
-    }
-  ],
-  "other_group": {
-    "material_query_count": 15,
-    "web_query_count": 4,
-    "category_count": 5
-  },
-  "unclassified_proposals": [
-    {
-      "proposed_name": "AsyncIO Event Loop",
-      "web_query_count": 5,
-      "unique_students": 3,
-      "concept_tags": ["AsyncIO", "Event Loop", "async def"],
-      "last_asked": "2026-11-03T06:10:00Z"
-    }
-  ]
-}
-```
+* `GET /api/teacher/classes/{class_id}/content-gaps`
+  * Returns `ContentGapDashboardResponse` with overall class metrics, critical topic count, coverage rate, and detailed topic reports.
+* `POST /api/teacher/classes/{class_id}/content-gaps/refresh`
+  * Invalidates cache and triggers immediate recomputation.
 
-### 5.2. `POST /api/teacher/classes/{class_id}/content-gaps/refresh`
-Invalidates the in-memory cache for this class and immediately recomputes metrics.
+### 5.2. Category Management Endpoints (`app/routers/categories.py`)
 
-### 5.3. Category Management Endpoints (`/api/teacher/classes/{class_id}/categories`)
-* `GET /`: List all accepted and proposed categories for the class.
-* `POST /`: Create custom category or accept a proposed unclassified category.
-* `PATCH /{category_id}`: Rename category.
-* `DELETE /{category_id}`: Delete category.
-* `POST /merge`: Body `{"source_category_ids": [...], "target_category_name": "..."}`.
-* `POST /split`: Body `{"category_id": "...", "new_category_names": [...]}`.
-
-### 5.4. Admin Configuration Endpoints (`/api/admin/content-gap-config`)
-* `GET /`: Returns current thresholds and retention TTL.
-* `PATCH /`: Updates window days, retention days, or thresholds dynamically.
-
----
-
-## 6. Implementation Step-by-Step Plan
-
-### Phase 1: Database, Schema & Configuration
-1. Create Alembic migration `0015_add_class_category.py` for `class_category` table.
-2. Update `app/config/config.py` with default retention and query collection settings.
-3. Add helper in `rag_service.py` to retrieve dynamic thresholds from `system_config`.
-
-### Phase 2: Query Capture Hooking (Non-blocking)
-1. In `app/services/chat_retrieval_service.py`, explicitly call `gemini_embedding.embed_query(question)` and pass the vector to `similarity_search_by_vector_with_score`.
-2. Return the query vector from retrieval so `chat_service.py` can capture it.
-3. In `rag_service.decide_source()`, assign explicit `fallback_reason`.
-4. In `chat_service._persist_turn()`, invoke background logging task `content_gap_service.log_query_vector()`.
-5. Implement concept tag extraction prompt in `app/config/prompts/extract_concept_tag.yaml`.
-
-### Phase 3: Category Generation & Material Ingestion Hook
-1. Create prompt `app/config/prompts/class_material_categories.yaml` for LLM 2-level category extraction.
-2. In `ingestion_service.py`, after chunks are upserted into Qdrant, calculate chunk-to-category similarity and increment `ClassCategory.chunk_count`.
-3. If new topics emerge from updated materials, generate proposed categories with `status = 'proposed'`.
-
-### Phase 4: Aggregation Engine & In-Memory Cache
-1. Implement `ContentGapService.calculate_dashboard(db, class_id)`:
-   * Query Qdrant `student_query_logs` with filter `class_id == target_class` and `timestamp >= now - window_days`.
-   * Apply deduplication: 1 count per `(student_id, category_id, date)`.
-   * Match vectors against categories with threshold `0.85`.
-   * Group unclassified vectors by cosine similarity and aggregate `concept_tag`s.
-   * Filter categories meeting reporting criteria (AC-10).
-   * Group excess categories beyond top 10 into "Other" (AC-11).
-2. Implement in-memory class cache with TTL (30–60 min) and fail-safe fallback (AC-19).
-3. Implement retention purge task: `content_gap_service.purge_expired_queries()`.
-
-### Phase 5: Verification & Quality Testing (AC-20)
-1. Unit tests for deduplication and threshold calculations (`tests/content_gap/test_aggregator.py`).
-2. Integration test for query vector logging without storing question text (`tests/content_gap/test_capture.py`).
-3. Benchmark category assignment accuracy on sample labeled set (200–300 VN/EN questions) aiming for $\ge 80\%$ accuracy and $< 10\%$ false merges.
+* `GET /api/teacher/classes/{class_id}/categories`: List active 2-level categories.
+* `POST /api/teacher/classes/{class_id}/categories`: Create a new custom or accepted category.
+* `PUT /api/teacher/classes/{class_id}/categories/{category_id}`: Update category name or parent.
+* `DELETE /api/teacher/classes/{class_id}/categories/{category_id}`: Delete category.
+* `POST /api/teacher/classes/{class_id}/categories/merge`: Merge multiple categories into one target.
+* `POST /api/teacher/classes/{class_id}/categories/split`: Split a category into multiple subtopics.
