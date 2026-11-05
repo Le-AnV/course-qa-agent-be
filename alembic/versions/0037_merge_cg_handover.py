@@ -6,7 +6,8 @@ landed on ``main`` separately, leaving two alembic heads. This merge revision
 brings them back to a single head so ``alembic upgrade head`` works again.
 """
 
-revision = "0037_merge_content_gap_and_handover"
+# Keep the revision id <= 32 chars: alembic_version.version_num is varchar(32).
+revision = "0037_merge_cg_handover"
 down_revision = ("0035_class_category", "0036_ticket_handover_fk")
 branch_labels = None
 depends_on = None
