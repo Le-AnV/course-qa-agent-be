@@ -13,6 +13,7 @@ from qdrant_client.http.models import (
     FieldCondition,
     Filter,
     MatchValue,
+    PayloadSchemaType,
     PointStruct,
     VectorParams,
 )
@@ -23,6 +24,11 @@ from app.config.config import settings
 logger = logging.getLogger(__name__)
 
 DEFAULT_UPSERT_BATCH_SIZE = 64
+
+# Payload fields used in filters (purge, clone, class-scoped retrieval). Qdrant
+# rejects a filtered request when the field has no index, so they are created
+# alongside the collection rather than left to whoever populated it.
+INDEXED_PAYLOAD_FIELDS = ("metadata.document_id", "metadata.class_id")
 
 
 def _is_retryable_qdrant_error(error: BaseException) -> bool:
@@ -196,6 +202,18 @@ class QdrantStore:
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+            )
+
+        existing = set(self.client.get_collection(self.collection_name).payload_schema)
+        for field in INDEXED_PAYLOAD_FIELDS:
+            if field in existing:
+                continue
+            logger.info("Creating Qdrant payload index on '%s'", field)
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name=field,
+                field_schema=PayloadSchemaType.KEYWORD,
+                wait=True,
             )
 
     @retry(
