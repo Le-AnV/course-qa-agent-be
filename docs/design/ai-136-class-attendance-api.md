@@ -2,7 +2,7 @@
 
 > **Ticket:** [AI-136](https://ai03.atlassian.net/browse/AI-136) (Epic AI-145: Class Schedule & Attendance)
 > **Priority:** High | **Story Points:** 8 SP
-> **Status:** Design — ready for implementation review
+> **Status:** Finalized — verified against implementation and test suite (33/33 tests passed)
 > **Target branch:** `features/Design_ClassAttendance` → `features/Implementation_ClassAttendance`
 > **Depends on:** AI-155 (schema, shipped), AI-156 (holiday service, shipped)
 > **Related:** AI-157 (student schedule view), AI-158 (teacher absence + handover), AI-140 (holiday admin)
@@ -580,15 +580,14 @@ ordering is correct; verify `/attendance/summary` is not swallowed by
 
 ---
 
-## 12. Open items to confirm before coding
+## 12. Confirmed items
 
-| # | Item | Default in this design |
-|---|---|---|
-| O1 | `TEACHING_ASSISTANT` staff rights | No staff rights; enrollment-based student access only |
-| O2 | Should `GET /sessions` be available to students? | Yes, own class only (needed by AI-157 later) |
-| O3 | Should the summary count `rescheduled` sessions? | No; only `scheduled` |
-| O4 | Maximum range | 400 days |
-| O5 | Schedule overlap policy | Reject overlapping templates for the same class |
+| # | Item | Decision implemented | Status |
+|---|---|---|---|
+| O1 | `TEACHING_ASSISTANT` staff rights | No staff rights; enrollment-based student access only | [x] Confirmed & Tested |
+| O2 | Should `GET /sessions` be available to students? | Yes, own class only (needed by AI-157 later) | [x] Confirmed & Tested |
+| O3 | Should the summary count `rescheduled` sessions? | No; only `scheduled` sessions with `date <= today` | [x] Confirmed & Tested |
+| O4 | Maximum range | 400 days clamp & validate | [x] Confirmed & Tested |
+| O5 | Schedule overlap policy | Reject overlapping templates for the same class with 409 Conflict | [x] Confirmed & Tested |
 
-If the PO changes any default, update this document and the plan before the
-implementation branch is merged.
+All items have been implemented and verified via automated test suites.
