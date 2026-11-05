@@ -141,37 +141,6 @@ def reset_email_body(username: str, email: str, password: str) -> tuple[str, str
     return subject, body
 
 
-def ticket_reply_email_body(
-    student_name: str,
-    trainer_name: str,
-    class_code: str | None,
-    question: str,
-    reply: str,
-) -> tuple[str, str]:
-    subject = "Your trainer answered your question"
-    excerpt = question.strip()
-    if len(excerpt) > 200:
-        excerpt = excerpt[:200].rstrip() + "..."
-    lines = [
-        f"Hello {student_name},",
-        "",
-        f"{trainer_name} answered your question in Course QA Agent.",
-    ]
-    if class_code:
-        lines.append(f"Class: {class_code}")
-    lines += [
-        "",
-        "Your question:",
-        excerpt,
-        "",
-        "Trainer's answer:",
-        reply.strip(),
-        "",
-        "Open Course QA Agent to confirm the answer or ask a follow-up.",
-    ]
-    return subject, "\n".join(lines)
-
-
 def queue_email(
     db: Session,
     to_email: str,

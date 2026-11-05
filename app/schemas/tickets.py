@@ -72,6 +72,7 @@ class TicketRead(BaseModel):
     escalated_to_id: uuid.UUID | None = None
     escalated_at: datetime | None = None
     escalated_to_name: str | None = None
+    student_seen_at: datetime | None = None
 
 
 class TicketThreadRead(TicketRead):
