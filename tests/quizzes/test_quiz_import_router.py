@@ -278,3 +278,75 @@ def test_template_download_returns_xlsx(client: TestClient, db_session: Session)
 
     wb = openpyxl.load_workbook(io.BytesIO(response.content))
     assert "Questions" in wb.sheetnames
+
+
+def _quizzes_url(db_session: Session) -> str:
+    return f"/api/classes/{db_session.info['class_id']}/quizzes"
+
+
+def _import_quiz(client: TestClient, db_session: Session) -> dict:
+    response = client.post(
+        _import_url(db_session),
+        headers=_headers(db_session.info["trainer_id"]),
+        data={"title": "Review Quiz", "description": "Chapter 1"},
+        files={"file": ("quiz.xlsx", _template_bytes(), XLSX_MIME)},
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+def test_list_returns_quiz_summaries(client: TestClient, db_session: Session) -> None:
+    imported = _import_quiz(client, db_session)
+
+    response = client.get(
+        _quizzes_url(db_session),
+        headers=_headers(db_session.info["trainer_id"]),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["id"] == imported["id"]
+    assert body[0]["title"] == "Review Quiz"
+    assert body[0]["description"] == "Chapter 1"
+    assert body[0]["status"] == "DRAFT"
+    assert body[0]["question_count"] == 3
+    assert "questions" not in body[0]
+
+
+def test_get_quiz_returns_questions_and_answers(client: TestClient, db_session: Session) -> None:
+    imported = _import_quiz(client, db_session)
+
+    response = client.get(
+        f"{_quizzes_url(db_session)}/{imported['id']}",
+        headers=_headers(db_session.info["trainer_id"]),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["title"] == "Review Quiz"
+    assert len(body["questions"]) == 3
+
+    fill_in = next(q for q in body["questions"] if q["question_type"] == "FILL_IN_BLANK")
+    assert fill_in["grading_config"][FILL_IN_BLANK_ANSWERS_KEY] == [
+        "HTTPS",
+        "HTTP over TLS",
+    ]
+    single = next(q for q in body["questions"] if q["question_type"] == "SINGLE_CHOICE")
+    assert any(option["is_correct"] for option in single["options"])
+
+
+def test_quiz_list_requires_class_teacher(client: TestClient, db_session: Session) -> None:
+    _import_quiz(client, db_session)
+
+    student_response = client.get(
+        _quizzes_url(db_session),
+        headers=_headers(db_session.info["student_id"], "student"),
+    )
+    assert student_response.status_code == 403
+
+    missing_response = client.get(
+        f"{_quizzes_url(db_session)}/{uuid.uuid4()}",
+        headers=_headers(db_session.info["trainer_id"]),
+    )
+    assert missing_response.status_code == 404
