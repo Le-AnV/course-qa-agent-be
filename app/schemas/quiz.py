@@ -207,11 +207,26 @@ class QuizCreate(QuizBase):
 
 
 class QuizUpdate(BaseModel):
+    """Partial metadata update. ``status`` is deliberately absent (AI-151).
+
+    Publishing only happens through ``POST /quizzes/{id}/approve`` so the approval
+    audit trail can never be forged by a plain patch.
+    """
+
     title: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
     time_limit_minutes: int | None = Field(default=None, gt=0)
     passing_score: float | None = Field(default=None, ge=0)
-    status: QuizStatus | None = None
+
+    @field_validator("title")
+    @classmethod
+    def clean_title(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        s = v.strip()
+        if not s:
+            raise ValueError("Quiz title must not be empty.")
+        return s
 
 
 class QuizTeacherRead(QuizBase):
@@ -220,9 +235,34 @@ class QuizTeacherRead(QuizBase):
     id: uuid.UUID
     class_id: uuid.UUID
     creator_id: uuid.UUID
+    approved_by_id: uuid.UUID | None = None
+    approved_at: datetime | None = None
+    approved_by_name: str | None = None
     created_at: datetime
     updated_at: datetime
     questions: list[QuizQuestionTeacherRead] = Field(default_factory=list)
+    question_count: int = 0
+    total_points: float = 0.0
+    question_type_counts: dict[str, int] = Field(default_factory=dict)
+
+
+def quiz_teacher_read(quiz: Any, *, approved_by_name: str | None = None) -> QuizTeacherRead:
+    """Build the teacher view with the totals AI-151 requires (AC-02)."""
+    questions = list(quiz.questions or [])
+    counts: dict[str, int] = {}
+    total = 0.0
+    for question in questions:
+        counts[question.question_type] = counts.get(question.question_type, 0) + 1
+        total += float(question.points or 0)
+    payload = QuizTeacherRead.model_validate(quiz)
+    return payload.model_copy(
+        update={
+            "approved_by_name": approved_by_name,
+            "question_count": len(questions),
+            "total_points": round(total, 2),
+            "question_type_counts": counts,
+        }
+    )
 
 
 class QuizSummaryRead(BaseModel):

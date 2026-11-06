@@ -57,6 +57,13 @@ class Quiz(Base):
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="DRAFT", server_default="DRAFT"
     )
+    # AI-151: set together when a teacher approves, cleared when the quiz is reopened.
+    approved_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("user.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
