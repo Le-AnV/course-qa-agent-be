@@ -355,3 +355,119 @@ class QuizAttemptRead(BaseModel):
     total_score: float | None = None
     is_passed: bool | None = None
     answers: list[QuizAnswerRead] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Results & statistics (AI-154)
+# ---------------------------------------------------------------------------
+
+
+class QuizAttemptHistoryRead(BaseModel):
+    """One row in a student's attempt history for a quiz."""
+
+    id: uuid.UUID
+    quiz_id: uuid.UUID
+    status: AttemptStatus
+    started_at: datetime
+    submitted_at: datetime | None = None
+    graded_at: datetime | None = None
+    total_score: float | None = None
+    max_score: float | None = None
+    passing_score: float | None = None
+    percentage: float | None = None
+    is_passed: bool | None = None
+    official: bool = False
+
+
+class QuizAnswerResultRead(BaseModel):
+    """A student's own answer in a submitted attempt."""
+
+    question_id: uuid.UUID
+    selected_option_labels: list[str] | None = None
+    text_answer: str | None = None
+    score_awarded: float | None = None
+    is_correct: bool | None = None
+
+
+class QuizQuestionResultRead(BaseModel):
+    """Question, correct answer, and student answer shown after submission."""
+
+    id: uuid.UUID
+    question_type: QuestionType
+    question: str
+    points: float
+    order_index: int
+    explanation: str | None = None
+    options: list[QuizOptionStudentResultRead] = Field(default_factory=list)
+    correct_option_labels: list[str] = Field(default_factory=list)
+    accepted_text_answers: list[str] = Field(default_factory=list)
+    answer: QuizAnswerResultRead | None = None
+
+
+class QuizAttemptResultRead(BaseModel):
+    """Full student result for one graded attempt."""
+
+    id: uuid.UUID
+    quiz_id: uuid.UUID
+    quiz_title: str
+    student_id: uuid.UUID
+    status: AttemptStatus
+    started_at: datetime
+    submitted_at: datetime | None = None
+    graded_at: datetime | None = None
+    total_score: float | None = None
+    max_score: float | None = None
+    passing_score: float | None = None
+    percentage: float | None = None
+    is_passed: bool | None = None
+    official: bool = False
+    show_explanations: bool = False
+    questions: list[QuizQuestionResultRead] = Field(default_factory=list)
+
+
+class QuizSubmissionRead(BaseModel):
+    """One submitted attempt in the teacher's submissions table."""
+
+    attempt_id: uuid.UUID
+    student_id: uuid.UUID
+    student_name: str
+    student_code: str | None = None
+    student_email: str
+    status: AttemptStatus
+    submitted_at: datetime | None = None
+    graded_at: datetime | None = None
+    total_score: float | None = None
+    max_score: float | None = None
+    percentage: float | None = None
+    is_passed: bool | None = None
+    official: bool = False
+
+
+class ScoreBandRead(BaseModel):
+    band: str
+    count: int
+
+
+class QuizQuestionStatisticRead(BaseModel):
+    question_id: uuid.UUID
+    order_index: int
+    question_type: QuestionType
+    question: str
+    points: float
+    answered_count: int
+    average_score: float
+    full_correct_rate: float
+
+
+class QuizStatisticsRead(BaseModel):
+    """Class statistics computed from one official attempt per student."""
+
+    quiz_id: uuid.UUID
+    quiz_title: str
+    submitted_count: int
+    max_score: float
+    average_score: float | None = None
+    average_percentage: float | None = None
+    pass_rate: float | None = None
+    score_bands: list[ScoreBandRead] = Field(default_factory=list)
+    per_question: list[QuizQuestionStatisticRead] = Field(default_factory=list)

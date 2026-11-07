@@ -54,6 +54,9 @@ class Quiz(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     time_limit_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     passing_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    show_explanations: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="DRAFT", server_default="DRAFT"
     )
@@ -189,7 +192,10 @@ class QuizAttempt(Base):
         DateTime(timezone=True), nullable=True
     )
     total_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    passing_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    graded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     quiz: Mapped[Quiz] = relationship(back_populates="attempts")
     answers: Mapped[list["QuizAnswer"]] = relationship(
@@ -216,6 +222,7 @@ class QuizAnswer(Base):
     selected_option_labels: Mapped[list[str] | None] = mapped_column(JSON_TYPE, nullable=True)
     text_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     score_awarded: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     breakdown: Mapped[dict | None] = mapped_column(JSON_TYPE, nullable=True)
 
     attempt: Mapped[QuizAttempt] = relationship(back_populates="answers")
