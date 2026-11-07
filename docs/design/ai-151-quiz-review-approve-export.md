@@ -5,7 +5,11 @@
 > **Sprint:** Sprint 4 — Quiz & Attendance  
 > **Status:** Designed / Ready for Review  
 > **Target Branch:** `features/Implementation_QuizReviewExport`  
-> **Related Stories:** AI-148 (quiz schema & Excel contract), AI-149 (generate quiz from documents), AI-150 (validate generated questions), AI-152 (import quiz from teacher Excel), AI-153 (student quiz-taking), AI-154 (auto-grade quiz).
+> **Related Stories:** AI-148 (quiz schema & Excel contract), AI-149 (generate quiz from documents), AI-150 (validate generated questions), AI-152 (import quiz from teacher Excel), AI-153 (student quiz-taking), AI-154 (auto-grade quiz), AI-159 (skill taxonomy & 5-level rubrics), AI-160 (question bank).
+
+> [!NOTE]
+> **Evolution Note (AI-159 & AI-160):**
+> Questions in the review surface now bind to class-scoped competencies via `skill_id`, and difficulty classifications follow the **5-level Dreyfus Skill Taxonomy** (`NOVICE` $\rightarrow$ `MASTER`). Refer to [`ai-159-skill-taxonomy-rubrics.md`](./ai-159-skill-taxonomy-rubrics.md) for full taxonomy definitions.
 
 ---
 
