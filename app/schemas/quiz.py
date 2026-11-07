@@ -362,6 +362,33 @@ class QuizAttemptRead(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class QuizStudentListRead(BaseModel):
+    """One published quiz in a student's class quiz list.
+
+    The attempt summary is scoped to the requesting student, so the list can
+    show "not started" / "in progress" / their official score without leaking
+    class-wide results.
+    """
+
+    id: uuid.UUID
+    class_id: uuid.UUID
+    title: str
+    description: str | None = None
+    question_count: int = 0
+    total_points: float = 0.0
+    time_limit_minutes: int | None = None
+    passing_score: float | None = None
+    attempt_count: int = 0
+    submitted_count: int = 0
+    has_in_progress: bool = False
+    official_attempt_id: uuid.UUID | None = None
+    official_score: float | None = None
+    official_max_score: float | None = None
+    official_percentage: float | None = None
+    official_is_passed: bool | None = None
+    official_submitted_at: datetime | None = None
+
+
 class QuizAttemptHistoryRead(BaseModel):
     """One row in a student's attempt history for a quiz."""
 

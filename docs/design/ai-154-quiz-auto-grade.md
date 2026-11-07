@@ -235,6 +235,50 @@ Streams `quiz-{quiz_id}-results.xlsx`:
 | `Submissions` | Student code, name, email, status, submitted/graded at, score, max score, percentage, passed, official |
 | `PerQuestion` | Order, type, question, points, answered count, average score, full-correct rate |
 
+### 3.6 Student class quiz list
+
+```http
+GET /api/student/classes/{class_id}/quizzes
+Authorization: Bearer <student token>
+```
+
+Entry point for the student workspace `Quizzes` tab. Returns **published** quizzes
+only, newest first, each with the caller's own attempt summary. Drafts stay
+teacher-only and no class-wide results leak into this payload.
+
+```json
+[
+  {
+    "id": "…",
+    "class_id": "…",
+    "title": "C++ Fundamentals - Midterm Quiz",
+    "description": "…",
+    "question_count": 6,
+    "total_points": 8.0,
+    "time_limit_minutes": 30,
+    "passing_score": 4.0,
+    "attempt_count": 3,
+    "submitted_count": 2,
+    "has_in_progress": true,
+    "official_attempt_id": "…",
+    "official_score": 6.0,
+    "official_max_score": 8.0,
+    "official_percentage": 75.0,
+    "official_is_passed": true,
+    "official_submitted_at": "2026-11-05T09:30:00Z"
+  }
+]
+```
+
+| Status | When |
+|---|---|
+| `200` | List returned (possibly empty) |
+| `403` | Caller has no `ACTIVE` enrollment in the class |
+| `404` | Class does not exist |
+
+Submitted attempts are lazily graded on this read too, so the list stays correct
+before AI-153's submit hook exists.
+
 ---
 
 ## 4. Data and Scoring Contract
@@ -272,7 +316,7 @@ submit hook is still required for "immediate feedback" semantics.
 `tests/quizzes/test_quiz_attempt_grading.py` — 16 unit tests for the scoring
 contract, snapshots, idempotence, retryability, and official selection.
 
-`tests/quizzes/test_quiz_results_router.py` — 11 API tests:
+`tests/quizzes/test_quiz_results_router.py` - 15 API tests:
 
 * history marks exactly one official attempt and includes in-progress rows;
 * result exposes scores, selected answers, correct labels and options;
@@ -284,6 +328,9 @@ contract, snapshots, idempotence, retryability, and official selection.
 * co-trainer allowed, other trainer/student → `403`;
 * export workbook has the three expected sheets and rows;
 * unknown quiz → `404` on both surfaces.
+
+* student class quiz list returns published quizzes with own attempt summary,
+  hides drafts, lazily grades, and rejects non-members with `403`.
 
 Run:
 

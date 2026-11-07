@@ -15,8 +15,12 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.deps import get_current_user, get_db
 from app.models.quiz import Quiz, QuizAttempt, QuizQuestion
 from app.models.user import User
-from app.schemas.quiz import QuizAttemptHistoryRead, QuizAttemptResultRead
-from app.services import quiz_result_service
+from app.schemas.quiz import (
+    QuizAttemptHistoryRead,
+    QuizAttemptResultRead,
+    QuizStudentListRead,
+)
+from app.services import course_service, quiz_result_service
 from app.services.quiz_attempt_service import GRADABLE_ATTEMPT_STATUSES, AttemptGradingError
 
 router = APIRouter(prefix="/api/student", tags=["student-quizzes"])
@@ -30,6 +34,27 @@ def _get_quiz(db: Session, quiz_id: uuid.UUID, *, with_questions: bool = False) 
     if quiz is None:
         raise HTTPException(status_code=404, detail="Quiz not found.")
     return quiz
+
+
+@router.get(
+    "/classes/{class_id}/quizzes",
+    response_model=list[QuizStudentListRead],
+)
+def list_my_class_quizzes(
+    class_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[QuizStudentListRead]:
+    """Published quizzes in one class with this student's attempt summary."""
+    clazz = course_service.get_class(db, class_id)
+    if clazz is None:
+        raise HTTPException(status_code=404, detail="Class not found.")
+    if not course_service.is_active_member(db, class_id, current_user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="You are not enrolled in this class.",
+        )
+    return quiz_result_service.build_student_quiz_list(db, clazz, current_user.id)
 
 
 @router.get("/quizzes/{quiz_id}/attempts", response_model=list[QuizAttemptHistoryRead])

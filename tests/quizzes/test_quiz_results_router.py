@@ -20,7 +20,7 @@ from app.core.database import Base, get_session_local, reset_engine
 from app.core.deps import get_db
 from app.core.security import create_access_token
 from app.main import app
-from app.models.course import Class, ClassTrainer
+from app.models.course import Class, ClassTrainer, Enrollment
 from app.models.quiz import Quiz, QuizAnswer, QuizAttempt, QuizOption, QuizQuestion
 from app.models.user import Role, User
 from app.services.quiz_attempt_service import grade_attempt
@@ -114,6 +114,12 @@ def _seed(db: Session) -> dict:
     db.add(clazz)
     db.flush()
     db.add(ClassTrainer(class_id=clazz.id, trainer_id=co_trainer.id))
+    db.add_all(
+        [
+            Enrollment(class_id=clazz.id, student_id=student.id, status="ACTIVE"),
+            Enrollment(class_id=clazz.id, student_id=other_student.id, status="ACTIVE"),
+        ]
+    )
 
     quiz = Quiz(
         class_id=clazz.id,
@@ -518,3 +524,127 @@ def test_missing_quiz_returns_404(client: TestClient, db_session: Session) -> No
 
     assert student.status_code == 404
     assert teacher.status_code == 404
+
+
+def test_student_class_quiz_list_summarizes_own_attempts(
+    client: TestClient, db_session: Session
+) -> None:
+    data = _seed(db_session)
+    url = f"/api/student/classes/{data['class'].id}/quizzes"
+
+    response = client.get(url, headers=_headers(data["student"].id, "student"))
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["id"] == str(data["quiz"].id)
+    assert row["title"] == "Auto-grade Quiz"
+    assert row["question_count"] == 3
+    assert row["total_points"] == 6.0
+    assert row["passing_score"] == 3.0
+    assert row["attempt_count"] == 3
+    assert row["submitted_count"] == 2
+    assert row["has_in_progress"] is True
+    assert row["official_attempt_id"] == str(data["late"].id)
+    assert row["official_score"] == 6.0
+    assert row["official_max_score"] == 6.0
+    assert row["official_percentage"] == 100.0
+    assert row["official_is_passed"] is True
+    assert row["official_submitted_at"] is not None
+
+    other = client.get(url, headers=_headers(data["other_student"].id, "student"))
+
+    assert other.status_code == 200
+    other_row = other.json()[0]
+    assert other_row["attempt_count"] == 1
+    assert other_row["submitted_count"] == 1
+    assert other_row["has_in_progress"] is False
+    assert other_row["official_attempt_id"] == str(data["second"].id)
+    assert other_row["official_score"] == 4.5
+    assert other_row["official_percentage"] == 75.0
+    assert other_row["official_is_passed"] is True
+
+
+def test_student_class_quiz_list_hides_draft_quizzes(
+    client: TestClient, db_session: Session
+) -> None:
+    data = _seed(db_session)
+    draft = Quiz(
+        class_id=data["class"].id,
+        creator_id=data["trainer"].id,
+        title="Still being written",
+        status="DRAFT",
+    )
+    db_session.add(draft)
+    db_session.commit()
+
+    response = client.get(
+        f"/api/student/classes/{data['class'].id}/quizzes",
+        headers=_headers(data["student"].id, "student"),
+    )
+
+    assert response.status_code == 200
+    assert [row["id"] for row in response.json()] == [str(data["quiz"].id)]
+
+
+def test_student_class_quiz_list_lazily_grades_submitted_attempts(
+    client: TestClient, db_session: Session
+) -> None:
+    data = _seed(db_session)
+    attempt = QuizAttempt(
+        quiz_id=data["quiz"].id,
+        student_id=data["student"].id,
+        status="SUBMITTED",
+        started_at=BASE_TIME + timedelta(hours=4),
+        submitted_at=BASE_TIME + timedelta(hours=4, minutes=10),
+    )
+    db_session.add(attempt)
+    db_session.flush()
+    for question, labels, text in (
+        (data["single"], ["A"], None),
+        (data["multi"], ["A", "C"], None),
+        (data["fill"], None, "HTTPS"),
+    ):
+        db_session.add(
+            QuizAnswer(
+                attempt_id=attempt.id,
+                question_id=question.id,
+                selected_option_labels=labels,
+                text_answer=text,
+            )
+        )
+    db_session.commit()
+    assert attempt.graded_at is None
+
+    response = client.get(
+        f"/api/student/classes/{data['class'].id}/quizzes",
+        headers=_headers(data["student"].id, "student"),
+    )
+
+    assert response.status_code == 200
+    row = response.json()[0]
+    assert row["official_attempt_id"] == str(attempt.id)
+    assert row["official_score"] == 6.0
+    assert row["submitted_count"] == 3
+    db_session.refresh(attempt)
+    assert attempt.graded_at is not None
+
+
+def test_student_class_quiz_list_rejects_non_members(
+    client: TestClient, db_session: Session
+) -> None:
+    data = _seed(db_session)
+    student_role = db_session.query(Role).filter_by(name="STUDENT").one()
+    outsider = _user(db_session, student_role, "Outsider", "outsider@example.com")
+    db_session.commit()
+
+    url = f"/api/student/classes/{data['class'].id}/quizzes"
+    outsider_response = client.get(url, headers=_headers(outsider.id, "student"))
+    missing_response = client.get(
+        f"/api/student/classes/{uuid.uuid4().hex}/quizzes",
+        headers=_headers(data["student"].id, "student"),
+    )
+
+    assert outsider_response.status_code == 403
+    assert missing_response.status_code == 404

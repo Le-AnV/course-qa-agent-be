@@ -32,11 +32,13 @@ from app.schemas.quiz import (
     QuizQuestionResultRead,
     QuizQuestionStatisticRead,
     QuizStatisticsRead,
+    QuizStudentListRead,
     QuizSubmissionRead,
     ScoreBandRead,
 )
 from app.services.quiz_attempt_service import (
     GRADABLE_ATTEMPT_STATUSES,
+    attempt_effective_passing_score,
     attempt_percentage,
     grade_attempt,
     round_half_up,
@@ -163,6 +165,90 @@ def build_history(db: Session, quiz: Quiz, student_id: uuid.UUID) -> list[QuizAt
         )
         for attempt in attempts
     ]
+
+
+def build_student_quiz_list(
+    db: Session, clazz: Class, student_id: uuid.UUID
+) -> list[QuizStudentListRead]:
+    """Published quizzes in one class with the student's own attempt summary.
+
+    Only quizzes the student can actually see are returned (``PUBLISHED``);
+    drafts stay teacher-only. Submitted attempts are graded lazily just like the
+    history/result reads, so the list is correct even before AI-153's submit
+    hook runs.
+    """
+    quizzes = (
+        db.query(Quiz)
+        .options(selectinload(Quiz.questions))
+        .filter(Quiz.class_id == clazz.id, Quiz.status == "PUBLISHED")
+        .order_by(Quiz.created_at.desc())
+        .all()
+    )
+    if not quizzes:
+        return []
+
+    quiz_ids = [quiz.id for quiz in quizzes]
+    attempts = (
+        db.query(QuizAttempt)
+        .filter(
+            QuizAttempt.quiz_id.in_(quiz_ids),
+            QuizAttempt.student_id == student_id,
+        )
+        .all()
+    )
+    if ensure_graded(db, attempts):
+        attempts = (
+            db.query(QuizAttempt)
+            .filter(
+                QuizAttempt.quiz_id.in_(quiz_ids),
+                QuizAttempt.student_id == student_id,
+            )
+            .all()
+        )
+
+    by_quiz: dict[uuid.UUID, list[QuizAttempt]] = {}
+    for attempt in attempts:
+        by_quiz.setdefault(attempt.quiz_id, []).append(attempt)
+
+    rows: list[QuizStudentListRead] = []
+    for quiz in quizzes:
+        own_attempts = by_quiz.get(quiz.id, [])
+        official = select_official_attempts(own_attempts).get(student_id)
+        total_points = round_half_up(sum(float(question.points or 0) for question in quiz.questions))
+        rows.append(
+            QuizStudentListRead(
+                id=quiz.id,
+                class_id=quiz.class_id,
+                title=quiz.title,
+                description=quiz.description,
+                question_count=len(quiz.questions),
+                total_points=total_points,
+                time_limit_minutes=quiz.time_limit_minutes,
+                passing_score=attempt_effective_passing_score(quiz, total_points),
+                attempt_count=len(own_attempts),
+                submitted_count=sum(
+                    1
+                    for attempt in own_attempts
+                    if attempt.status in GRADABLE_ATTEMPT_STATUSES
+                ),
+                has_in_progress=any(
+                    attempt.status == "IN_PROGRESS" for attempt in own_attempts
+                ),
+                official_attempt_id=official.id if official is not None else None,
+                official_score=official.total_score if official is not None else None,
+                official_max_score=official.max_score if official is not None else None,
+                official_percentage=(
+                    attempt_percentage(official.total_score, official.max_score)
+                    if official is not None
+                    else None
+                ),
+                official_is_passed=official.is_passed if official is not None else None,
+                official_submitted_at=(
+                    official.submitted_at if official is not None else None
+                ),
+            )
+        )
+    return rows
 
 
 def build_attempt_result(db: Session, quiz: Quiz, attempt: QuizAttempt) -> QuizAttemptResultRead:
