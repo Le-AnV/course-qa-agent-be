@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -13,8 +13,14 @@ QuestionType = Literal["SINGLE_CHOICE", "MULTIPLE_CHOICE", "FILL_IN_BLANK"]
 BloomLevel = Literal["REMEMBER", "UNDERSTAND", "APPLY"]
 AttemptStatus = Literal["IN_PROGRESS", "SUBMITTED", "EXPIRED"]
 OptionLabel = Literal["A", "B", "C", "D", "E", "F"]
+QuizAvailability = Literal["UPCOMING", "OPEN", "CLOSED", "EXHAUSTED"]
 
 VALID_OPTION_LABELS = ("A", "B", "C", "D", "E", "F")
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Return an aware UTC datetime; SQLite hands back naive values."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +196,10 @@ class QuizBase(BaseModel):
     description: str | None = None
     time_limit_minutes: int | None = Field(default=None, gt=0)
     passing_score: float | None = Field(default=None, ge=0)
+    # AI-153: NULL window bounds mean "no bound"; NULL max_attempts is unlimited.
+    opens_at: datetime | None = None
+    closes_at: datetime | None = None
+    max_attempts: int | None = Field(default=1, gt=0)
     status: QuizStatus = "DRAFT"
 
     @field_validator("title")
@@ -199,6 +209,16 @@ class QuizBase(BaseModel):
         if not s:
             raise ValueError("Quiz title must not be empty.")
         return s
+
+    @model_validator(mode="after")
+    def validate_window(self) -> QuizBase:
+        if (
+            self.opens_at is not None
+            and self.closes_at is not None
+            and _as_utc(self.opens_at) >= _as_utc(self.closes_at)
+        ):
+            raise ValueError("opens_at must be earlier than closes_at.")
+        return self
 
 
 class QuizCreate(QuizBase):
@@ -217,6 +237,9 @@ class QuizUpdate(BaseModel):
     description: str | None = None
     time_limit_minutes: int | None = Field(default=None, gt=0)
     passing_score: float | None = Field(default=None, ge=0)
+    opens_at: datetime | None = None
+    closes_at: datetime | None = None
+    max_attempts: int | None = Field(default=None, gt=0)
 
     @field_validator("title")
     @classmethod
@@ -227,6 +250,16 @@ class QuizUpdate(BaseModel):
         if not s:
             raise ValueError("Quiz title must not be empty.")
         return s
+
+    @model_validator(mode="after")
+    def validate_window(self) -> QuizUpdate:
+        if (
+            self.opens_at is not None
+            and self.closes_at is not None
+            and _as_utc(self.opens_at) >= _as_utc(self.closes_at)
+        ):
+            raise ValueError("opens_at must be earlier than closes_at.")
+        return self
 
 
 class QuizTeacherRead(QuizBase):
@@ -274,6 +307,10 @@ class QuizSummaryRead(BaseModel):
     title: str
     description: str | None = None
     status: QuizStatus
+    time_limit_minutes: int | None = None
+    opens_at: datetime | None = None
+    closes_at: datetime | None = None
+    max_attempts: int | None = None
     question_count: int = 0
     created_at: datetime
     updated_at: datetime
@@ -287,6 +324,9 @@ class QuizStudentExamRead(BaseModel):
     title: str
     description: str | None = None
     time_limit_minutes: int | None = None
+    opens_at: datetime | None = None
+    closes_at: datetime | None = None
+    max_attempts: int | None = None
     questions: list[QuizQuestionStudentExamRead] = Field(default_factory=list)
 
 
@@ -311,6 +351,7 @@ class StudentAnswerSubmit(BaseModel):
     question_id: uuid.UUID
     selected_option_labels: list[OptionLabel] | None = None
     text_answer: str | None = None
+    is_marked_for_review: bool = False
 
     @field_validator("selected_option_labels")
     @classmethod
@@ -339,6 +380,7 @@ class QuizAnswerRead(BaseModel):
     question_id: uuid.UUID
     selected_option_labels: list[str] | None = None
     text_answer: str | None = None
+    is_marked_for_review: bool = False
     score_awarded: float | None = None
     breakdown: dict[str, Any] | None = None
 
@@ -355,3 +397,107 @@ class QuizAttemptRead(BaseModel):
     total_score: float | None = None
     is_passed: bool | None = None
     answers: list[QuizAnswerRead] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Student delivery (AI-153)
+# ---------------------------------------------------------------------------
+
+
+class StudentQuizListItem(BaseModel):
+    """One published quiz as a student sees it, with availability and attempts."""
+
+    quiz_id: uuid.UUID
+    class_id: uuid.UUID
+    class_code: str
+    class_name: str
+    title: str
+    description: str | None = None
+    time_limit_minutes: int | None = None
+    opens_at: datetime | None = None
+    closes_at: datetime | None = None
+    max_attempts: int | None = None
+    attempts_used: int = 0
+    attempts_left: int | None = None
+    availability: QuizAvailability = "OPEN"
+    attempt_id: uuid.UUID | None = None
+    attempt_status: AttemptStatus | None = None
+    can_start: bool = False
+    total_score: float | None = None
+    is_passed: bool | None = None
+
+
+class StudentQuizListRead(BaseModel):
+    server_time: datetime
+    quizzes: list[StudentQuizListItem] = Field(default_factory=list)
+
+
+class StudentAnswerDraft(BaseModel):
+    """One autosaved answer; empty labels and text clear the draft answer."""
+
+    question_id: uuid.UUID
+    selected_option_labels: list[OptionLabel] | None = None
+    text_answer: str | None = None
+    is_marked_for_review: bool = False
+
+    @field_validator("selected_option_labels")
+    @classmethod
+    def clean_labels(cls, v: list[OptionLabel] | None) -> list[OptionLabel] | None:
+        if v is None:
+            return None
+        seen: set[str] = set()
+        cleaned: list[OptionLabel] = []
+        for label in v:
+            if label not in seen:
+                seen.add(label)
+                cleaned.append(label)
+        return cleaned
+
+    @field_validator("text_answer")
+    @classmethod
+    def clean_text(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return v.strip() or None
+
+
+class StudentAnswersSave(BaseModel):
+    answers: list[StudentAnswerDraft] = Field(default_factory=list)
+
+
+class QuizAttemptResultRead(BaseModel):
+    """Revealed only after submission (AC-05)."""
+
+    attempt_id: uuid.UUID
+    quiz_id: uuid.UUID
+    quiz_title: str
+    status: AttemptStatus
+    started_at: datetime
+    submitted_at: datetime | None = None
+    total_score: float
+    max_score: float
+    percentage: float
+    passing_score: float | None = None
+    is_passed: bool | None = None
+    questions: list[QuizQuestionStudentResultRead] = Field(default_factory=list)
+    answers: list[QuizAnswerRead] = Field(default_factory=list)
+
+
+class QuizAttemptSessionRead(BaseModel):
+    """Active exam payload + saved drafts, or the result once finalized."""
+
+    attempt_id: uuid.UUID
+    quiz_id: uuid.UUID
+    quiz_title: str
+    quiz_description: str | None = None
+    time_limit_minutes: int | None = None
+    status: AttemptStatus
+    started_at: datetime
+    deadline_at: datetime | None = None
+    server_time: datetime
+    remaining_seconds: int | None = None
+    questions: list[QuizQuestionStudentExamRead] = Field(default_factory=list)
+    answers: list[QuizAnswerRead] = Field(default_factory=list)
+    total_points: float = 0.0
+    answered_count: int = 0
+    result: QuizAttemptResultRead | None = None

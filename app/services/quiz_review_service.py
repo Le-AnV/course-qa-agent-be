@@ -92,11 +92,27 @@ def _resequence(quiz: Quiz) -> None:
 def update_metadata(db: Session, quiz: Quiz, payload: QuizUpdate) -> Quiz:
     _require_draft(quiz)
     changes = payload.model_dump(exclude_unset=True)
+
+    # The request may carry only one bound; validate the merged window so a
+    # PATCH cannot turn a valid quiz into opens_at >= closes_at.
+    opens_at = changes.get("opens_at", quiz.opens_at)
+    closes_at = changes.get("closes_at", quiz.closes_at)
+    if (
+        opens_at is not None
+        and closes_at is not None
+        and _utc(opens_at) >= _utc(closes_at)
+    ):
+        raise QuizStateError("opens_at must be earlier than closes_at.")
+
     for field, value in changes.items():
         setattr(quiz, field, value)
     db.commit()
     db.refresh(quiz)
     return quiz
+
+
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def add_question(db: Session, quiz: Quiz, data: QuizQuestionCreate) -> Quiz:
