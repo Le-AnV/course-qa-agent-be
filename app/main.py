@@ -26,6 +26,7 @@ from app.routers.documents import router as documents_router
 from app.routers.history import router as history_router
 from app.routers.quizzes import router as quizzes_router
 from app.routers.quizzes import student_router as student_quizzes_router
+from app.routers.skills import router as skills_router
 from app.routers.student.router import router as student_router
 from app.routers.tickets import router as tickets_router
 from app.services import reranker_service
@@ -129,6 +130,7 @@ app.include_router(citations_router)
 app.include_router(tickets_router)
 app.include_router(quizzes_router)
 app.include_router(student_quizzes_router)
+app.include_router(skills_router)
 app.include_router(categories_router)
 app.include_router(content_gaps_router)
 
