@@ -10,7 +10,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 QuizStatus = Literal["DRAFT", "PUBLISHED", "ARCHIVED"]
 QuestionType = Literal["SINGLE_CHOICE", "MULTIPLE_CHOICE", "FILL_IN_BLANK"]
-BloomLevel = Literal["REMEMBER", "UNDERSTAND", "APPLY"]
+BloomLevel = Literal[
+    "REMEMBER",
+    "UNDERSTAND",
+    "APPLY",
+    "NOVICE",
+    "BEGINNER",
+    "COMPETENT",
+    "PROFICIENT",
+    "MASTER",
+]
 AttemptStatus = Literal["IN_PROGRESS", "SUBMITTED", "EXPIRED"]
 OptionLabel = Literal["A", "B", "C", "D", "E", "F"]
 QuizAvailability = Literal["UPCOMING", "OPEN", "CLOSED", "EXHAUSTED"]

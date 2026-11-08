@@ -18,6 +18,7 @@ from app.models.quiz import (
     QuizOption,
     QuizQuestion,
 )
+from app.models.skill import Skill
 from app.models.user import Role, User
 
 
@@ -76,9 +77,23 @@ def _create_class(db, trainer_id: uuid.UUID | None = None, code: str = "CS101") 
     return cls
 
 
+def _create_skill(db, class_id: uuid.UUID) -> Skill:
+    skill = Skill(
+        id=uuid.uuid4(),
+        class_id=class_id,
+        code=f"SKILL_{uuid.uuid4().hex[:6].upper()}",
+        name="Test Skill",
+        category="GENERAL",
+    )
+    db.add(skill)
+    db.flush()
+    return skill
+
+
 def test_create_quiz_full_hierarchy(db_session):
     user = _create_user(db_session)
     cls = _create_class(db_session)
+    skill = _create_skill(db_session, cls.id)
 
     quiz = Quiz(
         id=uuid.uuid4(),
@@ -96,10 +111,11 @@ def test_create_quiz_full_hierarchy(db_session):
     q1 = QuizQuestion(
         id=uuid.uuid4(),
         quiz_id=quiz.id,
+        skill_id=skill.id,
         question_type="SINGLE_CHOICE",
         question="What is the time complexity of binary search?",
         points=1.0,
-        difficulty="REMEMBER",
+        difficulty="NOVICE",
         order_index=0,
         explanation="Binary search divides the search space in half at each step.",
         source_reference="Algorithms Chapter 2",
@@ -155,7 +171,8 @@ def test_create_quiz_full_hierarchy(db_session):
     assert loaded_quiz is not None
     assert loaded_quiz.title == "Midterm Examination"
     assert len(loaded_quiz.questions) == 1
-    assert loaded_quiz.questions[0].difficulty == "REMEMBER"
+    assert loaded_quiz.questions[0].difficulty == "NOVICE"
+    assert loaded_quiz.questions[0].skill_id == skill.id
     assert len(loaded_quiz.questions[0].options) == 2
     assert loaded_quiz.questions[0].options[0].option_label == "A"
     assert loaded_quiz.questions[0].options[0].is_correct is True
@@ -169,6 +186,7 @@ def test_create_quiz_full_hierarchy(db_session):
 def test_cascade_delete_quiz(db_session):
     user = _create_user(db_session)
     cls = _create_class(db_session)
+    skill = _create_skill(db_session, cls.id)
 
     quiz = Quiz(
         id=uuid.uuid4(),
@@ -183,10 +201,11 @@ def test_cascade_delete_quiz(db_session):
     q = QuizQuestion(
         id=uuid.uuid4(),
         quiz_id=quiz.id,
+        skill_id=skill.id,
         question_type="FILL_IN_BLANK",
         question="What port does DNS use by default?",
         points=1.0,
-        difficulty="REMEMBER",
+        difficulty="NOVICE",
     )
     db_session.add(q)
     db_session.flush()
@@ -237,6 +256,7 @@ def test_check_constraint_quiz_status(db_session):
 def test_check_constraint_question_type(db_session):
     user = _create_user(db_session)
     cls = _create_class(db_session)
+    skill = _create_skill(db_session, cls.id)
 
     quiz = Quiz(id=uuid.uuid4(), class_id=cls.id, creator_id=user.id, title="Q Test")
     db_session.add(quiz)
@@ -246,9 +266,10 @@ def test_check_constraint_question_type(db_session):
         q = QuizQuestion(
             id=uuid.uuid4(),
             quiz_id=quiz.id,
+            skill_id=skill.id,
             question_type="ESSAY_LONG",
             question="Tell me a story",
-            difficulty="REMEMBER",
+            difficulty="NOVICE",
         )
         db_session.add(q)
         db_session.commit()
@@ -257,6 +278,7 @@ def test_check_constraint_question_type(db_session):
 def test_check_constraint_question_difficulty_bloom_level(db_session):
     user = _create_user(db_session)
     cls = _create_class(db_session)
+    skill = _create_skill(db_session, cls.id)
 
     quiz = Quiz(id=uuid.uuid4(), class_id=cls.id, creator_id=user.id, title="Q Test")
     db_session.add(quiz)
@@ -266,9 +288,10 @@ def test_check_constraint_question_difficulty_bloom_level(db_session):
         q = QuizQuestion(
             id=uuid.uuid4(),
             quiz_id=quiz.id,
+            skill_id=skill.id,
             question_type="SINGLE_CHOICE",
             question="What is this?",
-            difficulty="VERY_HARD",  # Not in REMEMBER, UNDERSTAND, APPLY
+            difficulty="VERY_HARD",  # Not in Dreyfus levels (NOVICE, BEGINNER, etc.)
         )
         db_session.add(q)
         db_session.commit()
@@ -277,6 +300,7 @@ def test_check_constraint_question_difficulty_bloom_level(db_session):
 def test_check_constraint_positive_points(db_session):
     user = _create_user(db_session)
     cls = _create_class(db_session)
+    skill = _create_skill(db_session, cls.id)
 
     quiz = Quiz(id=uuid.uuid4(), class_id=cls.id, creator_id=user.id, title="Q Test")
     db_session.add(quiz)
@@ -286,10 +310,11 @@ def test_check_constraint_positive_points(db_session):
         q = QuizQuestion(
             id=uuid.uuid4(),
             quiz_id=quiz.id,
+            skill_id=skill.id,
             question_type="SINGLE_CHOICE",
             question="What is this?",
             points=-1.0,
-            difficulty="REMEMBER",
+            difficulty="NOVICE",
         )
         db_session.add(q)
         db_session.commit()
@@ -298,6 +323,7 @@ def test_check_constraint_positive_points(db_session):
 def test_check_constraint_option_label_and_unique(db_session):
     user = _create_user(db_session)
     cls = _create_class(db_session)
+    skill = _create_skill(db_session, cls.id)
 
     quiz = Quiz(id=uuid.uuid4(), class_id=cls.id, creator_id=user.id, title="Q Test")
     db_session.add(quiz)
@@ -306,9 +332,10 @@ def test_check_constraint_option_label_and_unique(db_session):
     q = QuizQuestion(
         id=uuid.uuid4(),
         quiz_id=quiz.id,
+        skill_id=skill.id,
         question_type="SINGLE_CHOICE",
         question="Select option",
-        difficulty="REMEMBER",
+        difficulty="NOVICE",
     )
     db_session.add(q)
     db_session.flush()
