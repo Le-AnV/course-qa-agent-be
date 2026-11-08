@@ -17,6 +17,9 @@ venv/
 api_key.md
 /storage/
 
+# Local compose overrides (per-machine CORS origins, dev ports)
+docker-compose.override.yml
+
 # Editor / OS / local tool state
 .vscode/
 .idea/

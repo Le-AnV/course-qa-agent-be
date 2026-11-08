@@ -142,6 +142,54 @@ By team decision, API keys and SMTP credentials are changed in `.env`, not sent 
 or updated through the AI-105 settings API (the AI-31 outbox config in DB is the
 only runtime-updatable email config).
 
+## Production deployment (AWS ECS Fargate)
+
+Runtime configuration lives in the ECS **task definition environment**, not in
+this repo. Re-registering a task definition from an old revision silently drops
+whatever was added since — including CORS, which breaks login on the frontend
+with `Disallowed CORS origin`.
+
+| Item | Value |
+|---|---|
+| Region | `us-east-1` |
+| ECS cluster | `course-qa` |
+| ECS service | `course-qa-be` |
+| Task definition family | `course-qa-be` |
+| Image build | CodeBuild project `course-qa-be-build` -> ECR -> task definition |
+| Public API | `https://api.learnhub.id.vn` |
+
+`CORS_ORIGINS` is a JSON array of origins. Production must contain every host
+the frontend is served from:
+
+```json
+["https://learnhub.id.vn","https://www.learnhub.id.vn","https://course-qa-agent-fe.vercel.app"]
+```
+
+Deploying a new image (keeps the rest of the task definition intact):
+
+```bash
+aws ecs register-task-definition --cli-input-json file://td.json --region us-east-1
+aws ecs update-service --cluster course-qa --service course-qa-be \
+  --task-definition course-qa-be:<revision> --region us-east-1
+aws ecs wait services-stable --cluster course-qa --services course-qa-be --region us-east-1
+```
+
+Validate the origins after every deploy — an unrelated origin must stay blocked:
+
+```bash
+for o in https://learnhub.id.vn https://course-qa-agent-fe.vercel.app https://evil.example.com; do
+  printf '%-45s ' "$o"
+  curl -s -o /dev/null -w '%{http_code}\n' -X OPTIONS https://api.learnhub.id.vn/api/auth/login \
+    -H "Origin: $o" -H 'Access-Control-Request-Method: POST' \
+    -H 'Access-Control-Request-Headers: content-type'
+done
+# expected: 200, 200, 400
+```
+
+Secrets (database URL, JWT secret, SMTP app password, API keys) live only in the
+task definition environment. Keep them out of this repo and rotate them when they
+may have been exposed.
+
 ## Docs
 
 API design: [`docs/api-design-health.md`](docs/api-design-health.md) — lands with

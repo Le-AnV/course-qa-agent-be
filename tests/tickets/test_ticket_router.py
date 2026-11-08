@@ -304,8 +304,8 @@ def test_student_can_create_open_ticket_and_add_follow_up(
     assert all(reply.user_id == db_session.info["student_id"] for reply in saved.replies)
 
 
-def test_trainer_answer_queues_an_email_to_the_student(client, db_session):
-    """AI-85 AC-03: the student is notified when the trainer answers."""
+def test_trainer_answer_does_not_queue_an_email_to_the_student(client, db_session):
+    """Ticket reply notifications are delivered in the app only."""
     created = client.post("/api/tickets", headers=_headers(db_session.info["student_id"]), json={
         "class_id": str(db_session.info["class_id"]), "question": "Please explain this.",
     })
@@ -320,10 +320,29 @@ def test_trainer_answer_queues_an_email_to_the_student(client, db_session):
     queued = db_session.query(EmailOutbox).filter(
         EmailOutbox.to_email == "ticket-student@example.com"
     ).all()
-    assert len(queued) == 1
-    assert queued[0].user_id == db_session.info["student_id"]
-    assert "Trainer" in queued[0].body
-    assert "Here is the explanation." in queued[0].body
+    assert queued == []
+
+
+def test_student_unread_reply_is_cleared_by_seen_endpoint(client, db_session):
+    student = _headers(db_session.info["student_id"])
+    trainer = _headers(db_session.info["trainer_id"], "trainer")
+    created = client.post("/api/tickets", headers=student, json={
+        "class_id": str(db_session.info["class_id"]), "question": "Please explain this.",
+    })
+    ticket_id = created.json()["id"]
+    assert client.get("/api/tickets/mine?unread=true", headers=student).json()["total"] == 0
+
+    assert client.post(f"/api/tickets/{ticket_id}/replies", headers=trainer,
+                       json={"message": "Here is the explanation."}).status_code == 201
+    unread = client.get("/api/tickets/mine?unread=true", headers=student).json()
+    assert unread["total"] == 1
+    assert unread["items"][0]["id"] == ticket_id
+
+    assert client.post(f"/api/tickets/{ticket_id}/seen", headers=student).status_code == 204
+    assert client.get("/api/tickets/mine?unread=true", headers=student).json()["total"] == 0
+    assert client.post(f"/api/tickets/{ticket_id}/seen",
+                       headers=_headers(db_session.info["other_student_id"])).status_code == 404
+    assert client.post(f"/api/tickets/{ticket_id}/seen", headers=trainer).status_code == 403
 
 
 def test_trainer_answer_requires_student_confirmation_to_resolve(client, db_session):
@@ -665,7 +684,7 @@ def inbox(db_session):
         ticket = Ticket(id=uuid.UUID(int=index+1), class_id=db_session.info[
             "other_class_id" if index == 3 else "class_id"],
             student_id=db_session.info["student_id"], question=f"Question {index}", status=state,
-            created_at=datetime(2026, 11, 1, tzinfo=UTC) + timedelta(minutes=min(index, 3)))
+            created_at=datetime.now(UTC) - timedelta(hours=2) + timedelta(minutes=min(index, 3)))
         db_session.add(ticket)
         items.append(ticket)
     private_ticket = Ticket(class_id=foreign_class.id, student_id=db_session.info["other_student_id"],

@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
@@ -9,12 +10,14 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -22,12 +25,15 @@ from sqlalchemy.types import JSON
 
 from app.core.database import Base
 
+if TYPE_CHECKING:
+    from app.models.skill import Skill
+
 # Portable JSON type: JSONB on PostgreSQL, JSON on SQLite
 JSON_TYPE = JSON().with_variant(JSONB, "postgresql")
 
 QUIZ_STATUSES = ("DRAFT", "PUBLISHED", "ARCHIVED")
 QUESTION_TYPES = ("SINGLE_CHOICE", "MULTIPLE_CHOICE", "FILL_IN_BLANK")
-BLOOM_LEVELS = ("REMEMBER", "UNDERSTAND", "APPLY")
+BLOOM_LEVELS = ("NOVICE", "BEGINNER", "COMPETENT", "PROFICIENT", "MASTER")
 ATTEMPT_STATUSES = ("IN_PROGRESS", "SUBMITTED", "EXPIRED")
 OPTION_LABELS = ("A", "B", "C", "D", "E", "F")
 
@@ -40,6 +46,14 @@ class Quiz(Base):
         CheckConstraint(
             "status IN ('DRAFT', 'PUBLISHED', 'ARCHIVED')",
             name="ck_quiz_status",
+        ),
+        CheckConstraint(
+            "opens_at IS NULL OR closes_at IS NULL OR opens_at < closes_at",
+            name="ck_quiz_window",
+        ),
+        CheckConstraint(
+            "max_attempts IS NULL OR max_attempts > 0",
+            name="ck_quiz_max_attempts",
         ),
     )
 
@@ -54,8 +68,22 @@ class Quiz(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     time_limit_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     passing_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # AI-153: availability window for students (NULL = no bound) and the number
+    # of attempts a student may start (NULL = unlimited).
+    opens_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    max_attempts: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=1, server_default="1"
+    )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="DRAFT", server_default="DRAFT"
+    )
+    # AI-151: set together when a teacher approves, cleared when the quiz is reopened.
+    approved_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("user.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -88,7 +116,7 @@ class QuizQuestion(Base):
             name="ck_quiz_question_type",
         ),
         CheckConstraint(
-            "difficulty IN ('REMEMBER', 'UNDERSTAND', 'APPLY')",
+            "difficulty IN ('NOVICE', 'BEGINNER', 'COMPETENT', 'PROFICIENT', 'MASTER', 'REMEMBER', 'UNDERSTAND', 'APPLY')",
             name="ck_quiz_question_difficulty",
         ),
         CheckConstraint("points > 0", name="ck_quiz_question_points_positive"),
@@ -98,13 +126,16 @@ class QuizQuestion(Base):
     quiz_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("quiz.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    skill_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("skill.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     question_type: Mapped[str] = mapped_column(String(30), nullable=False)
     question: Mapped[str] = mapped_column(Text, nullable=False)
     points: Mapped[float] = mapped_column(
         Float, nullable=False, default=1.0, server_default="1.0"
     )
     difficulty: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="REMEMBER", server_default="REMEMBER"
+        String(20), nullable=False, default="NOVICE", server_default="NOVICE"
     )
     order_index: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
@@ -115,6 +146,7 @@ class QuizQuestion(Base):
     grading_config: Mapped[dict | None] = mapped_column(JSON_TYPE, nullable=True)
 
     quiz: Mapped[Quiz] = relationship(back_populates="questions")
+    skill: Mapped["Skill"] = relationship("Skill", back_populates="questions")
     options: Mapped[list["QuizOption"]] = relationship(
         back_populates="question",
         cascade="all, delete-orphan",
@@ -163,6 +195,16 @@ class QuizAttempt(Base):
             "status IN ('IN_PROGRESS', 'SUBMITTED', 'EXPIRED')",
             name="ck_quiz_attempt_status",
         ),
+        # One active attempt per student/quiz prevents a double-click or a second
+        # tab from consuming two attempts (AI-153 AC-06).
+        Index(
+            "uq_quiz_attempt_active",
+            "quiz_id",
+            "student_id",
+            unique=True,
+            sqlite_where=text("status = 'IN_PROGRESS'"),
+            postgresql_where=text("status = 'IN_PROGRESS'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -183,6 +225,7 @@ class QuizAttempt(Base):
     )
     total_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    skill_report: Mapped[dict | None] = mapped_column(JSON_TYPE, nullable=True)
 
     quiz: Mapped[Quiz] = relationship(back_populates="attempts")
     answers: Mapped[list["QuizAnswer"]] = relationship(
@@ -208,6 +251,10 @@ class QuizAnswer(Base):
     )
     selected_option_labels: Mapped[list[str] | None] = mapped_column(JSON_TYPE, nullable=True)
     text_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # AI-153: student-owned flag, persisted so a reload keeps the review marks.
+    is_marked_for_review: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
     score_awarded: Mapped[float | None] = mapped_column(Float, nullable=True)
     breakdown: Mapped[dict | None] = mapped_column(JSON_TYPE, nullable=True)
 
