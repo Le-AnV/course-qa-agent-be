@@ -1,4 +1,9 @@
-"""Student quiz delivery: availability, attempts, autosave drafts and submit (AI-153).
+"""Student quiz delivery and attempt grading (AI-153 + AI-154).
+
+AI-153 owns the attempt lifecycle: availability, start/resume, autosave and
+submit. AI-154 owns grading: every submitted/expired attempt is scored once and
+the result contract is snapshotted on the attempt. The two used to live in
+separate modules, so this file is the single source of truth after the merge.
 
 The service is deliberately the only place that decides whether an attempt is
 still open. Clients render a countdown from ``server_time``/``deadline_at`` but
@@ -9,7 +14,9 @@ clock-skewed machine cannot extend an attempt.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -20,20 +27,25 @@ from app.models.quiz import Quiz, QuizAnswer, QuizAttempt, QuizQuestion
 from app.models.user import User
 from app.schemas.quiz import (
     QuizAnswerRead,
-    QuizAttemptResultRead,
     QuizAttemptSessionRead,
     QuizQuestionStudentExamRead,
     QuizQuestionStudentResultRead,
+    QuizTakeResultRead,
     StudentAnswerDraft,
     StudentQuizListItem,
     StudentQuizListRead,
 )
+from app.services.quiz_excel import FILL_IN_BLANK_ANSWERS_KEY
 from app.services.quiz_grading import grade_question_submission
 
 PUBLISHED_STATUS = "PUBLISHED"
 IN_PROGRESS = "IN_PROGRESS"
 SUBMITTED = "SUBMITTED"
 EXPIRED = "EXPIRED"
+
+GRADABLE_ATTEMPT_STATUSES = (SUBMITTED, EXPIRED)
+SUPPORTED_QUESTION_TYPES = ("SINGLE_CHOICE", "MULTIPLE_CHOICE", "FILL_IN_BLANK")
+DEFAULT_PASSING_PERCENTAGE = 50.0
 
 #: A submit that lands a moment after the deadline still keeps the client's
 #: last autosave; only the attempt status becomes EXPIRED.
@@ -56,6 +68,71 @@ class QuizForbiddenError(QuizAttemptError):
 
 class QuizAnswerValidationError(QuizAttemptError):
     status_code = 422
+
+
+class AttemptGradingError(QuizAttemptError):
+    """Base class for errors raised while grading an attempt."""
+
+
+class AttemptNotFoundError(AttemptGradingError):
+    """The requested attempt does not exist."""
+
+    status_code = 404
+
+
+class AttemptNotGradableError(AttemptGradingError):
+    """The attempt is still in progress or otherwise not submitted."""
+
+
+class AttemptAnswerValidationError(AttemptGradingError):
+    """Persisted student answers violate the AI-154 answer contract."""
+
+    status_code = 422
+
+    def __init__(self, errors: list[str]):
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
+def round_half_up(value: float, places: int = 2) -> float:
+    """Round ``value`` with ``ROUND_HALF_UP`` instead of Python's banker's rounding."""
+    quantizer = Decimal(1).scaleb(-places)
+    return float(Decimal(str(value)).quantize(quantizer, rounding=ROUND_HALF_UP))
+
+
+def attempt_percentage(total_score: float | None, max_score: float | None) -> float | None:
+    """Return the attempt percentage, or ``None`` when it cannot be calculated."""
+    if total_score is None or max_score is None or max_score <= 0:
+        return None
+    return round_half_up((total_score / max_score) * 100)
+
+
+def attempt_effective_passing_percentage(quiz: Quiz) -> float:
+    """Return the quiz passing percentage, defaulting to 50% for legacy rows."""
+    if quiz.passing_percentage is None:
+        return DEFAULT_PASSING_PERCENTAGE
+    return round_half_up(float(quiz.passing_percentage), 2)
+
+
+def passing_score_for(quiz: Quiz, max_score: float) -> float:
+    """Convert the quiz percentage to the point value shown to users."""
+    return round_half_up(max_score * attempt_effective_passing_percentage(quiz) / 100)
+
+
+def attempt_is_passed(
+    total_score: float | None,
+    max_score: float | None,
+    passing_percentage: float | None,
+) -> bool | None:
+    """Compare percentages by cross-multiplication to avoid rounded-score drift."""
+    if total_score is None or max_score is None or max_score <= 0:
+        return None
+    percentage = (
+        float(passing_percentage)
+        if passing_percentage is not None
+        else DEFAULT_PASSING_PERCENTAGE
+    )
+    return Decimal(str(total_score)) * 100 >= Decimal(str(percentage)) * Decimal(str(max_score))
 
 
 def _now() -> datetime:
@@ -154,64 +231,193 @@ def _answered(answer: QuizAnswer | None) -> bool:
     return bool(answer.selected_option_labels) or bool((answer.text_answer or "").strip())
 
 
-def _score_attempt(quiz: Quiz, attempt: QuizAttempt) -> tuple[float, float]:
-    """Grade every saved answer and return ``(total, max_total)``."""
-    by_question = _answers_by_question(attempt)
-    total = 0.0
-    max_total = 0.0
-    for question in quiz.questions:
-        max_total += float(question.points or 0)
-        answer = by_question.get(question.id)
-        graded = grade_question_submission(
-            question_type=question.question_type,
-            points=float(question.points or 0),
-            options_data=[
-                {"option_label": option.option_label, "is_correct": option.is_correct}
-                for option in question.options
-            ],
-            student_selected_labels=answer.selected_option_labels if answer else None,
-            student_text=answer.text_answer if answer else None,
-            accepted_text_answers=(question.grading_config or {}).get("correct_answers") or [],
-            grading_config=question.grading_config,
+def _normalised_labels(labels: list[str] | None) -> list[str]:
+    return [str(label).strip().upper() for label in (labels or [])]
+
+
+def _validate_answer(question: QuizQuestion, answer: QuizAnswer | None) -> list[str]:
+    """Validate one persisted answer before any score is written.
+
+    Running validation for the whole attempt first guarantees a failed grading
+    leaves ``total_score`` null and the attempt retryable (AC-05).
+    """
+    errors: list[str] = []
+    question_type = (question.question_type or "").upper()
+    if question_type not in SUPPORTED_QUESTION_TYPES:
+        errors.append(
+            f"Question {question.id}: unsupported question type {question.question_type!r}."
         )
-        if answer is not None:
-            answer.score_awarded = graded.score
-            answer.breakdown = graded.breakdown
-        total += graded.score
-    return round(total, 4), round(max_total, 4)
+        return errors
+
+    selected = _normalised_labels(answer.selected_option_labels if answer else None)
+    if len(selected) != len(set(selected)):
+        errors.append(f"Question {question.id}: duplicate selected option labels.")
+
+    if question_type == "SINGLE_CHOICE" and len(selected) > 1:
+        errors.append(
+            f"Question {question.id}: SINGLE_CHOICE accepts at most one selected option."
+        )
+
+    option_labels = {option.option_label.strip().upper() for option in question.options}
+    unknown = sorted(set(selected) - option_labels)
+    if unknown:
+        errors.append(
+            f"Question {question.id}: selected labels {unknown} do not belong to the question."
+        )
+    return errors
 
 
-def _percentage(total: float, max_total: float) -> float:
-    if max_total <= 0:
-        return 0.0
-    # Negative multiple-choice penalties never produce a negative percentage.
-    return round(max(0.0, total / max_total * 100), 2)
+def _grade_question(
+    question: QuizQuestion, answer: QuizAnswer
+) -> tuple[float, bool, dict]:
+    """Grade one question and return ``(score, is_correct, breakdown)``."""
+    grading_config = question.grading_config or {}
+    result = grade_question_submission(
+        question_type=question.question_type,
+        points=question.points,
+        options_data=[
+            {
+                "option_label": option.option_label,
+                "is_correct": option.is_correct,
+            }
+            for option in question.options
+        ],
+        student_selected_labels=answer.selected_option_labels,
+        student_text=answer.text_answer,
+        accepted_text_answers=grading_config.get(FILL_IN_BLANK_ANSWERS_KEY),
+        grading_config=grading_config,
+    )
+    breakdown = dict(result.breakdown or {})
+    breakdown["max_points"] = round_half_up(result.max_points)
+    return round_half_up(result.score), result.is_correct, breakdown
+
+
+def grade_attempt(db: Session, attempt_id: uuid.UUID, *, commit: bool = True) -> QuizAttempt:
+    """Grade a submitted attempt idempotently under a row lock.
+
+    AI-153 calls this after a successful submit (and after auto-submit). A
+    repeated call returns the existing result without recomputing scores.
+    """
+    attempt = (
+        db.query(QuizAttempt)
+        .filter(QuizAttempt.id == attempt_id)
+        .with_for_update()
+        .one_or_none()
+    )
+    if attempt is None:
+        raise AttemptNotFoundError(f"Quiz attempt {attempt_id} was not found.")
+    if attempt.graded_at is not None:
+        return attempt
+    if attempt.status not in GRADABLE_ATTEMPT_STATUSES:
+        raise AttemptNotGradableError(
+            f"Attempt {attempt.id} is {attempt.status}; only SUBMITTED or EXPIRED attempts "
+            "can be graded."
+        )
+
+    quiz = (
+        db.query(Quiz)
+        .options(selectinload(Quiz.questions).selectinload(QuizQuestion.options))
+        .filter(Quiz.id == attempt.quiz_id)
+        .one_or_none()
+    )
+    if quiz is None:
+        raise AttemptGradingError(f"Quiz {attempt.quiz_id} was not found for attempt {attempt.id}.")
+
+    existing_answers = {
+        answer.question_id: answer
+        for answer in db.query(QuizAnswer).filter(QuizAnswer.attempt_id == attempt.id).all()
+    }
+
+    # Validate the entire attempt before mutating anything (AC-05 retryability).
+    validation_errors: list[str] = []
+    for question in quiz.questions:
+        validation_errors.extend(_validate_answer(question, existing_answers.get(question.id)))
+    if validation_errors:
+        raise AttemptAnswerValidationError(validation_errors)
+
+    total_score = 0.0
+    max_score = 0.0
+    for question in quiz.questions:
+        answer = existing_answers.get(question.id)
+        if answer is None:
+            # Unanswered questions are still materialised so result and statistics
+            # queries can treat every question uniformly.
+            answer = QuizAnswer(attempt_id=attempt.id, question_id=question.id)
+            db.add(answer)
+        score, is_correct, breakdown = _grade_question(question, answer)
+        answer.score_awarded = score
+        answer.is_correct = is_correct
+        answer.breakdown = breakdown
+        total_score += score
+        max_score += question.points
+
+    max_score = round_half_up(max_score)
+    total_score = round_half_up(total_score)
+    passing_percentage = attempt_effective_passing_percentage(quiz)
+    passing_score = round_half_up(max_score * passing_percentage / 100)
+
+    attempt.max_score = max_score
+    attempt.total_score = total_score
+    attempt.passing_percentage = passing_percentage
+    attempt.passing_score = passing_score
+    attempt.is_passed = attempt_is_passed(total_score, max_score, passing_percentage)
+    attempt.graded_at = _now()
+
+    if commit:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        db.refresh(attempt)
+    else:
+        db.flush()
+    return attempt
 
 
 def _finalize(db: Session, quiz: Quiz, attempt: QuizAttempt, *, auto: bool) -> QuizAttempt:
-    """Grade and close an attempt once. Safe to call on an already closed row."""
+    """Close and grade an attempt once. Safe to call on an already closed row."""
     if attempt.status != IN_PROGRESS:
         return attempt
 
-    total, max_total = _score_attempt(quiz, attempt)
-    percentage = _percentage(total, max_total)
     attempt.status = EXPIRED if auto else SUBMITTED
     attempt.submitted_at = _deadline(quiz, attempt) if auto else _now()
-    attempt.total_score = total
-    if quiz.passing_score is None:
-        attempt.is_passed = None
-    else:
-        attempt.is_passed = percentage >= float(quiz.passing_score)
+    db.flush()
+
+    # AI-154 is the only grader. Keep the commit here so a grading failure
+    # leaves the attempt untouched and retryable.
+    grade_attempt(db, attempt.id, commit=False)
     db.commit()
     db.refresh(attempt)
     return attempt
 
 
-def _result(quiz: Quiz, attempt: QuizAttempt) -> QuizAttemptResultRead:
+def _ensure_graded(db: Session, attempt: QuizAttempt) -> None:
+    """Grade a finalized attempt that predates the submit hook."""
+    if attempt.status in GRADABLE_ATTEMPT_STATUSES and attempt.graded_at is None:
+        grade_attempt(db, attempt.id, commit=False)
+        db.commit()
+        db.refresh(attempt)
+
+
+def _result(quiz: Quiz, attempt: QuizAttempt) -> QuizTakeResultRead:
+    max_total = (
+        float(attempt.max_score)
+        if attempt.max_score is not None
+        else round(sum(float(question.points or 0) for question in quiz.questions), 4)
+    )
     total = float(attempt.total_score or 0)
-    max_total = round(sum(float(question.points or 0) for question in quiz.questions), 4)
-    percentage = _percentage(total, max_total)
-    return QuizAttemptResultRead(
+    passing_percentage = (
+        float(attempt.passing_percentage)
+        if attempt.passing_percentage is not None
+        else attempt_effective_passing_percentage(quiz)
+    )
+    passing_score = (
+        float(attempt.passing_score)
+        if attempt.passing_score is not None
+        else round_half_up(max_total * passing_percentage / 100)
+    )
+    return QuizTakeResultRead(
         attempt_id=attempt.id,
         quiz_id=quiz.id,
         quiz_title=quiz.title,
@@ -220,8 +426,9 @@ def _result(quiz: Quiz, attempt: QuizAttempt) -> QuizAttemptResultRead:
         submitted_at=_as_utc(attempt.submitted_at),
         total_score=total,
         max_score=max_total,
-        percentage=percentage,
-        passing_score=quiz.passing_score,
+        percentage=attempt_percentage(total, max_total) or 0.0,
+        passing_score=passing_score,
+        passing_percentage=passing_percentage,
         is_passed=attempt.is_passed,
         questions=[
             QuizQuestionStudentResultRead.model_validate(question)
@@ -319,6 +526,11 @@ def list_student_quizzes(
                 _finalize(db, quiz, active, auto=True)
                 changed = True
 
+        for attempt in quiz_attempts:
+            if attempt.status in GRADABLE_ATTEMPT_STATUSES and attempt.graded_at is None:
+                grade_attempt(db, attempt.id, commit=False)
+                changed = True
+
         used = len(quiz_attempts)
         left = None if quiz.max_attempts is None else max(0, quiz.max_attempts - used)
         availability = _availability(quiz, now)
@@ -330,9 +542,14 @@ def list_student_quizzes(
         )
         if active is None and left == 0:
             availability = "EXHAUSTED"
-        latest = next(
+        official = select_official_attempts(quiz_attempts).get(user.id)
+        latest = official or next(
             (attempt for attempt in quiz_attempts if attempt.status != IN_PROGRESS), None
         )
+        total_points = round_half_up(
+            sum(float(question.points or 0) for question in quiz.questions)
+        )
+        passage = attempt_effective_passing_percentage(quiz)
         items.append(
             StudentQuizListItem(
                 quiz_id=quiz.id,
@@ -349,10 +566,23 @@ def list_student_quizzes(
                 attempts_left=left,
                 availability=availability,
                 attempt_id=active.id if active else (latest.id if latest else None),
-                attempt_status=active.status if active else (latest.status if latest else None),
+                attempt_status=(
+                    active.status if active else (latest.status if latest else None)
+                ),
                 can_start=can_start,
                 total_score=latest.total_score if latest else None,
+                max_score=(
+                    latest.max_score if latest is not None and latest.max_score is not None else total_points
+                ),
+                percentage=(
+                    attempt_percentage(latest.total_score, latest.max_score)
+                    if latest is not None
+                    else None
+                ),
+                passing_score=passing_score_for(quiz, total_points),
+                passing_percentage=passage,
                 is_passed=latest.is_passed if latest else None,
+                official_attempt_id=official.id if official is not None else None,
             )
         )
 
@@ -513,6 +743,7 @@ def submit_attempt(
     quiz = _require_access(db, user, _load_quiz(db, attempt.quiz_id))
 
     if attempt.status != IN_PROGRESS:
+        _ensure_graded(db, attempt)
         return _session(quiz, attempt, _now())
 
     now = _now()
@@ -538,4 +769,67 @@ def get_attempt(db: Session, user: User, attempt_id: uuid.UUID) -> QuizAttemptSe
         deadline = _deadline(quiz, attempt)
         if deadline is not None and now >= deadline:
             _finalize(db, quiz, attempt, auto=True)
+    else:
+        _ensure_graded(db, attempt)
     return _session(quiz, attempt, _now())
+
+
+def _as_aware_utc(value: datetime | None) -> datetime:
+    if value is None:
+        return datetime.min.replace(tzinfo=UTC)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _official_key(attempt: QuizAttempt) -> tuple[float, datetime, datetime, str]:
+    """Highest score wins; ties go to the latest submission, then latest grading."""
+    return (
+        attempt.total_score if attempt.total_score is not None else float("-inf"),
+        _as_aware_utc(attempt.submitted_at),
+        _as_aware_utc(attempt.graded_at),
+        str(attempt.id),
+    )
+
+
+def select_official_attempts(
+    attempts: Iterable[QuizAttempt],
+) -> dict[uuid.UUID, QuizAttempt]:
+    """Return the official attempt per student.
+
+    Official = highest graded score; ties are broken by the latest
+    ``submitted_at`` (then the latest ``graded_at`` for deterministic output).
+    """
+    official: dict[uuid.UUID, QuizAttempt] = {}
+    for attempt in attempts:
+        if attempt.status not in GRADABLE_ATTEMPT_STATUSES:
+            continue
+        if attempt.graded_at is None or attempt.total_score is None:
+            continue
+        current = official.get(attempt.student_id)
+        if current is None or _official_key(attempt) > _official_key(current):
+            official[attempt.student_id] = attempt
+    return official
+
+
+def official_attempt_ids_for_quiz(
+    db: Session,
+    quiz_id: uuid.UUID,
+    *,
+    student_ids: Iterable[uuid.UUID] | None = None,
+) -> dict[uuid.UUID, uuid.UUID]:
+    """Map each student to their official attempt id for one quiz."""
+    query = db.query(QuizAttempt).filter(
+        QuizAttempt.quiz_id == quiz_id,
+        QuizAttempt.graded_at.is_not(None),
+        QuizAttempt.total_score.is_not(None),
+    )
+    if student_ids is not None:
+        ids = list(student_ids)
+        if not ids:
+            return {}
+        query = query.filter(QuizAttempt.student_id.in_(ids))
+    return {
+        student_id: attempt.id
+        for student_id, attempt in select_official_attempts(query.all()).items()
+    }
