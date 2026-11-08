@@ -38,9 +38,10 @@ from app.schemas.quiz import (
 )
 from app.services.quiz_attempt_service import (
     GRADABLE_ATTEMPT_STATUSES,
-    attempt_effective_passing_score,
+    attempt_effective_passing_percentage,
     attempt_percentage,
     grade_attempt,
+    passing_score_for,
     round_half_up,
     select_official_attempts,
 )
@@ -159,6 +160,7 @@ def build_history(db: Session, quiz: Quiz, student_id: uuid.UUID) -> list[QuizAt
             total_score=attempt.total_score,
             max_score=attempt.max_score,
             passing_score=attempt.passing_score,
+            passing_percentage=attempt.passing_percentage,
             percentage=attempt_percentage(attempt.total_score, attempt.max_score),
             is_passed=attempt.is_passed,
             official=official is not None and official.id == attempt.id,
@@ -224,7 +226,8 @@ def build_student_quiz_list(
                 question_count=len(quiz.questions),
                 total_points=total_points,
                 time_limit_minutes=quiz.time_limit_minutes,
-                passing_score=attempt_effective_passing_score(quiz, total_points),
+                passing_score=passing_score_for(quiz, total_points),
+                passing_percentage=attempt_effective_passing_percentage(quiz),
                 attempt_count=len(own_attempts),
                 submitted_count=sum(
                     1
@@ -301,6 +304,7 @@ def build_attempt_result(db: Session, quiz: Quiz, attempt: QuizAttempt) -> QuizA
         total_score=attempt.total_score,
         max_score=attempt.max_score,
         passing_score=attempt.passing_score,
+        passing_percentage=attempt.passing_percentage,
         percentage=attempt_percentage(attempt.total_score, attempt.max_score),
         is_passed=attempt.is_passed,
         official=_is_official(db, attempt),
@@ -343,6 +347,7 @@ def build_submissions(db: Session, quiz: Quiz) -> list[QuizSubmissionRead]:
                 graded_at=attempt.graded_at,
                 total_score=attempt.total_score,
                 max_score=attempt.max_score,
+                passing_percentage=attempt.passing_percentage,
                 percentage=attempt_percentage(attempt.total_score, attempt.max_score),
                 is_passed=attempt.is_passed,
                 official=official is not None and official.id == attempt.id,

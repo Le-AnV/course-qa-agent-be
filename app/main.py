@@ -16,6 +16,12 @@ from app.core.deps import get_db
 from app.core.logging import configure_logging
 from app.core.seed import seed_database
 from app.routers.admin.router import router as admin_router
+from app.routers.attendance import (
+    router as attendance_router,
+)
+from app.routers.attendance import (
+    student_router as attendance_student_router,
+)
 from app.routers.auth.router import router as auth_router
 from app.routers.categories import router as categories_router
 from app.routers.chat.router import router as chat_router
@@ -25,6 +31,7 @@ from app.routers.content_gaps import router as content_gaps_router
 from app.routers.documents import router as documents_router
 from app.routers.history import router as history_router
 from app.routers.quizzes import router as quizzes_router
+from app.routers.quizzes import student_router as student_quizzes_router
 from app.routers.quizzes.results import router as quiz_results_router
 from app.routers.quizzes.student_results import router as student_quiz_results_router
 from app.routers.student.router import router as student_router
@@ -131,8 +138,11 @@ app.include_router(tickets_router)
 app.include_router(quizzes_router)
 app.include_router(quiz_results_router)
 app.include_router(student_quiz_results_router)
+app.include_router(student_quizzes_router)
 app.include_router(categories_router)
 app.include_router(content_gaps_router)
+app.include_router(attendance_router)
+app.include_router(attendance_student_router)
 
 
 

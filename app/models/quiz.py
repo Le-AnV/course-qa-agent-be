@@ -9,12 +9,14 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -41,6 +43,18 @@ class Quiz(Base):
             "status IN ('DRAFT', 'PUBLISHED', 'ARCHIVED')",
             name="ck_quiz_status",
         ),
+        CheckConstraint(
+            "opens_at IS NULL OR closes_at IS NULL OR opens_at < closes_at",
+            name="ck_quiz_window",
+        ),
+        CheckConstraint(
+            "max_attempts IS NULL OR max_attempts > 0",
+            name="ck_quiz_max_attempts",
+        ),
+        CheckConstraint(
+            "passing_percentage >= 0 AND passing_percentage <= 100",
+            name="ck_quiz_passing_percentage",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -54,8 +68,20 @@ class Quiz(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     time_limit_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     passing_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # AI-153/AI-154: percentage is the source of truth; ``passing_score`` above
+    # is only the cached point conversion shown to students/teachers.
+    passing_percentage: Mapped[float] = mapped_column(
+        Float, nullable=False, default=50.0, server_default="50.0"
+    )
     show_explanations: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
+    )
+    # AI-153: availability window for students (NULL = no bound) and the number
+    # of attempts a student may start (NULL = unlimited).
+    opens_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    max_attempts: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=1, server_default="1"
     )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="DRAFT", server_default="DRAFT"
@@ -173,6 +199,16 @@ class QuizAttempt(Base):
             "status IN ('IN_PROGRESS', 'SUBMITTED', 'EXPIRED')",
             name="ck_quiz_attempt_status",
         ),
+        # One active attempt per student/quiz prevents a double-click or a second
+        # tab from consuming two attempts (AI-153 AC-06).
+        Index(
+            "uq_quiz_attempt_active",
+            "quiz_id",
+            "student_id",
+            unique=True,
+            sqlite_where=text("status = 'IN_PROGRESS'"),
+            postgresql_where=text("status = 'IN_PROGRESS'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -194,6 +230,7 @@ class QuizAttempt(Base):
     total_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     max_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     passing_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    passing_percentage: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     graded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -221,6 +258,10 @@ class QuizAnswer(Base):
     )
     selected_option_labels: Mapped[list[str] | None] = mapped_column(JSON_TYPE, nullable=True)
     text_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # AI-153: student-owned flag, persisted so a reload keeps the review marks.
+    is_marked_for_review: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
     score_awarded: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     breakdown: Mapped[dict | None] = mapped_column(JSON_TYPE, nullable=True)

@@ -24,6 +24,7 @@ from app.models.user import Role, User
 from app.services.quiz_attempt_service import (
     AttemptAnswerValidationError,
     AttemptNotGradableError,
+    attempt_is_passed,
     attempt_percentage,
     grade_attempt,
     round_half_up,
@@ -72,7 +73,7 @@ def _create_user(db: Session, role_name: str, email: str, full_name: str) -> Use
 def _seed_quiz(
     db: Session,
     *,
-    passing_score: float | None = None,
+    passing_percentage: float | None = None,
     show_explanations: bool = False,
     status: str = "SUBMITTED",
     submitted_at: datetime | None = SUBMITTED_AT,
@@ -98,7 +99,7 @@ def _seed_quiz(
         class_id=clazz.id,
         creator_id=trainer.id,
         title="Objective Quiz",
-        passing_score=passing_score,
+        passing_percentage=50.0 if passing_percentage is None else passing_percentage,
         show_explanations=show_explanations,
         status="PUBLISHED",
     )
@@ -211,6 +212,7 @@ def test_full_correct_attempt_snapshots_totals(db_session: Session) -> None:
 
     assert attempt.total_score == 6.0
     assert attempt.max_score == 6.0
+    assert attempt.passing_percentage == 50.0
     assert attempt.passing_score == 3.0
     assert attempt.is_passed is True
     assert attempt.graded_at is not None
@@ -260,15 +262,16 @@ def test_negative_multiple_choice_score_is_preserved(db_session: Session) -> Non
     assert multi_answer.breakdown["wrong_selected"] == ["B"]
 
 
-def test_explicit_passing_score_is_snapshotted(db_session: Session) -> None:
-    data = _seed_quiz(db_session, passing_score=5.5)
+def test_explicit_passing_percentage_is_snapshotted(db_session: Session) -> None:
+    data = _seed_quiz(db_session, passing_percentage=80)
     data["answers"][1].selected_option_labels = ["A"]
     db_session.commit()
 
     attempt = grade_attempt(db_session, data["attempt"].id)
 
     assert attempt.total_score == 4.5
-    assert attempt.passing_score == 5.5
+    assert attempt.passing_percentage == 80.0
+    assert attempt.passing_score == 4.8
     assert attempt.is_passed is False
 
 
@@ -363,6 +366,14 @@ def test_attempt_percentage_handles_missing_values() -> None:
     assert attempt_percentage(3.0, None) is None
     assert attempt_percentage(3.0, 0.0) is None
     assert attempt_percentage(3.0, 6.0) == 50.0
+
+
+def test_passing_boundary_uses_cross_multiplication() -> None:
+    assert attempt_is_passed(3.0, 6.0, 50.0) is True
+    assert attempt_is_passed(2.99, 6.0, 50.0) is False
+    assert attempt_is_passed(3.0, 5.0, 60.0) is True
+    assert attempt_is_passed(2.99, 5.0, 60.0) is False
+    assert attempt_is_passed(0.0, 0.0, 50.0) is None
 
 
 def test_select_official_attempts_highest_score_then_latest(db_session: Session) -> None:
