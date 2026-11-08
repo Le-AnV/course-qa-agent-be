@@ -93,6 +93,15 @@ def update_metadata(db: Session, quiz: Quiz, payload: QuizUpdate) -> Quiz:
     _require_draft(quiz)
     changes = payload.model_dump(exclude_unset=True)
 
+    # AI-153 shipped a "passing score (%)" field; keep accepting that payload
+    # but store it in the new percentage column.
+    legacy_passing_score = changes.pop("passing_score", None)
+    if (
+        legacy_passing_score is not None
+        and "passing_percentage" not in changes
+    ):
+        changes["passing_percentage"] = legacy_passing_score
+
     # The request may carry only one bound; validate the merged window so a
     # PATCH cannot turn a valid quiz into opens_at >= closes_at.
     opens_at = changes.get("opens_at", quiz.opens_at)
@@ -106,6 +115,15 @@ def update_metadata(db: Session, quiz: Quiz, payload: QuizUpdate) -> Quiz:
 
     for field, value in changes.items():
         setattr(quiz, field, value)
+
+    if "passing_percentage" in changes:
+        if quiz.passing_percentage is None:
+            quiz.passing_percentage = 50.0
+        if not 0 <= float(quiz.passing_percentage) <= 100:
+            raise QuizStateError("passing_percentage must be between 0 and 100.")
+        total_points = sum(float(question.points or 0) for question in quiz.questions)
+        quiz.passing_score = round(total_points * float(quiz.passing_percentage) / 100, 2)
+
     db.commit()
     db.refresh(quiz)
     return quiz
@@ -149,6 +167,14 @@ def approve(db: Session, quiz: Quiz, approver: User) -> Quiz:
         raise QuizStateError("Only a draft quiz can be approved.")
     if not quiz.questions:
         raise QuizStateError("Only a draft quiz with at least one question can be approved.")
+    total_points = sum(float(question.points or 0) for question in quiz.questions)
+    if total_points <= 0:
+        raise QuizStateError("Quiz max score must be greater than zero.")
+    if quiz.passing_percentage is None:
+        quiz.passing_percentage = 50.0
+    if not 0 <= float(quiz.passing_percentage) <= 100:
+        raise QuizStateError("passing_percentage must be between 0 and 100.")
+    quiz.passing_score = round(total_points * float(quiz.passing_percentage) / 100, 2)
     quiz.status = APPROVED_STATUS
     quiz.approved_by_id = approver.id
     quiz.approved_at = datetime.now(UTC)

@@ -98,7 +98,7 @@ def db_session(monkeypatch) -> Generator[Session, None, None]:
         title="Timed Quiz",
         description="Midterm",
         time_limit_minutes=30,
-        passing_score=60,
+        passing_percentage=60,
         status="PUBLISHED",
         opens_at=now - timedelta(hours=1),
         closes_at=now + timedelta(hours=1),
@@ -538,7 +538,10 @@ def test_submit_with_a_cleared_answer_does_not_score_the_stale_row(
     assert submitted.status_code == 200, submitted.text
     body = submitted.json()
     assert body["result"]["total_score"] == 3.0
-    assert {answer["question_id"] for answer in body["result"]["answers"]} == {multi, fill}
+    answers = {answer["question_id"]: answer for answer in body["result"]["answers"]}
+    assert set(answers) == {single, multi, fill}
+    assert answers[single]["selected_option_labels"] is None
+    assert answers[single]["score_awarded"] == 0.0
 
 
 def test_starting_twice_resumes_the_same_active_attempt(

@@ -60,9 +60,11 @@ Constraints: `opens_at < closes_at` when both are present; `max_attempts > 0` or
 `quiz_attempt` gets a partial unique index `uq_quiz_attempt_active` on
 `(quiz_id, student_id)` where `status = 'IN_PROGRESS'`.
 
-`passing_score` remains the existing percentage threshold (0–100). A submitted attempt
-is passed when `max(0, total/max_total*100) >= passing_score`; when `passing_score` is
-`NULL`, `is_passed` stays `NULL`.
+`passing_percentage` is the percentage threshold (0–100) and the source of truth for
+pass/fail; it defaults to `50` and is `NOT NULL` on `quiz`. AI-154 keeps `passing_score`
+as a cached point conversion for display. A submitted attempt is passed when
+`max(0, total/max_total*100) >= passing_percentage`; grading snapshots both values on
+`quiz_attempt`, so editing the quiz later cannot change an already-graded result.
 
 ---
 
@@ -253,7 +255,8 @@ The draft-only metadata form now exposes:
 
 - `opens_at` / `closes_at` (`datetime-local`, empty = no bound);
 - `max_attempts` (empty = unlimited);
-- `passing_score` is labelled as a percentage.
+- `passing_percentage` is the pass threshold (0–100, default 50); `passing_score` is shown
+  as the converted point value.
 
 The merged window is validated server-side, so a PATCH containing only one bound cannot
 produce `opens_at >= closes_at`.

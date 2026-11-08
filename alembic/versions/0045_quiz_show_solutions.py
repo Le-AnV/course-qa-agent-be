@@ -1,7 +1,7 @@
 """Add show_solutions_after_submission to quiz table.
 
-Revision ID: 0043_quiz_show_solutions
-Revises: 0042_question_bank
+Revision ID: 0045_quiz_show_solutions
+Revises: 0044_merge_qbank_quiz_heads
 Create Date: 2026-11-08
 """
 
@@ -9,8 +9,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0043_quiz_show_solutions"
-down_revision = "0042_question_bank"
+revision = "0045_quiz_show_solutions"
+down_revision = "0044_merge_qbank_quiz_heads"
 branch_labels = None
 depends_on = None
 
