@@ -16,9 +16,33 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("user", sa.Column("student_code", sa.String(20), nullable=True))
-    op.create_unique_constraint("uq_user_student_code", "user", ["student_code"])
-    op.add_column("import_rows", sa.Column("student_code", sa.String(20), nullable=True))
+    conn = op.get_bind()
+    user_cols = {
+        r[0]
+        for r in conn.exec_driver_sql(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'user'"
+        ).fetchall()
+    }
+    if "student_code" not in user_cols:
+        op.add_column("user", sa.Column("student_code", sa.String(20), nullable=True))
+
+    user_cons = {
+        r[0]
+        for r in conn.exec_driver_sql(
+            "SELECT conname FROM pg_constraint WHERE conrelid = to_regclass('\"user\"')"
+        ).fetchall()
+    }
+    if "uq_user_student_code" not in user_cons:
+        op.create_unique_constraint("uq_user_student_code", "user", ["student_code"])
+
+    import_cols = {
+        r[0]
+        for r in conn.exec_driver_sql(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'import_rows'"
+        ).fetchall()
+    }
+    if "student_code" not in import_cols:
+        op.add_column("import_rows", sa.Column("student_code", sa.String(20), nullable=True))
 
 
 def downgrade() -> None:

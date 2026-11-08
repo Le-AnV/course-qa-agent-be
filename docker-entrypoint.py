@@ -9,16 +9,28 @@ import os
 import subprocess
 import sys
 
-try:
+from sqlalchemy import create_engine, inspect
+
+db_url = os.environ.get("DATABASE_URL", "")
+if db_url:
+    try:
+        eng = create_engine(db_url)
+        insp = inspect(eng)
+        tables = insp.get_table_names()
+        if "alembic_version" not in tables:
+            # Fresh DB: create all tables directly from models and stamp head
+            import app.models  # noqa: F401
+            from app.core.database import Base
+
+            Base.metadata.create_all(bind=eng)
+            subprocess.run([sys.executable, "-m", "alembic", "stamp", "head"], check=True)
+        else:
+            subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], check=True)
+    except Exception as exc:
+        print(f"[entrypoint] migration / schema init failed: {exc}", file=sys.stderr)
+        raise
+else:
     subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], check=True)
-except subprocess.CalledProcessError:
-    print(
-        "[entrypoint] alembic upgrade failed. If this DB predates migrations "
-        "(old create_all startup), reset local volumes once with: "
-        "docker compose down -v && docker compose up -d --build",
-        file=sys.stderr,
-    )
-    raise
 
 os.execvp(
     sys.executable,
