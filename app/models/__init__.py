@@ -14,6 +14,7 @@ from app.models.document import Document, SyllabusUnit  # noqa: F401
 from app.models.email_outbox import EmailOutbox  # noqa: F401
 from app.models.gemini_key import GeminiApiKey  # noqa: F401
 from app.models.import_job import ImportBatch, ImportRow  # noqa: F401
+from app.models.question_bank import BankQuestion, BankQuestionOption  # noqa: F401
 from app.models.quiz import (  # noqa: F401
     Quiz,
     QuizAnswer,
