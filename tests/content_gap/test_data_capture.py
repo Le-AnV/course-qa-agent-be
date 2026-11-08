@@ -138,11 +138,11 @@ def test_delete_content_gap_queries():
 
 
 def test_qdrant_store_similarity_search_by_vector_with_score():
-    mock_vector_store = MagicMock()
+    mock_vector_store = MagicMock(spec=["similarity_search_with_score_by_vector"])
     mock_doc = MagicMock()
     mock_doc.page_content = "Introduction to Algorithms"
     mock_doc.metadata = {"document_id": "doc-1", "page": 1}
-    mock_vector_store.similarity_search_by_vector_with_score.return_value = [
+    mock_vector_store.similarity_search_with_score_by_vector.return_value = [
         (mock_doc, 0.88)
     ]
 
@@ -162,8 +162,8 @@ def test_qdrant_store_similarity_search_by_vector_with_score():
     assert doc.page_content == "Introduction to Algorithms"
     assert doc.metadata["document_id"] == "doc-1"
 
-    mock_vector_store.similarity_search_by_vector_with_score.assert_called_once()
-    _, kwargs = mock_vector_store.similarity_search_by_vector_with_score.call_args
+    mock_vector_store.similarity_search_with_score_by_vector.assert_called_once()
+    _, kwargs = mock_vector_store.similarity_search_with_score_by_vector.call_args
     assert kwargs["k"] == 3
     qfilter = kwargs["filter"]
     assert qfilter is not None

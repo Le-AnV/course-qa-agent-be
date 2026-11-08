@@ -55,6 +55,7 @@ class Ticket(Base):
         Uuid, ForeignKey("user.id", ondelete="SET NULL"), nullable=True, index=True
     )
     escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    student_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     replies: Mapped[list["TicketReply"]] = relationship(
         back_populates="ticket",

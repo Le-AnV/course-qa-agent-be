@@ -310,6 +310,8 @@ class EmailConfigUpdate(BaseModel):
     # App password (Gmail / Google Workspace) — write-only.
     smtp_app_password: str | None = None
     smtp_rate_per_minute: int | None = Field(default=None, ge=1, le=500)
+    # Admin toggle for real delivery; omitted means "leave as configured".
+    email_dry_run: bool | None = None
 
 
 # --- AI-105 runtime settings + connection checks ---

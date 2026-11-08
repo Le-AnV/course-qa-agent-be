@@ -31,6 +31,7 @@ from app.routers.content_gaps import router as content_gaps_router
 from app.routers.documents import router as documents_router
 from app.routers.history import router as history_router
 from app.routers.quizzes import router as quizzes_router
+from app.routers.quizzes import student_router as student_quizzes_router
 from app.routers.student.router import router as student_router
 from app.routers.tickets import router as tickets_router
 from app.services import reranker_service
@@ -96,7 +97,16 @@ async def _expire_tickets_periodically() -> None:
             logger.warning("Ticket expiration pass failed; will retry.", exc_info=True)
 
 
-app = FastAPI(title="Course QA Agent API", version="0.1.0", lifespan=lifespan)
+_expose_api_docs = settings.app_env != "production"
+
+app = FastAPI(
+    title="Course QA Agent API",
+    version="0.1.0",
+    lifespan=lifespan,
+    docs_url="/docs" if _expose_api_docs else None,
+    redoc_url="/redoc" if _expose_api_docs else None,
+    openapi_url="/openapi.json" if _expose_api_docs else None,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -124,6 +134,7 @@ app.include_router(student_router)
 app.include_router(citations_router)
 app.include_router(tickets_router)
 app.include_router(quizzes_router)
+app.include_router(student_quizzes_router)
 app.include_router(categories_router)
 app.include_router(content_gaps_router)
 app.include_router(attendance_router)

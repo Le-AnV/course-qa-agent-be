@@ -96,6 +96,7 @@ def get_ticket_counts(
 def list_my_tickets(
     class_id: uuid.UUID | None = None,
     status: TicketStatus | None = None,
+    unread: bool = False,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -109,10 +110,22 @@ def list_my_tickets(
         student_id=user.id,
         class_id=class_id,
         status=status,
+        unread=unread,
         page=page,
         page_size=page_size,
     )
     return TicketListResponse(items=items, total=total, page=page, page_size=page_size)
+
+
+@router.post("/{ticket_id}/seen", status_code=status.HTTP_204_NO_CONTENT)
+def mark_ticket_seen(
+    ticket_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> None:
+    _require_student(user)
+    if ticket_service.mark_ticket_seen(db, ticket_id=ticket_id, student_id=user.id) is None:
+        raise HTTPException(status_code=404, detail="Ticket not found.")
 
 
 @router.get("/{ticket_id}", response_model=TicketThreadRead)

@@ -26,7 +26,7 @@ dependencies = [
   "qdrant-client>=1.19.1",
   "python-multipart>=0.0.32",
   "alembic>=1.14",
-  "markitdown[docx,pdf]>=0.1.8",
+  "markitdown[docx]>=0.1.8",
   "pymupdf4llm>=1.28.2",
   "python-pptx>=1.0.2",
   "torch>=2.0",
@@ -34,6 +34,9 @@ dependencies = [
   "pymupdf>=1.28.2",
   "httpx>=0.28",
   "lunar-vn==1.4.0",
+  "mammoth",
+  "tenacity",
+  "PyYAML",
 ]
 
 [dependency-groups]
@@ -41,6 +44,14 @@ dev = [
   "pytest>=8",
   "ruff>=0.8",
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
 
 [tool.ruff]
 target-version = "py312"

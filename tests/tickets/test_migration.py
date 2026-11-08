@@ -62,3 +62,25 @@ def test_original_question_migration_preserves_existing_ticket():
             "SELECT question, original_question FROM ticket WHERE id = 'old-ticket'"
         )).one() == ("Teacher question", None)
     engine.dispose()
+
+
+def test_student_seen_migration_backfills_existing_tickets():
+    path = Path(__file__).resolve().parents[2] / "alembic/versions/0038_ticket_student_seen_at.py"
+    spec = importlib.util.spec_from_file_location("student_seen_migration", path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE ticket (id TEXT PRIMARY KEY)"))
+        connection.execute(text("INSERT INTO ticket (id) VALUES ('old-ticket')"))
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.upgrade()
+            assert connection.execute(text(
+                "SELECT student_seen_at FROM ticket WHERE id = 'old-ticket'"
+            )).scalar_one() is not None
+            migration.downgrade()
+        assert "student_seen_at" not in {
+            column["name"] for column in inspect(connection).get_columns("ticket")
+        }
+    engine.dispose()

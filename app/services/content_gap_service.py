@@ -159,7 +159,7 @@ Synthesize these questions into 1 to 4 distinct recurring learning themes (Quest
 For each theme, provide:
 - "pattern": A concise, natural summary title in Vietnamese describing what students are struggling with or asking.
 - "pedagogical_category": Exactly one of ["In-Scope Comparison", "Practical Implementation", "Troubleshooting & Edge Cases", "Foundational Concepts"].
-- "scope_type": Either "core_curriculum" (concepts standardly expected in the course syllabus for {category_name}) OR "enrichment" (extracurricular curiosity, advanced 3D graphics libraries like Vulkan, third-party frameworks, or broad external language comparisons not required by core syllabus).
+- "scope_type": Either "core_curriculum" (concepts standardly expected in the course syllabus for {category_name}) OR "enrichment" (extracurricular curiosity, advanced 3D graphics libraries like Vulkan, third-party frameworks, or external language comparisons like Python, Java, Rust, or other languages not required by core syllabus).
 - "sample_question": The most representative question from the input list.
 - "suggested_action": A concrete, practical recommendation for the instructor.
   * If scope_type is "core_curriculum": specify what to add to "tài liệu bài giảng" or "tài liệu lab" (e.g. diagrams, step-by-step code examples).
@@ -244,9 +244,13 @@ Return ONLY a valid JSON object matching this schema:
 
             pat_name = p_data.get("pattern", f"Tìm hiểu về {category_name}")
             raw_scope = str(p_data.get("scope_type", "")).lower()
-            is_enrichment = raw_scope == "enrichment" or any(
-                kw in pat_name.lower() for kw in ["vulkan", "opengl", "directx", "unreal", "game engine", "thư viện đồ họa", "ngôn ngữ khác", "ngoài đề cương"]
-            )
+            sample_text = f"{pat_name} {sample_q}".lower()
+            enrichment_keywords = [
+                "vulkan", "opengl", "directx", "unreal", "game engine", "thư viện đồ họa",
+                "ngôn ngữ khác", "ngôn ngữ lập trình khác", "ngoài đề cương", "ngoài giáo trình",
+                "python", "java", "c#", "rust", "golang", "external language",
+            ]
+            is_enrichment = raw_scope == "enrichment" or any(kw in sample_text for kw in enrichment_keywords)
             scope_type = "enrichment" if is_enrichment else "core_curriculum"
 
             patterns.append(
@@ -413,6 +417,16 @@ def _synthesize_topic_pedagogy_fallback(
         web_list = b_data["web_queries"]
         if q_list:
             sample_q = min(q_list, key=lambda s: len(s) if len(s) > 10 else 999)
+            text_to_check = f"{b_data['pattern']} {sample_q}".lower()
+            enrichment_keywords = [
+                "vulkan", "opengl", "directx", "unreal", "game engine", "thư viện đồ họa",
+                "ngôn ngữ khác", "ngôn ngữ lập trình khác", "ngoài đề cương", "ngoài giáo trình",
+                "python", "java", "c#", "rust", "golang", "external language",
+            ]
+            is_enrichment = any(kw in text_to_check for kw in enrichment_keywords)
+            scope_type = "enrichment" if is_enrichment else "core_curriculum"
+            action = "Nhu cầu tự tìm hiểu thêm của sinh viên ngoài đề cương; thầy/cô có thể tạo bài đọc thêm tự chọn (Optional Reading) hoặc gợi ý đề tài nếu muốn." if is_enrichment else b_data["suggested_action"]
+
             patterns.append(
                 QuestionPattern(
                     pattern=b_data["pattern"],
@@ -421,7 +435,8 @@ def _synthesize_topic_pedagogy_fallback(
                     student_count=max(1, len(b_data["students"])),
                     pedagogical_category=b_data["category"],
                     sample_question=sample_q.strip()[:120],
-                    suggested_action=b_data["suggested_action"],
+                    suggested_action=action,
+                    scope_type=scope_type,
                 )
             )
 

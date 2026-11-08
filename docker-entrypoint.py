@@ -9,39 +9,65 @@ import os
 import subprocess
 import sys
 
-from sqlalchemy import create_engine, inspect
+import sqlalchemy as sa
 
-db_url = os.environ.get("DATABASE_URL", "")
-if db_url:
+from app.config import settings
+from app.core.database import create_all_tables
+
+
+def _has_alembic_version(url: str) -> bool:
+    engine = sa.create_engine(url, pool_pre_ping=True)
     try:
-        eng = create_engine(db_url)
-        insp = inspect(eng)
-        tables = insp.get_table_names()
-        if "alembic_version" not in tables:
-            # Fresh DB: create all tables directly from models and stamp head
-            import app.models  # noqa: F401
-            from app.core.database import Base
+        with engine.connect() as conn:
+            row = conn.exec_driver_sql(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_name = 'alembic_version'"
+                if not url.startswith("sqlite")
+                else "SELECT 1 FROM sqlite_master WHERE type='table' AND name='alembic_version'"
+            ).fetchone()
+            return row is not None
+    finally:
+        engine.dispose()
 
-            Base.metadata.create_all(bind=eng)
-            subprocess.run([sys.executable, "-m", "alembic", "stamp", "head"], check=True)
-        else:
-            subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], check=True)
-    except Exception as exc:
-        print(f"[entrypoint] migration / schema init failed: {exc}", file=sys.stderr)
+
+def _bring_to_head() -> None:
+    """Fresh/legacy DBs are built by create_all then stamped; tracked DBs upgrade.
+
+    0001_initial_schema creates every table from the *current* models, so the
+    revision chain below it is written for pre-existing databases, not for a
+    blank one. A DB without alembic_version therefore just needs create_all +
+    ``stamp head`` — running the chain would replay column/constraint steps
+    that create_all already applied.
+    """
+    url = settings.database_url
+    if _has_alembic_version(url):
+        subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], check=True)
+        return
+
+    create_all_tables(url)
+    subprocess.run([sys.executable, "-m", "alembic", "stamp", "head"], check=True)
+
+
+if __name__ == "__main__":
+    try:
+        _bring_to_head()
+    except subprocess.CalledProcessError:
+        print(
+            "[entrypoint] alembic failed; migrations left the DB in a partial state.",
+            file=sys.stderr,
+        )
         raise
-else:
-    subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], check=True)
 
-os.execvp(
-    sys.executable,
-    [
+    os.execvp(
         sys.executable,
-        "-m",
-        "uvicorn",
-        "app.main:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8000",
-    ],
-)
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8000",
+        ],
+    )
