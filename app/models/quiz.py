@@ -116,7 +116,7 @@ class QuizQuestion(Base):
             name="ck_quiz_question_type",
         ),
         CheckConstraint(
-            "difficulty IN ('NOVICE', 'BEGINNER', 'COMPETENT', 'PROFICIENT', 'MASTER')",
+            "difficulty IN ('NOVICE', 'BEGINNER', 'COMPETENT', 'PROFICIENT', 'MASTER', 'REMEMBER', 'UNDERSTAND', 'APPLY')",
             name="ck_quiz_question_difficulty",
         ),
         CheckConstraint("points > 0", name="ck_quiz_question_points_positive"),
@@ -126,8 +126,8 @@ class QuizQuestion(Base):
     quiz_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("quiz.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    skill_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("skill.id", ondelete="RESTRICT"), nullable=False, index=True
+    skill_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("skill.id", ondelete="SET NULL"), nullable=True, index=True
     )
     question_type: Mapped[str] = mapped_column(String(30), nullable=False)
     question: Mapped[str] = mapped_column(Text, nullable=False)
@@ -135,7 +135,7 @@ class QuizQuestion(Base):
         Float, nullable=False, default=1.0, server_default="1.0"
     )
     difficulty: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="REMEMBER", server_default="REMEMBER"
+        String(20), nullable=False, default="NOVICE", server_default="NOVICE"
     )
     order_index: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"

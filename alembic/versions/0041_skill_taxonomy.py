@@ -79,13 +79,12 @@ def upgrade() -> None:
     """)
 
     with op.batch_alter_table("quiz_question") as batch:
-        batch.alter_column("skill_id", nullable=False)
         batch.create_foreign_key(
             "fk_quiz_question_skill_id",
             "skill",
             ["skill_id"],
             ["id"],
-            ondelete="RESTRICT",
+            ondelete="SET NULL",
         )
     op.create_index("ix_quiz_question_skill_id", "quiz_question", ["skill_id"])
 
@@ -96,7 +95,7 @@ def upgrade() -> None:
     op.execute("UPDATE quiz_question SET difficulty = 'COMPETENT' WHERE difficulty = 'APPLY';")
     op.execute("""
         ALTER TABLE quiz_question ADD CONSTRAINT ck_quiz_question_difficulty 
-        CHECK (difficulty IN ('NOVICE', 'BEGINNER', 'COMPETENT', 'PROFICIENT', 'MASTER'));
+        CHECK (difficulty IN ('NOVICE', 'BEGINNER', 'COMPETENT', 'PROFICIENT', 'MASTER', 'REMEMBER', 'UNDERSTAND', 'APPLY'));
     """)
 
     # 6. Thêm cột skill_report vào quiz_attempt
