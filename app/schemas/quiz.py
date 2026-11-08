@@ -542,6 +542,7 @@ class QuizStatisticsRead(BaseModel):
     quiz_title: str
     submitted_count: int
     max_score: float
+    passing_percentage: float | None = None
     average_score: float | None = None
     average_percentage: float | None = None
     pass_rate: float | None = None
@@ -574,8 +575,12 @@ class StudentQuizListItem(BaseModel):
     attempt_status: AttemptStatus | None = None
     can_start: bool = False
     total_score: float | None = None
+    max_score: float | None = None
+    percentage: float | None = None
+    passing_score: float | None = None
     passing_percentage: float | None = None
     is_passed: bool | None = None
+    official_attempt_id: uuid.UUID | None = None
 
 
 class StudentQuizListRead(BaseModel):
