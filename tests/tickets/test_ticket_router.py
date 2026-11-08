@@ -684,7 +684,7 @@ def inbox(db_session):
         ticket = Ticket(id=uuid.UUID(int=index+1), class_id=db_session.info[
             "other_class_id" if index == 3 else "class_id"],
             student_id=db_session.info["student_id"], question=f"Question {index}", status=state,
-            created_at=datetime(2026, 11, 1, tzinfo=UTC) + timedelta(minutes=min(index, 3)))
+            created_at=datetime.now(UTC) - timedelta(hours=2) + timedelta(minutes=min(index, 3)))
         db_session.add(ticket)
         items.append(ticket)
     private_ticket = Ticket(class_id=foreign_class.id, student_id=db_session.info["other_student_id"],
