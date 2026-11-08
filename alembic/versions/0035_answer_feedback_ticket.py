@@ -36,11 +36,20 @@ def upgrade() -> None:
                WHERE p.session_id = chat_message.session_id
                  AND p.created_at = ordered.previous_time) = 1
     """))
+    conn = op.get_bind()
+    ticket_cols = {
+        r[0]
+        for r in conn.exec_driver_sql(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'ticket'"
+        ).fetchall()
+    }
     with op.batch_alter_table("ticket") as batch:
-        batch.add_column(sa.Column("citations", sa.JSON(), nullable=False, server_default=sa.text("'[]'")))
-        batch.add_column(sa.Column("source_message_id", sa.Uuid(), nullable=True))
-        batch.create_foreign_key("fk_ticket_source_message", "chat_message", ["source_message_id"], ["id"], ondelete="SET NULL")
-        batch.create_unique_constraint("uq_ticket_source_message_id", ["source_message_id"])
+        if "citations" not in ticket_cols:
+            batch.add_column(sa.Column("citations", sa.JSON(), nullable=False, server_default=sa.text("'[]'")))
+        if "source_message_id" not in ticket_cols:
+            batch.add_column(sa.Column("source_message_id", sa.Uuid(), nullable=True))
+            batch.create_foreign_key("fk_ticket_source_message", "chat_message", ["source_message_id"], ["id"], ondelete="SET NULL")
+            batch.create_unique_constraint("uq_ticket_source_message_id", ["source_message_id"])
 
 
 def downgrade() -> None:

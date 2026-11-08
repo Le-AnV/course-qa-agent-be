@@ -16,6 +16,12 @@ from app.core.deps import get_db
 from app.core.logging import configure_logging
 from app.core.seed import seed_database
 from app.routers.admin.router import router as admin_router
+from app.routers.attendance import (
+    router as attendance_router,
+)
+from app.routers.attendance import (
+    student_router as attendance_student_router,
+)
 from app.routers.auth.router import router as auth_router
 from app.routers.categories import router as categories_router
 from app.routers.chat.router import router as chat_router
@@ -133,6 +139,8 @@ app.include_router(student_quizzes_router)
 app.include_router(skills_router)
 app.include_router(categories_router)
 app.include_router(content_gaps_router)
+app.include_router(attendance_router)
+app.include_router(attendance_student_router)
 
 
 
