@@ -34,7 +34,16 @@ EXCEL_HEADERS = [
 ]
 
 QUESTION_TYPES_LIST = ["SINGLE_CHOICE", "MULTIPLE_CHOICE", "FILL_IN_BLANK"]
-BLOOM_LEVELS_LIST = ["REMEMBER", "UNDERSTAND", "APPLY"]
+BLOOM_LEVELS_LIST = [
+    "REMEMBER",
+    "UNDERSTAND",
+    "APPLY",
+    "NOVICE",
+    "BEGINNER",
+    "COMPETENT",
+    "PROFICIENT",
+    "MASTER",
+]
 OPTION_COLUMNS = ["Option A", "Option B", "Option C", "Option D", "Option E", "Option F"]
 OPTION_KEY_MAP = {
     "Option A": "A",
