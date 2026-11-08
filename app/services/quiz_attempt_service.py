@@ -211,6 +211,45 @@ def _result(quiz: Quiz, attempt: QuizAttempt) -> QuizAttemptResultRead:
     total = float(attempt.total_score or 0)
     max_total = round(sum(float(question.points or 0) for question in quiz.questions), 4)
     percentage = _percentage(total, max_total)
+
+    from app.services.quiz_generator_service import compute_skill_radar_report
+
+    answers_by_qid = {ans.question_id: ans for ans in attempt.answers}
+    skill_radar = compute_skill_radar_report(quiz, answers_by_qid)
+
+    show_solutions = getattr(quiz, "show_solutions_after_submission", True)
+    if not show_solutions:
+        # Sanitize questions so correct answers & explanations are hidden from students
+        processed_questions: list[QuizQuestionStudentResultRead] = []
+        for question in sorted(quiz.questions, key=lambda q: q.order_index):
+            q_dict = {
+                "id": question.id,
+                "question_type": question.question_type,
+                "question": question.question,
+                "points": question.points,
+                "difficulty": question.difficulty,
+                "order_index": question.order_index,
+                "explanation": None,
+                "rubric": None,
+                "source_reference": None,
+                "options": [
+                    {
+                        "id": opt.id,
+                        "option_label": opt.option_label,
+                        "option_text": opt.option_text,
+                        "order_index": opt.order_index,
+                        "is_correct": False,
+                    }
+                    for opt in sorted(question.options, key=lambda o: o.order_index)
+                ],
+            }
+            processed_questions.append(QuizQuestionStudentResultRead.model_validate(q_dict))
+    else:
+        processed_questions = [
+            QuizQuestionStudentResultRead.model_validate(question)
+            for question in sorted(quiz.questions, key=lambda q: q.order_index)
+        ]
+
     return QuizAttemptResultRead(
         attempt_id=attempt.id,
         quiz_id=quiz.id,
@@ -223,11 +262,10 @@ def _result(quiz: Quiz, attempt: QuizAttempt) -> QuizAttemptResultRead:
         percentage=percentage,
         passing_score=quiz.passing_score,
         is_passed=attempt.is_passed,
-        questions=[
-            QuizQuestionStudentResultRead.model_validate(question)
-            for question in sorted(quiz.questions, key=lambda q: q.order_index)
-        ],
+        show_solutions_after_submission=show_solutions,
+        questions=processed_questions,
         answers=[QuizAnswerRead.model_validate(answer) for answer in attempt.answers],
+        skill_radar=skill_radar,
     )
 
 

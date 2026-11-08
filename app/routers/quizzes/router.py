@@ -18,13 +18,21 @@ from app.models.course import Class
 from app.models.quiz import Quiz, QuizOption, QuizQuestion
 from app.models.user import User
 from app.schemas.quiz import (
+    BlueprintAvailabilityResponse,
+    QuizGenerateBlueprintRequest,
     QuizQuestionCreate,
     QuizSummaryRead,
     QuizTeacherRead,
     QuizUpdate,
     quiz_teacher_read,
 )
-from app.services import course_service, quiz_excel, quiz_generation_service, user_service
+from app.services import (
+    course_service,
+    quiz_excel,
+    quiz_generation_service,
+    quiz_generator_service,
+    user_service,
+)
 from app.services import quiz_review_service as review
 from app.services.quiz_review_service import QuizStateError
 
@@ -153,6 +161,45 @@ def download_quiz_template(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="quiz_template.xlsx"'},
     )
+
+
+@router.get("/blueprint-matrix", response_model=BlueprintAvailabilityResponse)
+def get_blueprint_matrix_availability(
+    class_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> BlueprintAvailabilityResponse:
+    """Return Question Bank question counts mapped across class skills and Dreyfus tiers (AI-149)."""
+    _require_class_teacher(db, user, class_id)
+    try:
+        return quiz_generator_service.get_blueprint_availability(db, class_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post(
+    "/generate-blueprint",
+    response_model=QuizTeacherRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def generate_quiz_from_blueprint(
+    class_id: uuid.UUID,
+    payload: QuizGenerateBlueprintRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> QuizTeacherRead:
+    """Sample questions from Question Bank using a standardized blueprint matrix (AI-149 / AI-151)."""
+    _require_class_teacher(db, user, class_id)
+    try:
+        quiz = quiz_generator_service.generate_quiz_from_blueprint(
+            db=db,
+            class_id=class_id,
+            req=payload,
+            user_id=user.id,
+        )
+        return quiz_teacher_read(quiz)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("", response_model=list[QuizSummaryRead])

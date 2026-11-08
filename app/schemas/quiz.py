@@ -209,6 +209,7 @@ class QuizBase(BaseModel):
     opens_at: datetime | None = None
     closes_at: datetime | None = None
     max_attempts: int | None = Field(default=1, gt=0)
+    show_solutions_after_submission: bool = True
     status: QuizStatus = "DRAFT"
 
     @field_validator("title")
@@ -488,8 +489,10 @@ class QuizAttemptResultRead(BaseModel):
     percentage: float
     passing_score: float | None = None
     is_passed: bool | None = None
+    show_solutions_after_submission: bool = True
     questions: list[QuizQuestionStudentResultRead] = Field(default_factory=list)
     answers: list[QuizAnswerRead] = Field(default_factory=list)
+    skill_radar: list[SkillMasteryRadarItem] = Field(default_factory=list)
 
 
 class QuizAttemptSessionRead(BaseModel):
@@ -510,3 +513,96 @@ class QuizAttemptSessionRead(BaseModel):
     total_points: float = 0.0
     answered_count: int = 0
     result: QuizAttemptResultRead | None = None
+
+
+# ---------------------------------------------------------------------------
+# Skill Mastery Radar Report (AI-149 / AI-151 / AI-159)
+# ---------------------------------------------------------------------------
+
+
+class SkillMasteryLevelBreakdown(BaseModel):
+    count: int
+    earned: float
+    max: float
+    rate: float | None = None
+    passed: bool
+    threshold: int
+    status: str
+
+
+class SkillMasteryRadarItem(BaseModel):
+    skill_id: str
+    skill_code: str
+    skill_name: str
+    achieved_level: str
+    ceiling_level: str | None = None
+    percentage: float
+    is_blocked: bool = False
+    blocked_at: str | None = None
+    reason: str | None = None
+    foundation_gaps: list[str] = Field(default_factory=list)
+    breakdown: dict[str, SkillMasteryLevelBreakdown] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Blueprint Quiz Generation (AI-149 / AI-151)
+# ---------------------------------------------------------------------------
+
+
+class BlueprintSkillCell(BaseModel):
+    skill_id: uuid.UUID
+    difficulty: BloomLevel
+    count: int = Field(default=3, ge=1)
+
+
+class QuizGenerateBlueprintRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    time_limit_minutes: int | None = Field(default=None, gt=0)
+    passing_score: float | None = Field(default=None, ge=0)
+    opens_at: datetime | None = None
+    closes_at: datetime | None = None
+    max_attempts: int | None = Field(default=1, gt=0)
+    target_skill_ids: list[uuid.UUID] = Field(min_length=1)
+    target_levels: list[BloomLevel] = Field(
+        default=["NOVICE", "BEGINNER", "COMPETENT", "PROFICIENT", "MASTER"]
+    )
+    questions_per_level: int = Field(default=3, ge=1, le=20)
+    custom_distribution: list[BlueprintSkillCell] | None = None
+    auto_generate_missing: bool = True
+    document_ids: list[uuid.UUID] = Field(default_factory=list)
+    shuffle_questions: bool = True
+    shuffle_options: bool = True
+    show_solutions_after_submission: bool = True
+
+    @field_validator("title")
+    @classmethod
+    def clean_title(cls, v: str) -> str:
+        s = v.strip()
+        if not s:
+            raise ValueError("Quiz title must not be empty.")
+        return s
+
+    @model_validator(mode="after")
+    def validate_window(self) -> QuizGenerateBlueprintRequest:
+        if (
+            self.opens_at is not None
+            and self.closes_at is not None
+            and _as_utc(self.opens_at) >= _as_utc(self.closes_at)
+        ):
+            raise ValueError("opens_at must be earlier than closes_at.")
+        return self
+
+
+class BlueprintCellAvailability(BaseModel):
+    skill_id: uuid.UUID
+    skill_code: str
+    skill_name: str
+    difficulty: BloomLevel
+    available_in_bank: int
+
+
+class BlueprintAvailabilityResponse(BaseModel):
+    class_id: uuid.UUID
+    cells: list[BlueprintCellAvailability]
+    total_bank_questions: int
