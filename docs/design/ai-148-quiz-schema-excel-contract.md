@@ -4,7 +4,11 @@
 > **Assignee:** Le Van An (`levanannt79@gmail.com`)  
 > **Status:** Implemented / Ready for Review  
 > **Target Branch:** `features/Implementation_QuizSchemaExcelContract`  
-> **Related Stories:** AI-149 (generate quiz from documents), AI-150 (validate generated questions), AI-151 (teacher review & export to Excel), AI-152 (import quiz from teacher Excel), AI-153 (student quiz-taking), AI-154 (auto-grade quiz).
+> **Related Stories:** AI-149 (generate quiz from documents), AI-150 (validate generated questions), AI-151 (teacher review & export to Excel), AI-152 (import quiz from teacher Excel), AI-153 (student quiz-taking), AI-154 (auto-grade quiz), AI-159 (skill taxonomy & 5-level rubrics), AI-160 (question bank).
+
+> [!NOTE]
+> **Evolution Note (AI-159 & 0041_skill_taxonomy):**
+> In subsequent development, the question difficulty taxonomy has been extended from the 3-level Bloom model (`REMEMBER`, `UNDERSTAND`, `APPLY`) to the **5-level Dreyfus Skill Taxonomy** (`NOVICE`, `BEGINNER`, `COMPETENT`, `PROFICIENT`, `MASTER`). Furthermore, `quiz_question` now supports an optional `skill_id` foreign key referencing class-scoped competencies in the `skill` table. See [`ai-159-skill-taxonomy-rubrics.md`](./ai-159-skill-taxonomy-rubrics.md) for full details.
 
 ---
 
