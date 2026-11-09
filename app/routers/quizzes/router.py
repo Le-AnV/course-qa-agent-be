@@ -390,6 +390,13 @@ def regenerate_quiz_question(
         )
     except quiz_generation_service.QuizGenerationUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except quiz_generation_service.QuizGenerationValidationError as exc:
+        detail = str(exc)
+        if exc.issues:
+            detail = detail + " " + "; ".join(
+                f"{issue.code}: {issue.message}" for issue in exc.issues
+            )
+        raise HTTPException(status_code=502, detail=detail) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=502,
@@ -399,7 +406,16 @@ def regenerate_quiz_question(
             ),
         ) from exc
     try:
-        review.replace_question(db, quiz, question, generated)
+        review.replace_question(
+            db,
+            quiz,
+            question,
+            generated.question,
+            metadata=review.QuestionValidationMetadata(
+                confidence=generated.confidence,
+                validation_flags=generated.validation_flags,
+            ),
+        )
     except QuizStateError as exc:
         raise _state_error(exc) from exc
     return _teacher_read(db, quiz)

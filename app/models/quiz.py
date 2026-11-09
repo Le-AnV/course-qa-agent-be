@@ -160,6 +160,8 @@ class QuizQuestion(Base):
     rubric: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
     grading_config: Mapped[dict | None] = mapped_column(JSON_TYPE, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    validation_flags: Mapped[list[str] | None] = mapped_column(JSON_TYPE, nullable=True)
 
     quiz: Mapped[Quiz] = relationship(back_populates="questions")
     skill: Mapped["Skill"] = relationship("Skill", back_populates="questions")

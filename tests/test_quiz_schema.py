@@ -399,3 +399,35 @@ def test_alembic_quiz_migration_upgrade_and_downgrade(tmp_path):
     command.downgrade(cfg, "-1")
     command.upgrade(cfg, "0034_ticket_escalation")
 
+
+def test_alembic_quiz_validation_columns_upgrade_and_downgrade(tmp_path):
+    from alembic.config import Config
+    from sqlalchemy import create_engine, inspect, text
+
+    from alembic import command
+
+    test_db = tmp_path / "validation_migration_test.db"
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{test_db}")
+
+    engine = create_engine(f"sqlite:///{test_db}")
+    with engine.begin() as conn:
+        conn.execute(text('CREATE TABLE "quiz_question" (id CHAR(32) PRIMARY KEY)'))
+    engine.dispose()
+
+    command.stamp(cfg, "0045_quiz_show_solutions")
+    command.upgrade(cfg, "0040_quiz_validation")
+
+    engine = create_engine(f"sqlite:///{test_db}")
+    columns = {column["name"] for column in inspect(engine).get_columns("quiz_question")}
+    engine.dispose()
+    assert {"confidence", "validation_flags"} <= columns
+
+    command.downgrade(cfg, "0045_quiz_show_solutions")
+
+    engine = create_engine(f"sqlite:///{test_db}")
+    columns = {column["name"] for column in inspect(engine).get_columns("quiz_question")}
+    engine.dispose()
+    assert "confidence" not in columns
+    assert "validation_flags" not in columns
+

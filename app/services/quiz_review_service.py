@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
@@ -14,6 +16,14 @@ from app.services.quiz_excel import FILL_IN_BLANK_ANSWERS_KEY
 
 EDITABLE_STATUS = "DRAFT"
 APPROVED_STATUS = "PUBLISHED"
+
+
+@dataclass(frozen=True)
+class QuestionValidationMetadata:
+    """Server-owned validation metadata; never populated from authoring payloads."""
+
+    confidence: float | None = None
+    validation_flags: Sequence[str] = ()
 
 
 class QuizStateError(ValueError):
@@ -41,9 +51,16 @@ def _require_draft(quiz: Quiz) -> None:
 
 
 def _apply_question_payload(
-    db: Session, question: QuizQuestion, data: QuizQuestionCreate
+    db: Session,
+    question: QuizQuestion,
+    data: QuizQuestionCreate,
+    metadata: QuestionValidationMetadata | None = None,
 ) -> None:
     """Copy a validated payload onto an existing question, replacing its options.
+
+    ``metadata`` is only passed by trusted server-side regeneration. Manual
+    authoring leaves it as ``None``, so callers cannot forge or clear the
+    validation flags through a create/edit request.
 
     Old options are deleted and flushed first: ``uq_quiz_question_option_label``
     would otherwise collide while the replacement rows are inserted.
@@ -55,6 +72,9 @@ def _apply_question_payload(
     question.explanation = data.explanation
     question.rubric = data.rubric
     question.source_reference = data.source_reference
+    if metadata is not None:
+        question.confidence = metadata.confidence
+        question.validation_flags = list(metadata.validation_flags) or None
 
     grading_config = dict(data.grading_config or {})
     if data.question_type == "FILL_IN_BLANK":
@@ -143,10 +163,15 @@ def add_question(db: Session, quiz: Quiz, data: QuizQuestionCreate) -> Quiz:
 
 
 def replace_question(
-    db: Session, quiz: Quiz, question: QuizQuestion, data: QuizQuestionCreate
+    db: Session,
+    quiz: Quiz,
+    question: QuizQuestion,
+    data: QuizQuestionCreate,
+    *,
+    metadata: QuestionValidationMetadata | None = None,
 ) -> Quiz:
     _require_draft(quiz)
-    _apply_question_payload(db, question, data)
+    _apply_question_payload(db, question, data, metadata)
     db.commit()
     db.refresh(quiz)
     return quiz
