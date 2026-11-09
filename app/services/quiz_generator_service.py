@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 import random
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
@@ -32,6 +34,13 @@ from app.schemas.quiz import (
     SkillMasteryRadarItem,
 )
 from app.services import question_bank_service, quiz_generation_service
+from app.services.quiz_excel import FILL_IN_BLANK_ANSWERS_KEY
+from app.services.quiz_validation import (
+    MAX_REGENERATION_ATTEMPTS,
+    GeneratedQuestion,
+    ValidationSpec,
+    validate_batch,
+)
 from app.services.skill_taxonomy_service import evaluate_skill_taxonomy
 
 logger = logging.getLogger(__name__)
@@ -94,16 +103,273 @@ def get_blueprint_availability(db: Session, class_id: uuid.UUID) -> BlueprintAva
     )
 
 
+@dataclass
+class _ValidatedQuestion:
+    """A validated question payload bound to the blueprint cell it fills."""
+
+    payload: QuizQuestionCreate
+    skill_id: uuid.UUID
+    difficulty: str
+    confidence: float | None = None
+    flags: list[str] = field(default_factory=list)
+
+
+def _bank_question_payload(bank_question: Any) -> dict[str, Any]:
+    """Build a validator payload for a bank/generated row, relabelling options A-F."""
+
+    question_type = str(
+        getattr(bank_question, "question_type", "") or "SINGLE_CHOICE"
+    ).upper()
+    labels = ["A", "B", "C", "D", "E", "F"]
+    options: list[dict[str, Any]] = []
+    if question_type in ("SINGLE_CHOICE", "MULTIPLE_CHOICE"):
+        for index, option in enumerate(list(getattr(bank_question, "options", None) or [])):
+            label = labels[index] if index < len(labels) else f"Opt{index + 1}"
+            options.append(
+                {
+                    "option_label": label,
+                    "option_text": getattr(option, "option_text", ""),
+                    "is_correct": bool(getattr(option, "is_correct", False)),
+                }
+            )
+
+    grading_config = getattr(bank_question, "grading_config", None)
+    correct_answers: list[str] = []
+    if question_type == "FILL_IN_BLANK" and isinstance(grading_config, dict):
+        raw_answers = grading_config.get(FILL_IN_BLANK_ANSWERS_KEY)
+        if isinstance(raw_answers, list):
+            correct_answers = [str(answer) for answer in raw_answers]
+        elif isinstance(raw_answers, str):
+            correct_answers = [raw_answers]
+
+    points = getattr(bank_question, "points", None)
+    if not isinstance(points, (int, float)) or points <= 0:
+        points = 1.0
+
+    return {
+        "question_type": question_type,
+        "question": getattr(bank_question, "question", "") or "",
+        "points": points,
+        "difficulty": str(getattr(bank_question, "difficulty", "") or "NOVICE").upper(),
+        "explanation": getattr(bank_question, "explanation", None),
+        "rubric": getattr(bank_question, "rubric", None),
+        "source_reference": getattr(bank_question, "source_reference", None),
+        "grading_config": grading_config,
+        "options": options,
+        "correct_answers": correct_answers,
+    }
+
+
+def _candidate_from_bank(bank_question: Any) -> tuple[GeneratedQuestion, list[str]]:
+    """Wrap a bank/generated row as a validator candidate plus its source flags."""
+
+    source_flags = getattr(bank_question, "validation_flags", None) or []
+    return (
+        GeneratedQuestion(
+            data=_bank_question_payload(bank_question),
+            confidence=getattr(bank_question, "confidence", None),
+        ),
+        [str(flag) for flag in source_flags],
+    )
+
+
+def _matches_cell(bank_question: Any, *, class_id: uuid.UUID, cell: BlueprintSkillCell) -> bool:
+    """Return whether a generated row belongs to the requested blueprint cell."""
+
+    if getattr(bank_question, "class_id", None) != class_id:
+        return False
+    if getattr(bank_question, "skill_id", None) != cell.skill_id:
+        return False
+    difficulty = str(getattr(bank_question, "difficulty", "") or "").upper()
+    return difficulty == str(cell.difficulty).upper()
+
+
+def _collect_cell_questions(
+    db: Session,
+    *,
+    class_id: uuid.UUID,
+    cell: BlueprintSkillCell,
+    available: Sequence[BankQuestion],
+    accepted: Sequence[_ValidatedQuestion],
+    req: QuizGenerateBlueprintRequest,
+    user_id: uuid.UUID,
+) -> list[_ValidatedQuestion]:
+    """Validate the bank pool for one cell and refill missing slots with bounded generation."""
+
+    needed = cell.count
+    difficulty = str(cell.difficulty).upper()
+    cell_questions: list[_ValidatedQuestion] = []
+
+    def validate(candidates: list[tuple[GeneratedQuestion, list[str]]], remaining: int) -> None:
+        if not candidates:
+            return
+        spec = ValidationSpec(total_questions=remaining)
+        existing = [item.payload for item in accepted] + [
+            item.payload for item in cell_questions
+        ]
+        result = validate_batch(
+            [candidate for candidate, _ in candidates],
+            spec,
+            existing=existing,
+        )
+        for outcome, (_, source_flags) in zip(result.results, candidates, strict=True):
+            if not outcome.accepted or outcome.question is None:
+                continue
+            flags = list(dict.fromkeys([*source_flags, *outcome.flags]))
+            cell_questions.append(
+                _ValidatedQuestion(
+                    payload=outcome.question,
+                    skill_id=cell.skill_id,
+                    difficulty=difficulty,
+                    confidence=outcome.confidence,
+                    flags=flags,
+                )
+            )
+
+    validate([_candidate_from_bank(bank_question) for bank_question in available], needed)
+
+    attempts = 0
+    while (
+        req.auto_generate_missing
+        and len(cell_questions) < needed
+        and attempts < MAX_REGENERATION_ATTEMPTS
+    ):
+        attempts += 1
+        missing = needed - len(cell_questions)
+        logger.info(
+            "Cell (skill=%s, diff=%s) still lacks %d valid questions; generation attempt %d/%d.",
+            cell.skill_id,
+            difficulty,
+            missing,
+            attempts,
+            MAX_REGENERATION_ATTEMPTS,
+        )
+        try:
+            generated = question_bank_service.generate_questions_from_documents(
+                db=db,
+                class_id=class_id,
+                req=DocumentQuestionGenRequest(
+                    document_ids=[str(document_id) for document_id in req.document_ids],
+                    skill_ids=[str(cell.skill_id)],
+                    question_types=["SINGLE_CHOICE"],
+                    difficulty_levels=[cell.difficulty],
+                    questions_per_level={difficulty: missing},
+                    num_questions=missing,
+                ),
+                user_id=user_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - generator boundary
+            logger.warning("On-demand fallback generation failed: %s", exc)
+            continue
+
+        candidates = [
+            _candidate_from_bank(bank_question)
+            for bank_question in (generated or [])
+            if _matches_cell(bank_question, class_id=class_id, cell=cell)
+        ]
+        validate(candidates, missing)
+
+    if len(cell_questions) < needed:
+        raise ValueError(
+            f"Insufficient valid questions for skill {cell.skill_id} at {difficulty}: "
+            f"required {needed}, validated {len(cell_questions)}."
+        )
+    return cell_questions
+
+
+def _persist_blueprint_quiz(
+    db: Session,
+    *,
+    class_id: uuid.UUID,
+    req: QuizGenerateBlueprintRequest,
+    user_id: uuid.UUID,
+    questions: Sequence[_ValidatedQuestion],
+) -> Quiz:
+    """Create the quiz and its questions only after every cell passed validation."""
+
+    labels = ["A", "B", "C", "D", "E", "F"]
+    quiz = Quiz(
+        class_id=class_id,
+        creator_id=user_id,
+        title=req.title,
+        description=req.description,
+        time_limit_minutes=req.time_limit_minutes,
+        passing_score=req.passing_score,
+        opens_at=req.opens_at,
+        closes_at=req.closes_at,
+        max_attempts=req.max_attempts,
+        show_solutions_after_submission=req.show_solutions_after_submission,
+        status="DRAFT",
+    )
+
+    try:
+        db.add(quiz)
+        db.flush()
+
+        for index, draft in enumerate(questions):
+            payload = draft.payload
+            question = QuizQuestion(
+                quiz_id=quiz.id,
+                skill_id=draft.skill_id,
+                question_type=payload.question_type,
+                question=payload.question,
+                points=payload.points,
+                difficulty=draft.difficulty,
+                order_index=index,
+                explanation=payload.explanation,
+                rubric=payload.rubric,
+                source_reference=payload.source_reference,
+                grading_config=dict(payload.grading_config) if payload.grading_config else None,
+                confidence=draft.confidence,
+                validation_flags=list(draft.flags) or None,
+            )
+            db.add(question)
+            db.flush()
+
+            options = list(payload.options)
+            if req.shuffle_options and payload.question_type in (
+                "SINGLE_CHOICE",
+                "MULTIPLE_CHOICE",
+            ):
+                random.shuffle(options)
+
+            for option_index, option in enumerate(options):
+                label = (
+                    labels[option_index]
+                    if option_index < len(labels)
+                    else f"Opt{option_index + 1}"
+                )
+                db.add(
+                    QuizOption(
+                        question_id=question.id,
+                        option_label=label,
+                        option_text=option.option_text,
+                        is_correct=option.is_correct,
+                        order_index=option_index,
+                    )
+                )
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    db.refresh(quiz)
+    return quiz
+
+
 def generate_quiz_from_blueprint(
     db: Session,
     class_id: uuid.UUID,
     req: QuizGenerateBlueprintRequest,
     user_id: uuid.UUID,
 ) -> Quiz:
-    """Sample questions from Question Bank using a standardized blueprint matrix.
+    """Sample and validate questions from the Question Bank using a blueprint matrix.
 
-    Triggers on-demand document generation if Bank items for any cell are insufficient
-    and auto_generate_missing is enabled.
+    Every candidate passes the shared AI-150 validator before the quiz is created:
+    malformed bank rows, duplicate option text and exact/near duplicate questions
+    (also across blueprint cells) never reach the draft. Missing slots are refilled
+    from the same cell with bounded AI-149 document generation when enabled.
     """
     clazz = db.scalar(select(Class).where(Class.id == class_id))
     if not clazz:
@@ -127,70 +393,33 @@ def generate_quiz_from_blueprint(
     if not cells_to_sample:
         raise ValueError("No blueprint cells specified for quiz generation.")
 
-    chosen_questions: list[BankQuestion] = []
-    chosen_ids: set[uuid.UUID] = set()
+    chosen_questions: list[_ValidatedQuestion] = []
 
-    # 2. Sample or auto-generate questions for each cell
+    # 2. Validate each cell's bank pool and fill shortfalls from the same cell
     for cell in cells_to_sample:
-        needed = cell.count
-        diff_str = str(cell.difficulty).upper()
-
-        # Query available questions from Bank
+        difficulty = str(cell.difficulty).upper()
         bank_query = (
             select(BankQuestion)
             .options(selectinload(BankQuestion.options))
             .where(
                 BankQuestion.class_id == class_id,
                 BankQuestion.skill_id == cell.skill_id,
-                func.upper(BankQuestion.difficulty) == diff_str,
+                func.upper(BankQuestion.difficulty) == difficulty,
             )
         )
-        available = [q for q in db.scalars(bank_query).all() if q.id not in chosen_ids]
+        available = list(db.scalars(bank_query).all())
         random.shuffle(available)
-
-        picked = available[:needed]
-        for q in picked:
-            chosen_questions.append(q)
-            chosen_ids.add(q.id)
-
-        missing = needed - len(picked)
-        if missing > 0:
-            if req.auto_generate_missing:
-                logger.info(
-                    "Cell (skill=%s, diff=%s) lacks %d questions; triggering on-demand generation.",
-                    cell.skill_id,
-                    diff_str,
-                    missing,
-                )
-                try:
-                    generated = question_bank_service.generate_questions_from_documents(
-                        db=db,
-                        class_id=class_id,
-                        req=DocumentQuestionGenRequest(
-                            document_ids=[str(d) for d in req.document_ids],
-                            skill_ids=[str(cell.skill_id)],
-                            question_types=["SINGLE_CHOICE"],
-                            difficulty_levels=[cell.difficulty],
-                            questions_per_level={diff_str: missing},
-                            num_questions=missing,
-                        ),
-                        user_id=user_id,
-                    )
-                    for gq in generated:
-                        chosen_questions.append(gq)
-                        chosen_ids.add(gq.id)
-                except Exception as exc:
-                    logger.warning("On-demand fallback generation failed: %s", exc)
-                    # If generator failed, keep what we have or raise if no questions picked
-                    if not picked:
-                        raise ValueError(
-                            f"Could not sample or generate questions for skill {cell.skill_id} at {diff_str}."
-                        ) from exc
-            else:
-                raise ValueError(
-                    f"Insufficient questions in Question Bank for skill {cell.skill_id} at {diff_str} "
-                    f"(required {needed}, available {len(picked)})."
-                )
+        chosen_questions.extend(
+            _collect_cell_questions(
+                db,
+                class_id=class_id,
+                cell=cell,
+                available=available,
+                accepted=chosen_questions,
+                req=req,
+                user_id=user_id,
+            )
+        )
 
     if not chosen_questions:
         raise ValueError("Could not assemble any questions for the requested blueprint.")
@@ -199,60 +428,14 @@ def generate_quiz_from_blueprint(
     if req.shuffle_questions:
         random.shuffle(chosen_questions)
 
-    # 4. Create Quiz entity
-    quiz = Quiz(
+    # 4. Create the quiz only after validation has accepted every requested slot
+    return _persist_blueprint_quiz(
+        db,
         class_id=class_id,
-        creator_id=user_id,
-        title=req.title,
-        description=req.description,
-        time_limit_minutes=req.time_limit_minutes,
-        passing_score=req.passing_score,
-        opens_at=req.opens_at,
-        closes_at=req.closes_at,
-        max_attempts=req.max_attempts,
-        show_solutions_after_submission=req.show_solutions_after_submission,
-        status="DRAFT",
+        req=req,
+        user_id=user_id,
+        questions=chosen_questions,
     )
-    db.add(quiz)
-    db.flush()
-
-    # 5. Populate QuizQuestion and QuizOption records
-    labels = ["A", "B", "C", "D", "E", "F"]
-    for idx, bq in enumerate(chosen_questions):
-        qq = QuizQuestion(
-            quiz_id=quiz.id,
-            skill_id=bq.skill_id,
-            question_type=bq.question_type or "SINGLE_CHOICE",
-            question=bq.question,
-            points=bq.points if bq.points > 0 else 1.0,
-            difficulty=bq.difficulty or "NOVICE",
-            order_index=idx,
-            explanation=bq.explanation,
-            rubric=bq.rubric,
-            source_reference=bq.source_reference,
-            grading_config=bq.grading_config,
-        )
-        db.add(qq)
-        db.flush()
-
-        raw_options = list(bq.options or [])
-        if req.shuffle_options and bq.question_type in ("SINGLE_CHOICE", "MULTIPLE_CHOICE"):
-            random.shuffle(raw_options)
-
-        for opt_idx, opt in enumerate(raw_options):
-            label = labels[opt_idx] if opt_idx < len(labels) else f"Opt{opt_idx + 1}"
-            qo = QuizOption(
-                question_id=qq.id,
-                option_label=label,
-                option_text=opt.option_text,
-                is_correct=opt.is_correct,
-                order_index=opt_idx,
-            )
-            db.add(qo)
-
-    db.commit()
-    db.refresh(quiz)
-    return quiz
 
 
 def swap_or_regenerate_question(

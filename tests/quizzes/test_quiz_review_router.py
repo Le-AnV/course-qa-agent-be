@@ -25,6 +25,7 @@ from app.models.user import Role, User
 from app.schemas.quiz import QuizQuestionCreate
 from app.services import quiz_generation_service
 from app.services.quiz_excel import generate_quiz_template_workbook, validate_and_parse_quiz_excel
+from app.services.quiz_validation import GeneratedQuestion
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -583,3 +584,342 @@ def test_delete_approved_quiz_is_rejected(client: TestClient, db_session: Sessio
     )
 
     assert response.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# AI-150: bounded regeneration and validation
+# ---------------------------------------------------------------------------
+
+
+def test_regenerate_retries_invalid_output_before_success(
+    client: TestClient, db_session: Session
+) -> None:
+    imported = _import_quiz(client, db_session)
+    target = imported["questions"][0]
+    calls = 0
+
+    def _stub(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("first attempt invalid")
+        return QuizQuestionCreate(**_sample_question(question="Second attempt accepted"))
+
+    quiz_generation_service.set_regenerator(_stub)
+
+    response = client.post(
+        _quiz_url(db_session, imported["id"], f"/questions/{target['id']}/regenerate"),
+        headers=_headers(db_session.info["trainer_id"]),
+        json={},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "DRAFT"
+    replaced = next(q for q in body["questions"] if q["id"] == target["id"])
+    assert replaced["question"] == "Second attempt accepted"
+    assert calls == 2
+
+
+def test_regenerate_exhausts_attempts_and_preserves_original(
+    client: TestClient, db_session: Session
+) -> None:
+    imported = _import_quiz(client, db_session)
+    target = imported["questions"][0]
+    calls = 0
+
+    def _stub(**kwargs):
+        nonlocal calls
+        calls += 1
+        raise ValueError("always invalid")
+
+    quiz_generation_service.set_regenerator(_stub)
+
+    response = client.post(
+        _quiz_url(db_session, imported["id"], f"/questions/{target['id']}/regenerate"),
+        headers=_headers(db_session.info["trainer_id"]),
+        json={},
+    )
+
+    assert response.status_code == 502
+    assert calls == quiz_generation_service.MAX_REGENERATION_ATTEMPTS
+    refreshed = client.get(
+        _quiz_url(db_session, imported["id"]),
+        headers=_headers(db_session.info["trainer_id"]),
+    ).json()
+    kept = next(q for q in refreshed["questions"] if q["id"] == target["id"])
+    assert kept["question"] == target["question"]
+
+
+def test_regenerate_passes_previous_failure_reason_to_next_attempt(
+    client: TestClient, db_session: Session
+) -> None:
+    imported = _import_quiz(client, db_session)
+    target = imported["questions"][0]
+    instructions_seen: list[str | None] = []
+
+    def _stub(**kwargs):
+        instructions_seen.append(kwargs["instructions"])
+        if len(instructions_seen) == 1:
+            raise ValueError("first attempt invalid")
+        return QuizQuestionCreate(**_sample_question(question="Accepted after feedback"))
+
+    quiz_generation_service.set_regenerator(_stub)
+
+    response = client.post(
+        _quiz_url(db_session, imported["id"], f"/questions/{target['id']}/regenerate"),
+        headers=_headers(db_session.info["trainer_id"]),
+        json={"instructions": "Make it harder"},
+    )
+
+    assert response.status_code == 200
+    assert len(instructions_seen) == 2
+    assert instructions_seen[0] == "Make it harder"
+    assert "first attempt invalid" in (instructions_seen[1] or "")
+
+
+def test_regenerate_rejects_duplicate_and_preserves_original(
+    client: TestClient, db_session: Session
+) -> None:
+    imported = _import_quiz(client, db_session)
+    target = imported["questions"][0]
+    sibling = imported["questions"][1]
+
+    def _stub(**kwargs):
+        return QuizQuestionCreate(
+            **_sample_question(question=sibling["question"])
+        )
+
+    quiz_generation_service.set_regenerator(_stub)
+
+    response = client.post(
+        _quiz_url(db_session, imported["id"], f"/questions/{target['id']}/regenerate"),
+        headers=_headers(db_session.info["trainer_id"]),
+        json={},
+    )
+
+    assert response.status_code == 502
+    refreshed = client.get(
+        _quiz_url(db_session, imported["id"]),
+        headers=_headers(db_session.info["trainer_id"]),
+    ).json()
+    kept = next(q for q in refreshed["questions"] if q["id"] == target["id"])
+    assert kept["question"] == target["question"]
+
+
+def test_regenerate_timeout_is_bounded_and_preserves_original(
+    client: TestClient, db_session: Session
+) -> None:
+    imported = _import_quiz(client, db_session)
+    target = imported["questions"][0]
+    calls = 0
+
+    def _stub(**kwargs):
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("generator timed out")
+
+    quiz_generation_service.set_regenerator(_stub)
+
+    response = client.post(
+        _quiz_url(db_session, imported["id"], f"/questions/{target['id']}/regenerate"),
+        headers=_headers(db_session.info["trainer_id"]),
+        json={},
+    )
+
+    assert response.status_code == 502
+    assert calls == quiz_generation_service.MAX_REGENERATION_ATTEMPTS
+    refreshed = client.get(
+        _quiz_url(db_session, imported["id"]),
+        headers=_headers(db_session.info["trainer_id"]),
+    ).json()
+    kept = next(q for q in refreshed["questions"] if q["id"] == target["id"])
+    assert kept["question"] == target["question"]
+
+
+def test_regenerate_malformed_payload_is_rejected_and_preserves_original(
+    client: TestClient, db_session: Session
+) -> None:
+    imported = _import_quiz(client, db_session)
+    target = imported["questions"][0]
+    calls = 0
+
+    def _stub(**kwargs):
+        nonlocal calls
+        calls += 1
+        return {"question": "partial payload"}  # type: ignore[return-value]
+
+    quiz_generation_service.set_regenerator(_stub)
+
+    response = client.post(
+        _quiz_url(db_session, imported["id"], f"/questions/{target['id']}/regenerate"),
+        headers=_headers(db_session.info["trainer_id"]),
+        json={},
+    )
+
+    assert response.status_code == 502
+    assert calls == quiz_generation_service.MAX_REGENERATION_ATTEMPTS
+    refreshed = client.get(
+        _quiz_url(db_session, imported["id"]),
+        headers=_headers(db_session.info["trainer_id"]),
+    ).json()
+    kept = next(q for q in refreshed["questions"] if q["id"] == target["id"])
+    assert kept["question"] == target["question"]
+
+
+def test_regenerate_persists_low_confidence_flag(
+    client: TestClient, db_session: Session
+) -> None:
+    imported = _import_quiz(client, db_session)
+    target = imported["questions"][0]
+
+    def _stub(**kwargs):
+        return GeneratedQuestion(
+            data=QuizQuestionCreate(
+                **_sample_question(question="Low confidence but valid")
+            ),
+            confidence=0.4,
+        )
+
+    quiz_generation_service.set_regenerator(_stub)
+
+    response = client.post(
+        _quiz_url(db_session, imported["id"], f"/questions/{target['id']}/regenerate"),
+        headers=_headers(db_session.info["trainer_id"]),
+        json={},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    replaced = next(q for q in body["questions"] if q["id"] == target["id"])
+    assert replaced["confidence"] == 0.4
+    assert replaced["validation_flags"] == ["LOW_CONFIDENCE"]
+
+
+@pytest.mark.parametrize("confidence", [True, "0.4", float("nan")])
+def test_regenerate_malformed_confidence_is_not_persisted(
+    client: TestClient, db_session: Session, confidence: object
+) -> None:
+    imported = _import_quiz(client, db_session)
+    target = imported["questions"][0]
+
+    def _stub(**kwargs):
+        return GeneratedQuestion(
+            data=QuizQuestionCreate(
+                **_sample_question(question="Malformed confidence replacement")
+            ),
+            confidence=confidence,
+        )
+
+    quiz_generation_service.set_regenerator(_stub)
+
+    response = client.post(
+        _quiz_url(db_session, imported["id"], f"/questions/{target['id']}/regenerate"),
+        headers=_headers(db_session.info["trainer_id"]),
+        json={},
+    )
+
+    assert response.status_code == 200
+    replaced = next(
+        q for q in response.json()["questions"] if q["id"] == target["id"]
+    )
+    assert replaced["confidence"] is None
+    assert replaced["validation_flags"] == []
+
+
+def test_regenerate_persists_fill_in_blank_answers_in_grading_config(
+    client: TestClient, db_session: Session
+) -> None:
+    imported = _import_quiz(client, db_session)
+    target = next(
+        question
+        for question in imported["questions"]
+        if question["question_type"] == "FILL_IN_BLANK"
+    )
+
+    def _stub(**kwargs):
+        return QuizQuestionCreate(
+            question_type="FILL_IN_BLANK",
+            question="Name the capital of France.",
+            points=target["points"],
+            difficulty=target["difficulty"],
+            correct_answers=["Paris", "City of Paris"],
+        )
+
+    quiz_generation_service.set_regenerator(_stub)
+
+    response = client.post(
+        _quiz_url(db_session, imported["id"], f"/questions/{target['id']}/regenerate"),
+        headers=_headers(db_session.info["trainer_id"]),
+        json={},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    replaced = next(q for q in body["questions"] if q["id"] == target["id"])
+    assert replaced["grading_config"]["correct_answers"] == ["Paris", "City of Paris"]
+
+
+def test_manual_add_ignores_forged_validation_metadata(
+    client: TestClient, db_session: Session
+) -> None:
+    imported = _import_quiz(client, db_session)
+    payload = {
+        **_sample_question(question="Forged metadata on add"),
+        "confidence": 0.99,
+        "validation_flags": ["LOW_CONFIDENCE"],
+    }
+
+    response = client.post(
+        _quiz_url(db_session, imported["id"], "/questions"),
+        headers=_headers(db_session.info["trainer_id"]),
+        json=payload,
+    )
+
+    assert response.status_code == 201
+    added = response.json()["questions"][-1]
+    assert added["question"] == "Forged metadata on add"
+    assert added["confidence"] is None
+    assert added["validation_flags"] == []
+
+
+def test_manual_edit_preserves_trusted_validation_metadata(
+    client: TestClient, db_session: Session
+) -> None:
+    imported = _import_quiz(client, db_session)
+    target = imported["questions"][0]
+
+    def _stub(**kwargs):
+        return GeneratedQuestion(
+            data=QuizQuestionCreate(
+                **_sample_question(question="Low confidence replacement")
+            ),
+            confidence=0.4,
+        )
+
+    quiz_generation_service.set_regenerator(_stub)
+    regenerated = client.post(
+        _quiz_url(db_session, imported["id"], f"/questions/{target['id']}/regenerate"),
+        headers=_headers(db_session.info["trainer_id"]),
+        json={},
+    )
+    assert regenerated.status_code == 200
+    assert next(
+        q for q in regenerated.json()["questions"] if q["id"] == target["id"]
+    )["validation_flags"] == ["LOW_CONFIDENCE"]
+
+    response = client.put(
+        _quiz_url(db_session, imported["id"], f"/questions/{target['id']}"),
+        headers=_headers(db_session.info["trainer_id"]),
+        json={
+            **_sample_question(question="Teacher-edited prompt"),
+            "confidence": 0.99,
+            "validation_flags": [],
+        },
+    )
+
+    assert response.status_code == 200
+    replaced = next(q for q in response.json()["questions"] if q["id"] == target["id"])
+    assert replaced["question"] == "Teacher-edited prompt"
+    assert replaced["confidence"] == 0.4
+    assert replaced["validation_flags"] == ["LOW_CONFIDENCE"]

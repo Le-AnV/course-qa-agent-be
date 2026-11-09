@@ -161,7 +161,14 @@ class QuizQuestionTeacherRead(QuizQuestionBase):
     id: uuid.UUID
     explanation: str | None = None
     grading_config: dict[str, Any] | None = None
+    confidence: float | None = None
+    validation_flags: list[str] = Field(default_factory=list)
     options: list[QuizOptionTeacherRead] = Field(default_factory=list)
+
+    @field_validator("validation_flags", mode="before")
+    @classmethod
+    def default_validation_flags(cls, value: Any) -> Any:
+        return value or []
 
 
 class QuizQuestionStudentExamRead(BaseModel):

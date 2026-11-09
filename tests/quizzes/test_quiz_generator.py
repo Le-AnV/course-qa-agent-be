@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Generator
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,10 +23,15 @@ from app.models.question_bank import BankQuestion, BankQuestionOption
 from app.models.quiz import Quiz, QuizAnswer, QuizAttempt, QuizQuestion
 from app.models.skill import Skill, SkillLevelRubric
 from app.models.user import Role, User
+from app.schemas.quiz import BlueprintSkillCell, QuizGenerateBlueprintRequest
+from app.services import question_bank_service
+from app.services.quiz_excel import FILL_IN_BLANK_ANSWERS_KEY
 from app.services.quiz_generator_service import (
     compute_skill_radar_report,
+    generate_quiz_from_blueprint,
     get_blueprint_availability,
 )
+from app.services.quiz_validation import MAX_REGENERATION_ATTEMPTS
 
 
 @pytest.fixture()
@@ -123,16 +129,35 @@ def seed_class_and_skills(db_session: Session):
             db_session.add(r)
     db_session.flush()
 
-    # Populate BankQuestions across multiple Dreyfus levels
+    # Populate BankQuestions across multiple Dreyfus levels. Each question is a
+    # genuinely different prompt: the AI-150 validator rejects near duplicates,
+    # so reusing one template with only the question number changed would make
+    # the fixture itself invalid.
+    question_templates = [
+        "Explain the central purpose of {code} ({name}) when planning a {level} project.",
+        "A team debates {code} ({name}) alternatives for a {level} system. Which trade-off matters most?",
+        "Describe one failure mode that {code} ({name}) is designed to prevent at {level}.",
+        "How would an engineer verify that a {code} ({name}) decision is sound at {level}?",
+        "During a code review, a junior engineer asks why {code} ({name}) matters for {level} work. What evidence should the reviewer request?",
+        "Which observable symptom suggests that a {code} ({name}) rule was ignored by a {level} developer?",
+        "Sketch an acceptance test that proves {code} ({name}) guidance was followed in a {level} deliverable.",
+        "What assumption about {code} ({name}) most often breaks when a {level} team scales a prototype?",
+        "Compare two competing {code} ({name}) strategies for a {level} rollout and state the decisive constraint.",
+        "A production incident traces back to {code} ({name}). For a {level} responder, what is the first diagnostic step?",
+        "Which metric would you instrument to confirm that {code} ({name}) practices hold at {level}?",
+        "Given conflicting stakeholder requests, how should a {level} lead defend a {code} ({name}) decision?",
+    ]
+    level_offsets = {"NOVICE": 0, "BEGINNER": 4, "COMPETENT": 8}
     for s in (skill_oop, skill_sql):
         for lvl in ("NOVICE", "BEGINNER", "COMPETENT"):
             for i in range(4):
+                template = question_templates[level_offsets[lvl] + i]
                 bq = BankQuestion(
                     id=uuid.uuid4(),
                     class_id=clazz.id,
                     skill_id=s.id,
                     question_type="SINGLE_CHOICE",
-                    question=f"{s.code} {lvl} question #{i + 1}: What is the core concept?",
+                    question=template.format(code=s.code, name=s.name, level=lvl),
                     points=1.0,
                     difficulty=lvl,
                     explanation="Standard concept explanation",
@@ -146,7 +171,7 @@ def seed_class_and_skills(db_session: Session):
                         id=uuid.uuid4(),
                         question_id=bq.id,
                         option_label=label,
-                        option_text=f"Option {label} for question {i + 1}",
+                        option_text=f"{s.code} {lvl} {i + 1} answer {label}",
                         is_correct=(opt_idx == 0),
                         order_index=opt_idx,
                     )
@@ -158,6 +183,578 @@ def seed_class_and_skills(db_session: Session):
         "class": clazz,
         "skill_oop": skill_oop,
         "skill_sql": skill_sql,
+    }
+
+
+@pytest.fixture()
+def blueprint_minimal(db_session: Session):
+    """A class with a teacher and one skill, but no Question Bank rows yet."""
+    trainer_role = db_session.query(Role).filter(Role.name == "TRAINER").first()
+    if not trainer_role:
+        trainer_role = Role(name="TRAINER")
+        db_session.add(trainer_role)
+        db_session.flush()
+
+    teacher = User(
+        full_name="Teacher Minimal",
+        email="teacher_minimal@example.com",
+        role_id=trainer_role.id,
+        status="ACTIVE",
+    )
+    db_session.add(teacher)
+    db_session.flush()
+
+    clazz = Class(
+        trainer_id=teacher.id,
+        name="Validated Blueprint Class",
+        code="VB101",
+        semester="HK1",
+        academic_year="2026-2027",
+        status="ACTIVE",
+    )
+    db_session.add(clazz)
+    db_session.flush()
+
+    skill = Skill(
+        id=uuid.uuid4(),
+        class_id=clazz.id,
+        code="VALIDATION",
+        name="Validation Engineering",
+        category="PROGRAMMING",
+    )
+    db_session.add(skill)
+    db_session.commit()
+    return {"teacher": teacher, "class": clazz, "skill": skill}
+
+
+def _add_skill(db: Session, clazz: Class, code: str, name: str) -> Skill:
+    skill = Skill(
+        id=uuid.uuid4(),
+        class_id=clazz.id,
+        code=code,
+        name=name,
+        category="PROGRAMMING",
+    )
+    db.add(skill)
+    db.commit()
+    return skill
+
+
+def _add_bank_question(
+    db: Session,
+    *,
+    clazz: Class,
+    skill: Skill,
+    question: str,
+    difficulty: str = "NOVICE",
+    question_type: str = "SINGLE_CHOICE",
+    option_texts: tuple[str, ...] = ("alpha", "beta", "gamma", "delta"),
+    correct_index: int = 0,
+    grading_config: dict | None = None,
+) -> BankQuestion:
+    bank_question = BankQuestion(
+        id=uuid.uuid4(),
+        class_id=clazz.id,
+        skill_id=skill.id,
+        question_type=question_type,
+        question=question,
+        points=1.0,
+        difficulty=difficulty,
+        grading_config=grading_config,
+    )
+    db.add(bank_question)
+    db.flush()
+    if question_type in ("SINGLE_CHOICE", "MULTIPLE_CHOICE"):
+        for index, text in enumerate(option_texts):
+            db.add(
+                BankQuestionOption(
+                    id=uuid.uuid4(),
+                    question_id=bank_question.id,
+                    option_label=chr(65 + index),
+                    option_text=text,
+                    is_correct=(index == correct_index),
+                    order_index=index,
+                )
+            )
+    db.flush()
+    return bank_question
+
+
+def _fake_option(texts: tuple[str, ...], correct_index: int = 0):
+    return [
+        SimpleNamespace(
+            option_label=chr(65 + index),
+            option_text=text,
+            is_correct=(index == correct_index),
+        )
+        for index, text in enumerate(texts)
+    ]
+
+
+def _fake_bank_question(
+    *,
+    class_id,
+    skill_id,
+    question: str,
+    difficulty: str = "NOVICE",
+    question_type: str = "SINGLE_CHOICE",
+    options=None,
+    confidence=None,
+    validation_flags=None,
+    grading_config=None,
+):
+    return SimpleNamespace(
+        class_id=class_id,
+        skill_id=skill_id,
+        question_type=question_type,
+        question=question,
+        points=1.0,
+        difficulty=difficulty,
+        explanation=None,
+        rubric=None,
+        source_reference=None,
+        grading_config=grading_config,
+        options=list(options or []),
+        confidence=confidence,
+        validation_flags=validation_flags,
+    )
+
+
+def _blueprint_request(
+    cells: list[BlueprintSkillCell],
+    *,
+    auto_generate_missing: bool = False,
+    title: str = "Validated Blueprint Quiz",
+    shuffle_questions: bool = False,
+    shuffle_options: bool = False,
+) -> QuizGenerateBlueprintRequest:
+    return QuizGenerateBlueprintRequest(
+        title=title,
+        target_skill_ids=[cells[0].skill_id],
+        target_levels=[cells[0].difficulty],
+        questions_per_level=1,
+        custom_distribution=cells,
+        auto_generate_missing=auto_generate_missing,
+        shuffle_questions=shuffle_questions,
+        shuffle_options=shuffle_options,
+    )
+
+
+class _GeneratorSpy:
+    """Record generator calls so auto_generate_missing=False can be proven offline."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        raise AssertionError("auto_generate_missing=False must not call the model generator")
+
+
+def test_blueprint_endpoint_rejects_invalid_bank_question(
+    client, db_session, blueprint_minimal, monkeypatch
+):
+    data = blueprint_minimal
+    clazz = data["class"]
+    teacher = data["teacher"]
+    skill = data["skill"]
+    spy = _GeneratorSpy()
+    monkeypatch.setattr(question_bank_service, "generate_questions_from_documents", spy)
+
+    _add_bank_question(
+        db_session,
+        clazz=clazz,
+        skill=skill,
+        question="Which statement about duplicated option text is correct?",
+        option_texts=("dup", "DUP", "gamma", "delta"),
+    )
+
+    token = create_access_token(str(teacher.id), "TRAINER")
+    res = client.post(
+        f"/api/classes/{clazz.id}/quizzes/generate-blueprint",
+        json={
+            "title": "Invalid Bank Quiz",
+            "target_skill_ids": [str(skill.id)],
+            "target_levels": ["NOVICE"],
+            "questions_per_level": 1,
+            "auto_generate_missing": False,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert res.status_code == 400
+    assert spy.calls == 0
+    assert db_session.query(Quiz).count() == 0
+    assert db_session.query(QuizQuestion).count() == 0
+
+
+def test_blueprint_skips_invalid_bank_question_and_uses_next_valid(
+    db_session, blueprint_minimal, monkeypatch
+):
+    data = blueprint_minimal
+    clazz = data["class"]
+    teacher = data["teacher"]
+    skill = data["skill"]
+    spy = _GeneratorSpy()
+    monkeypatch.setattr(question_bank_service, "generate_questions_from_documents", spy)
+
+    invalid_question = "Which statement about broken option payloads is correct?"
+    valid_question = "Which answer explains a sound validation strategy?"
+    _add_bank_question(
+        db_session,
+        clazz=clazz,
+        skill=skill,
+        question=invalid_question,
+        option_texts=("same", "SAME", "gamma", "delta"),
+    )
+    _add_bank_question(
+        db_session,
+        clazz=clazz,
+        skill=skill,
+        question=valid_question,
+    )
+    monkeypatch.setattr(
+        "app.services.quiz_generator_service.random.shuffle",
+        lambda items: items.sort(key=lambda item: item.question != invalid_question),
+    )
+
+    quiz = generate_quiz_from_blueprint(
+        db=db_session,
+        class_id=clazz.id,
+        req=_blueprint_request([BlueprintSkillCell(skill_id=skill.id, difficulty="NOVICE", count=1)]),
+        user_id=teacher.id,
+    )
+
+    questions = db_session.query(QuizQuestion).filter(QuizQuestion.quiz_id == quiz.id).all()
+    assert spy.calls == 0
+    assert len(questions) == 1
+    assert questions[0].question == valid_question
+
+
+def test_blueprint_rejects_duplicate_bank_questions_with_different_ids(
+    db_session, blueprint_minimal, monkeypatch
+):
+    data = blueprint_minimal
+    clazz = data["class"]
+    teacher = data["teacher"]
+    skill = data["skill"]
+    spy = _GeneratorSpy()
+    monkeypatch.setattr(question_bank_service, "generate_questions_from_documents", spy)
+
+    duplicate_text = "Which principle keeps duplicate bank rows out of a draft?"
+    _add_bank_question(db_session, clazz=clazz, skill=skill, question=duplicate_text)
+    _add_bank_question(db_session, clazz=clazz, skill=skill, question=duplicate_text)
+
+    with pytest.raises(ValueError):
+        generate_quiz_from_blueprint(
+            db=db_session,
+            class_id=clazz.id,
+            req=_blueprint_request(
+                [BlueprintSkillCell(skill_id=skill.id, difficulty="NOVICE", count=2)]
+            ),
+            user_id=teacher.id,
+        )
+
+    assert spy.calls == 0
+    assert db_session.query(Quiz).count() == 0
+    assert db_session.query(QuizQuestion).count() == 0
+
+
+def test_blueprint_blocks_cross_cell_duplicate(
+    db_session, blueprint_minimal, monkeypatch
+):
+    data = blueprint_minimal
+    clazz = data["class"]
+    teacher = data["teacher"]
+    skill_one = data["skill"]
+    skill_two = _add_skill(db_session, clazz, "SECONDARY", "Secondary Skill")
+    spy = _GeneratorSpy()
+    monkeypatch.setattr(question_bank_service, "generate_questions_from_documents", spy)
+
+    duplicate_text = "Which shared question must not appear in two blueprint cells?"
+    _add_bank_question(db_session, clazz=clazz, skill=skill_one, question=duplicate_text)
+    _add_bank_question(db_session, clazz=clazz, skill=skill_two, question=duplicate_text)
+
+    with pytest.raises(ValueError):
+        generate_quiz_from_blueprint(
+            db=db_session,
+            class_id=clazz.id,
+            req=_blueprint_request(
+                [
+                    BlueprintSkillCell(skill_id=skill_one.id, difficulty="NOVICE", count=1),
+                    BlueprintSkillCell(skill_id=skill_two.id, difficulty="NOVICE", count=1),
+                ]
+            ),
+            user_id=teacher.id,
+        )
+
+    assert spy.calls == 0
+    assert db_session.query(Quiz).count() == 0
+
+
+def test_blueprint_refills_cross_cell_duplicate_from_same_cell(
+    db_session, blueprint_minimal, monkeypatch
+):
+    data = blueprint_minimal
+    clazz = data["class"]
+    teacher = data["teacher"]
+    skill_one = data["skill"]
+    skill_two = _add_skill(db_session, clazz, "SECONDARY", "Secondary Skill")
+    spy = _GeneratorSpy()
+    monkeypatch.setattr(question_bank_service, "generate_questions_from_documents", spy)
+
+    duplicate_text = "Which shared question must be replaced inside its cell?"
+    replacement_text = "Which distinct question should refill the second cell?"
+    _add_bank_question(db_session, clazz=clazz, skill=skill_one, question=duplicate_text)
+    _add_bank_question(db_session, clazz=clazz, skill=skill_two, question=duplicate_text)
+    _add_bank_question(db_session, clazz=clazz, skill=skill_two, question=replacement_text)
+    monkeypatch.setattr(
+        "app.services.quiz_generator_service.random.shuffle",
+        lambda items: items.sort(key=lambda item: item.question != duplicate_text),
+    )
+
+    quiz = generate_quiz_from_blueprint(
+        db=db_session,
+        class_id=clazz.id,
+        req=_blueprint_request(
+            [
+                BlueprintSkillCell(skill_id=skill_one.id, difficulty="NOVICE", count=1),
+                BlueprintSkillCell(skill_id=skill_two.id, difficulty="NOVICE", count=1),
+            ]
+        ),
+        user_id=teacher.id,
+    )
+
+    questions = db_session.query(QuizQuestion).filter(QuizQuestion.quiz_id == quiz.id).all()
+    assert spy.calls == 0
+    assert len(questions) == 2
+    by_skill = {question.skill_id: question for question in questions}
+    assert by_skill[skill_one.id].question == duplicate_text
+    assert by_skill[skill_two.id].question == replacement_text
+
+
+def test_blueprint_generated_fallback_retries_bad_candidates(
+    db_session, blueprint_minimal, monkeypatch
+):
+    data = blueprint_minimal
+    clazz = data["class"]
+    teacher = data["teacher"]
+    skill = data["skill"]
+    other_skill = _add_skill(db_session, clazz, "OTHER", "Other Skill")
+
+    bank_question = _add_bank_question(
+        db_session,
+        clazz=clazz,
+        skill=skill,
+        question="Which bank question anchors the retry scenario?",
+    )
+    calls = {"count": 0}
+
+    def fake_generate(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return [
+                _fake_bank_question(
+                    class_id=clazz.id,
+                    skill_id=skill.id,
+                    question="Malformed generated payload with only one option?",
+                    options=_fake_option(("only",), correct_index=0),
+                ),
+                _fake_bank_question(
+                    class_id=clazz.id,
+                    skill_id=other_skill.id,
+                    question="Which generated question belongs to the wrong cell?",
+                    options=_fake_option(("wrong", "cell", "gamma", "delta")),
+                ),
+                _fake_bank_question(
+                    class_id=clazz.id,
+                    skill_id=skill.id,
+                    question=bank_question.question,
+                    options=_fake_option(("dup", "beta", "gamma", "delta")),
+                ),
+            ]
+        return [
+            _fake_bank_question(
+                class_id=clazz.id,
+                skill_id=skill.id,
+                question="Which generated replacement validates the first missing slot?",
+                options=_fake_option(("first", "beta", "gamma", "delta")),
+            ),
+            _fake_bank_question(
+                class_id=clazz.id,
+                skill_id=skill.id,
+                question="What evidence proves the second generated slot is distinct?",
+                options=_fake_option(("second", "beta", "gamma", "delta")),
+            ),
+        ]
+
+    monkeypatch.setattr(question_bank_service, "generate_questions_from_documents", fake_generate)
+
+    quiz = generate_quiz_from_blueprint(
+        db=db_session,
+        class_id=clazz.id,
+        req=_blueprint_request(
+            [BlueprintSkillCell(skill_id=skill.id, difficulty="NOVICE", count=3)],
+            auto_generate_missing=True,
+        ),
+        user_id=teacher.id,
+    )
+
+    questions = db_session.query(QuizQuestion).filter(QuizQuestion.quiz_id == quiz.id).all()
+    assert calls["count"] == 2
+    assert len(questions) == 3
+    assert {question.skill_id for question in questions} == {skill.id}
+    assert {question.difficulty for question in questions} == {"NOVICE"}
+    assert {question.question for question in questions} == {
+        bank_question.question,
+        "Which generated replacement validates the first missing slot?",
+        "What evidence proves the second generated slot is distinct?",
+    }
+
+
+def test_blueprint_exhausted_generation_leaves_no_partial_quiz(
+    db_session, blueprint_minimal, monkeypatch
+):
+    data = blueprint_minimal
+    clazz = data["class"]
+    teacher = data["teacher"]
+    skill = data["skill"]
+    calls = {"count": 0}
+
+    def fake_generate(*args, **kwargs):
+        calls["count"] += 1
+        return [
+            _fake_bank_question(
+                class_id=clazz.id,
+                skill_id=skill.id,
+                question="Malformed generated payload that must never be saved?",
+                options=_fake_option(("only",), correct_index=0),
+            )
+        ]
+
+    monkeypatch.setattr(question_bank_service, "generate_questions_from_documents", fake_generate)
+
+    with pytest.raises(ValueError):
+        generate_quiz_from_blueprint(
+            db=db_session,
+            class_id=clazz.id,
+            req=_blueprint_request(
+                [BlueprintSkillCell(skill_id=skill.id, difficulty="NOVICE", count=1)],
+                auto_generate_missing=True,
+            ),
+            user_id=teacher.id,
+        )
+
+    assert calls["count"] == MAX_REGENERATION_ATTEMPTS
+    assert db_session.query(Quiz).count() == 0
+    assert db_session.query(QuizQuestion).count() == 0
+
+
+def test_blueprint_keeps_low_confidence_generated_question_with_flag(
+    db_session, blueprint_minimal, monkeypatch
+):
+    data = blueprint_minimal
+    clazz = data["class"]
+    teacher = data["teacher"]
+    skill = data["skill"]
+
+    def fake_generate(*args, **kwargs):
+        return [
+            _fake_bank_question(
+                class_id=clazz.id,
+                skill_id=skill.id,
+                question="Which uncertain generated answer should still reach review?",
+                options=_fake_option(("uncertain", "beta", "gamma", "delta")),
+                confidence=0.4,
+            )
+        ]
+
+    monkeypatch.setattr(question_bank_service, "generate_questions_from_documents", fake_generate)
+
+    quiz = generate_quiz_from_blueprint(
+        db=db_session,
+        class_id=clazz.id,
+        req=_blueprint_request(
+            [BlueprintSkillCell(skill_id=skill.id, difficulty="NOVICE", count=1)],
+            auto_generate_missing=True,
+        ),
+        user_id=teacher.id,
+    )
+
+    question = db_session.query(QuizQuestion).filter(QuizQuestion.quiz_id == quiz.id).one()
+    assert question.confidence == 0.4
+    assert question.validation_flags == ["LOW_CONFIDENCE"]
+
+
+def test_blueprint_preserves_fill_in_blank_answers_and_skill_mapping(
+    db_session, blueprint_minimal, monkeypatch
+):
+    data = blueprint_minimal
+    clazz = data["class"]
+    teacher = data["teacher"]
+    skill = data["skill"]
+    spy = _GeneratorSpy()
+    monkeypatch.setattr(question_bank_service, "generate_questions_from_documents", spy)
+
+    _add_bank_question(
+        db_session,
+        clazz=clazz,
+        skill=skill,
+        question="The validated answer is ____.",
+        question_type="FILL_IN_BLANK",
+        grading_config={FILL_IN_BLANK_ANSWERS_KEY: ["42"]},
+    )
+
+    quiz = generate_quiz_from_blueprint(
+        db=db_session,
+        class_id=clazz.id,
+        req=_blueprint_request(
+            [BlueprintSkillCell(skill_id=skill.id, difficulty="NOVICE", count=1)]
+        ),
+        user_id=teacher.id,
+    )
+
+    question = db_session.query(QuizQuestion).filter(QuizQuestion.quiz_id == quiz.id).one()
+    assert spy.calls == 0
+    assert question.question_type == "FILL_IN_BLANK"
+    assert question.skill_id == skill.id
+    assert question.difficulty == "NOVICE"
+    assert question.grading_config[FILL_IN_BLANK_ANSWERS_KEY] == ["42"]
+
+
+def test_blueprint_happy_path_keeps_counts_and_cell_mapping(
+    db_session, seed_class_and_skills
+):
+    data = seed_class_and_skills
+    clazz = data["class"]
+    teacher = data["teacher"]
+    skill_oop = data["skill_oop"]
+    skill_sql = data["skill_sql"]
+
+    cells = [
+        BlueprintSkillCell(skill_id=skill_oop.id, difficulty="NOVICE", count=2),
+        BlueprintSkillCell(skill_id=skill_oop.id, difficulty="BEGINNER", count=2),
+        BlueprintSkillCell(skill_id=skill_sql.id, difficulty="NOVICE", count=2),
+        BlueprintSkillCell(skill_id=skill_sql.id, difficulty="BEGINNER", count=2),
+    ]
+    quiz = generate_quiz_from_blueprint(
+        db=db_session,
+        class_id=clazz.id,
+        req=_blueprint_request(cells, title="Mapped Blueprint Quiz"),
+        user_id=teacher.id,
+    )
+
+    questions = db_session.query(QuizQuestion).filter(QuizQuestion.quiz_id == quiz.id).all()
+    assert len(questions) == 8
+    counts: dict[tuple[uuid.UUID, str], int] = {}
+    for question in questions:
+        key = (question.skill_id, question.difficulty)
+        counts[key] = counts.get(key, 0) + 1
+    assert counts == {
+        (skill_oop.id, "NOVICE"): 2,
+        (skill_oop.id, "BEGINNER"): 2,
+        (skill_sql.id, "NOVICE"): 2,
+        (skill_sql.id, "BEGINNER"): 2,
     }
 
 

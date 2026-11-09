@@ -15,3 +15,9 @@ def test_revision_ids_fit_alembic_version_column() -> None:
         if len(revision.revision) > MAX_REVISION_ID_LENGTH
     }
     assert not too_long, f"Revision ids must be <= {MAX_REVISION_ID_LENGTH} chars: {too_long}"
+
+
+def test_revision_graph_has_single_head() -> None:
+    script = ScriptDirectory.from_config(Config("alembic.ini"))
+    heads = script.get_heads()
+    assert len(heads) == 1, f"Expected one Alembic head, found {sorted(heads)}"
